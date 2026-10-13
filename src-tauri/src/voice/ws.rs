@@ -189,15 +189,15 @@ async fn voice_session(
         }
     };
 
-    // Устройства: динамики + микрофон (cpal). Живут до конца сессии —
-    // дроп Stream останавливает вывод/ввод. В headless-сборке их нет.
+    // Устройства: динамики + микрофон (cpal). Guard держит живые Stream'ы
+    // в отдельном std-потоке (cpal::Stream не Send на части платформ) —
+    // ровно до конца сессии. В headless-сборке их нет вовсе.
     #[cfg(feature = "audio")]
-    let (_out_stream, _in_stream) = {
-        let d = devices::open(&mixer, &controls, &mic);
-        (d.output, d.input)
-    };
+    let _dev_guard = devices::open(&mixer, &controls, &mic);
+    #[cfg(feature = "audio")]
+    let mic_on = _dev_guard.has_input();
     #[cfg(not(feature = "audio"))]
-    let (_out_stream, _in_stream): (Option<()>, Option<()>) = (None, None);
+    let mic_on = false;
 
     // Отправитель: микрофон → opus → RTP → UDP (std-поток, см. sender.rs).
     let _sender = sender::spawn(
@@ -221,11 +221,7 @@ async fn voice_session(
 
     // ---- 8. SPEAKING (ssrc as string — известная странность протокола) ----
     // Если стартуем замьюченным/без микрофона — честно говорим, что не передаём.
-    let speak_now: i32 = if d_mute || d_deaf || !_in_stream.is_some() {
-        0
-    } else {
-        1
-    };
+    let speak_now: i32 = if d_mute || d_deaf || !mic_on { 0 } else { 1 };
     wsutil::send_json(
         &mut writer,
         &json!({ "op": 5, "d": { "speaking": speak_now, "delay": 0, "ssrc": ssrc.to_string() } }),

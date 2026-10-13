@@ -132,10 +132,6 @@ impl Mixer {
         self.channels.remove(&ssrc);
     }
 
-    pub fn active_channels(&self) -> usize {
-        self.channels.len()
-    }
-
     /// Суммирует все дорожки в `out` (интерлив стерео 48 кГц) и клампит [-1; 1].
     /// При `deafened` — тишина (собственный деафиен).
     pub fn mix_into(&mut self, out: &mut [f32], deafened: bool) {

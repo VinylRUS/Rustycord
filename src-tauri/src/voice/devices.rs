@@ -18,23 +18,69 @@ use crate::voice::jitter::Mixer;
 use crate::voice::resample::LinearResampler;
 use crate::voice::VoiceControls;
 
-/// Пара живых потоков устройства. `Stream` живёт, пока жива структура —
-/// хранится в голосовой сессии; дроп = остановка вывода/ввода.
-pub struct Devices {
-    pub output: Option<Stream>,
-    pub input: Option<Stream>,
+/// Держатель живых потоков устройств.
+///
+/// `cpal::Stream` на ряде платформ не `Send` (внутри — сырые указатели
+/// бэкенда), поэтому их нельзя держать в асинхронной сессии. Guard паркует
+/// Stream'ы в выделенном std-потоке, который блокируется на `recv()`:
+/// когда Guard дропается (конец сессии), канал закрывается, поток просыпается
+/// и дропает Stream'ы — вывод/ввод останавливается детерминированно.
+pub struct DeviceGuard {
+    _tx: std::sync::mpsc::Sender<()>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    has_input: bool,
+}
+
+impl DeviceGuard {
+    /// Открылся ли микрофон (для честного op 5 SPEAKING при старте).
+    pub fn has_input(&self) -> bool {
+        self.has_input
+    }
+}
+
+impl Drop for DeviceGuard {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
 }
 
 /// Открывает вывод и ввод. Каждая сторона независима: нет микрофона —
 /// сессия работает на приём; нет динамиков — на передачу.
+///
+/// Открытие происходит ВНУТРИ парковочного потока: `cpal::Stream` на ряде
+/// платформ (ALSA) не `Send` — его нельзя ни переносить между потоками,
+/// ни держать в асинхронной сессии. Создание, жизнь и дроп — один поток.
 pub fn open(
     mixer: &Arc<Mutex<Mixer>>,
     controls: &Arc<Mutex<VoiceControls>>,
     mic: &Arc<Mutex<Vec<i16>>>,
-) -> Devices {
-    let output = open_output(mixer, controls);
-    let input = open_input(mic);
-    Devices { output, input }
+) -> DeviceGuard {
+    // Парковка: просыпается при дропе Guard'а (закрытие канала).
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    // has_input → вызывающему (устройства открываются в потоке).
+    let (itx, irx) = std::sync::mpsc::channel::<bool>();
+
+    let mixer = Arc::clone(mixer);
+    let controls = Arc::clone(controls);
+    let mic = Arc::clone(mic);
+
+    let handle = std::thread::spawn(move || {
+        let output = open_output(&mixer, &controls);
+        let input = open_input(&mic);
+        let _ = itx.send(input.is_some());
+        // Stream'ы созданы, живут и будут дропнуты в этом же потоке.
+        let _hold = (output, input);
+        let _ = rx.recv(); // блок до закрытия канала (дроп Guard'а)
+    });
+    let has_input = irx.recv().unwrap_or(false);
+
+    DeviceGuard {
+        _tx: tx,
+        handle: Some(handle),
+        has_input,
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -51,10 +97,7 @@ fn pick_output(device: &cpal::Device) -> Option<(StreamConfig, SampleFormat)> {
                     && r.min_sample_rate().0 <= 48_000
                     && r.max_sample_rate().0 >= 48_000
             }) {
-                let cfg = r
-                    .clone()
-                    .with_sample_rate(cpal::SampleRate(48_000))
-                    .config();
+                let cfg = r.with_sample_rate(cpal::SampleRate(48_000));
                 let fmt = cfg.sample_format();
                 return Some((cfg.into(), fmt));
             }
@@ -163,7 +206,7 @@ fn open_output(mixer: &Arc<Mutex<Mixer>>, controls: &Arc<Mutex<VoiceControls>>) 
         fmt
     );
 
-    let tap = OutTap {
+    let mut tap = OutTap {
         mixer: Arc::clone(mixer),
         controls: Arc::clone(controls),
         dev_rate,
@@ -178,31 +221,25 @@ fn open_output(mixer: &Arc<Mutex<Mixer>>, controls: &Arc<Mutex<VoiceControls>>) 
         SampleFormat::F32 => device
             .build_output_stream(
                 &config,
-                move |data: &mut [f32], _| {
-                    let mut tap = tap;
-                    tap.fill(data);
+                move |data: &mut [f32], _| tap.fill(data),
+                err_fn,
+                None,
+            )
+            .ok(),
+        SampleFormat::I16 => device
+            .build_output_stream(
+                &config,
+                move |data: &mut [i16], _| {
+                    let mut tmp = vec![0f32; data.len()];
+                    tap.fill(&mut tmp);
+                    for (o, s) in data.iter_mut().zip(tmp) {
+                        *o = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                    }
                 },
                 err_fn,
                 None,
             )
             .ok(),
-        SampleFormat::I16 => {
-            let mut tap = tap;
-            device
-                .build_output_stream(
-                    &config,
-                    move |data: &mut [i16], _| {
-                        let mut tmp = vec![0f32; data.len()];
-                        tap.fill(&mut tmp);
-                        for (o, s) in data.iter_mut().zip(tmp) {
-                            *o = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                        }
-                    },
-                    err_fn,
-                    None,
-                )
-                .ok()
-        }
         _ => None,
     };
     match stream {
@@ -232,10 +269,7 @@ fn pick_input(device: &cpal::Device) -> Option<(StreamConfig, SampleFormat)> {
                 && r.min_sample_rate().0 <= 48_000
                 && r.max_sample_rate().0 >= 48_000
         }) {
-            let cfg = r
-                .clone()
-                .with_sample_rate(cpal::SampleRate(48_000))
-                .config();
+            let cfg = r.with_sample_rate(cpal::SampleRate(48_000));
             let fmt = cfg.sample_format();
             return Some((cfg.into(), fmt));
         }
@@ -251,7 +285,6 @@ fn pick_input(device: &cpal::Device) -> Option<(StreamConfig, SampleFormat)> {
 /// Состояние колбэка ввода: устройство → моно 48k → аккумулятор для кодера.
 struct InTap {
     mic: Arc<Mutex<Vec<i16>>>,
-    dev_rate: u32,
     dev_ch: usize,
     /// device-rate-моно → 48k-моно (None при 48k).
     res: Option<LinearResampler>,
@@ -316,9 +349,8 @@ fn open_input(mic: &Arc<Mutex<Vec<i16>>>) -> Option<Stream> {
         fmt
     );
 
-    let tap = InTap {
+    let mut tap = InTap {
         mic: Arc::clone(mic),
-        dev_rate,
         dev_ch,
         res,
     };
@@ -326,30 +358,19 @@ fn open_input(mic: &Arc<Mutex<Vec<i16>>>) -> Option<Stream> {
 
     let stream = match fmt {
         SampleFormat::F32 => device
+            .build_input_stream(&config, move |data: &[f32], _| tap.push(data), err_fn, None)
+            .ok(),
+        SampleFormat::I16 => device
             .build_input_stream(
                 &config,
-                move |data: &[f32], _| {
-                    let mut tap = tap;
-                    tap.push(data);
+                move |data: &[i16], _| {
+                    let tmp: Vec<f32> = data.iter().map(|s| *s as f32 / 32768.0).collect();
+                    tap.push(&tmp);
                 },
                 err_fn,
                 None,
             )
             .ok(),
-        SampleFormat::I16 => {
-            let mut tap = tap;
-            device
-                .build_input_stream(
-                    &config,
-                    move |data: &[i16], _| {
-                        let tmp: Vec<f32> = data.iter().map(|s| *s as f32 / 32768.0).collect();
-                        tap.push(&tmp);
-                    },
-                    err_fn,
-                    None,
-                )
-                .ok()
-        }
         _ => None,
     };
     match stream {
