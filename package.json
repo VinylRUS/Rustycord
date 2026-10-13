@@ -21,12 +21,13 @@
     "@tauri-apps/api": "^2.2.0"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
     "@tauri-apps/cli": "^2.2.0",
     "@tsconfig/svelte": "^5.0.4",
+    "esbuild": "^0.28.2",
     "svelte": "^5.16.0",
     "svelte-check": "^4.1.1",
     "typescript": "^5.7.2",
-    "vite": "^6.0.7"
+    "vite": "^8.3.4"
   }
 }
