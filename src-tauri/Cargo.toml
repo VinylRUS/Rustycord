@@ -47,7 +47,7 @@ xsalsa20poly1305 = "0.9"
 # на Windows/macOS audiopus_sys собирает vendored-opus через cmake.
 audiopus = "0.3.0-rc.0"
 # Аудиоустройства — только с фичей `audio` (см. [features]).
-cpal = { version = "0.15", optional = true }
+cpal = { version = "0.18", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 anyhow = "1"
 tracing = "0.1"
