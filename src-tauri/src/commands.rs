@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::auth;
 use crate::gateway::client::run_gateway;
 use crate::rest::client::{urlencode, RestClient};
-use crate::rest::models::{Channel, CurrentUser, Message};
+use crate::rest::models::{Channel, CurrentUser, Message, Relationship};
 use crate::snowflake;
 use crate::state::{AppState, GatewayCommand, INTENTS_USER};
 use crate::superprops;
@@ -411,7 +411,7 @@ pub async fn plugin_read(app: tauri::AppHandle, name: String) -> Result<String, 
 
 /* ====================== MESSENGER / CORE ====================== */
 
-/// Full cache snapshot (used for hot-reload recovery).
+/// Полный кэш-снапшот (используется для восстановления после hot-reload).
 #[tauri::command]
 pub async fn get_state(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     let cache = state.cache.read().unwrap();
@@ -438,6 +438,8 @@ pub async fn get_state(state: State<'_, Arc<AppState>>) -> Result<Value, String>
         "user": cache.user,
         "guilds": guilds,
         "dms": cache.dms,
+        "relationships": cache.relationships.values().collect::<Vec<_>>(),
+        "friend_presences": cache.friend_presences.values().collect::<Vec<_>>(),
     }))
 }
 
@@ -454,6 +456,61 @@ pub async fn get_dm_channels(state: State<'_, Arc<AppState>>) -> Result<Vec<Chan
         }
     }
     Ok(dms)
+}
+
+/// Начать личную беседу с пользователем (юзер-аккаунт): POST
+/// /users/@me/channels {recipient_id}. Возвращает существующий DM-канал,
+/// если переписка уже была — Discord идемпотентен к получателю.
+#[tauri::command]
+pub async fn create_dm(
+    state: State<'_, Arc<AppState>>,
+    recipient_id: String,
+) -> Result<Channel, String> {
+    let rest = rest_of(&state)?;
+    let ch: Channel = rest
+        .post_json(
+            "/users/@me/channels",
+            json!({ "recipient_id": recipient_id }),
+        )
+        .await
+        .map_err(|e| {
+            let m = e.to_string();
+            if m.contains("403") {
+                format!(
+                    "{m} — нельзя писать этому пользователю (нет общих серверов и он не в друзьях)"
+                )
+            } else {
+                m
+            }
+        })?;
+    let mut cache = state.cache.write().unwrap();
+    if let Some(slot) = cache.dms.iter_mut().find(|x| x.id == ch.id) {
+        // освежим получателей (актуальные ники/аватары)
+        *slot = ch.clone();
+    } else {
+        cache.dms.push(ch.clone());
+    }
+    Ok(ch)
+}
+
+/// Синхронизация друзей/заявок/блок-листа через REST — надёжный
+/// fallback, если READY-массив отношений где-то потерялся (resume и т.п.).
+#[tauri::command]
+pub async fn list_relationships(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<Relationship>, String> {
+    let rest = rest_of(&state)?;
+    let rels: Vec<Relationship> = rest
+        .get_json("/users/@me/relationships")
+        .await
+        .map_err(es)?;
+    {
+        let mut cache = state.cache.write().unwrap();
+        for r in &rels {
+            cache.relationships.insert(r.user.id.clone(), r.clone());
+        }
+    }
+    Ok(rels)
 }
 
 #[tauri::command]

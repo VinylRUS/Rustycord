@@ -5,6 +5,10 @@
 
   const guilds = $derived(app.guilds);
 
+  let showJoin = $state(false);
+  let invite = $state('');
+  let joining = $state(false);
+
   function unreadOfGuild(guildId: string): boolean {
     const g = app.guilds.find((x) => x.id === guildId);
     return (g?.channels ?? []).some((c) => app.unread[c.id]);
@@ -12,6 +16,14 @@
 
   function select(id: string | null) {
     app.selectGuild(id);
+  }
+
+  async function submitJoin() {
+    joining = true;
+    await app.joinServer(invite);
+    joining = false;
+    showJoin = false;
+    invite = '';
   }
 </script>
 
@@ -54,13 +66,40 @@
   {/each}
 
   <div class="pill-container">
-    <button class="server add" title="Пригласить бота на новый сервер" onclick={() => app.toast('Пригласи бота через OAuth2 URL Generator — см. README', 'info')}>
+    <button
+      class="server add"
+      title={app.isBotAccount ? 'Пригласить бота на сервер' : 'Присоединиться к серверу'}
+      onclick={() => (showJoin = !showJoin)}
+    >
       <span class="tooltip">Добавить сервер</span>
       <Icon name="plus" size={22} color="#23a55a" />
     </button>
     <span class="pill"></span>
   </div>
 </nav>
+
+{#if showJoin}
+  <div class="join-pop">
+    <h4>{app.isBotAccount ? 'Пригласить бота' : 'Присоединиться к серверу'}</h4>
+    {#if app.isBotAccount}
+      <p class="join-hint">Бот-аккаунты присоединяются по OAuth2-ссылке (URL Generator). Войди пользователем, чтобы заходить по приглашению.</p>
+    {:else}
+      <p class="join-hint">Вставь ссылку-приглашение (discord.gg/…) или код.</p>
+      <form
+        onsubmit={(e) => {
+          e.preventDefault();
+          void submitJoin();
+        }}
+      >
+        <input placeholder="discord.gg/rustycord" bind:value={invite} spellcheck="false" />
+        <button type="submit" disabled={!invite.trim() || joining}>
+          {joining ? 'Входим…' : 'Войти'}
+        </button>
+      </form>
+    {/if}
+    <button class="join-close" onclick={() => (showJoin = false)}>Закрыть</button>
+  </div>
+{/if}
 
 <style>
   .rail {
@@ -84,6 +123,64 @@
     width: 100%;
     justify-content: center;
   }
+
+  /* ---- попап «присоединиться к серверу» ---- */
+  .join-pop {
+    position: fixed;
+    left: 84px;
+    bottom: 24px;
+    width: 320px;
+    background: var(--bg-primary);
+    border-radius: var(--radius-md);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    padding: 18px;
+    z-index: 60;
+    animation: joinIn 0.15s ease;
+  }
+  @keyframes joinIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .join-pop h4 {
+    color: var(--header-primary);
+    font-size: 15px;
+    margin-bottom: 8px;
+  }
+  .join-hint {
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.5;
+    margin-bottom: 10px;
+  }
+  .join-pop form {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .join-pop input {
+    flex: 1;
+    background: var(--bg-base);
+    border-radius: var(--radius-sm);
+    padding: 9px 10px;
+    font-size: 14px;
+    color: var(--text-normal);
+  }
+  .join-pop form button {
+    background: #5865f2;
+    color: #fff;
+    border-radius: var(--radius-sm);
+    padding: 9px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .join-pop form button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .join-close {
+    width: 100%;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+  .join-close:hover { color: var(--text-normal); text-decoration: underline; }
 
   /* left active pill like Discord */
   .pill {

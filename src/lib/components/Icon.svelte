@@ -87,6 +87,8 @@
     <circle cx="9" cy="10" r="1" fill="currentColor" stroke="none" />
     <circle cx="15" cy="10" r="1" fill="currentColor" stroke="none" />
     <path d="M8 14.5c1 1.5 2.4 2.2 4 2.2s3-.7 4-2.2" />
+  {:else if name === 'chat'}
+    <path d="M21 11.5c0 4.1-4 7.5-9 7.5-1 0-2-.1-2.9-.4L4 20l1.2-3.6C3.8 15.1 3 13.4 3 11.5 3 7.4 7 4 12 4s9 3.4 9 7.5z" />
   {:else if name === 'logout'}
     <path d="M9 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h4" />
     <path d="M15 8l4 4-4 4M19 12H9" />

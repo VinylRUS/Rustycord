@@ -45,6 +45,16 @@
       ? app.dms.filter((c) => (c.recipients ?? []).some((r) => displayName(r).toLowerCase().includes(dmFilter.toLowerCase())))
       : app.dms,
   );
+
+  /** Друзья, подходящие под поиск, но без открытой беседы — можно начать переписку. */
+  const friendHits = $derived.by(() => {
+    if (!dmFilter.trim() || app.isBotAccount) return [];
+    const q = dmFilter.trim().toLowerCase();
+    return app.friendsList.filter((r) => {
+      const hay = `${displayName(r.user)} ${r.user.username}`.toLowerCase();
+      return hay.includes(q) && !app.dmWith(r.user.id);
+    });
+  });
 </script>
 
 <aside class="sidebar">
@@ -109,9 +119,19 @@
           {/if}
         </button>
       {/each}
+      {#if friendHits.length}
+        <div class="dm-section">Начать беседу</div>
+        {#each friendHits as r (r.user.id)}
+          <button class="dm-item new-dm" onclick={() => void app.openDmWith(r.user.id)}>
+            <Avatar user={r.user} size={32} status={app.friendStatus(r.user.id)} ringColor="var(--bg-secondary)" />
+            <span class="dm-name truncate">{displayName(r.user)}</span>
+            <Icon name="plus" size={16} color="var(--green)" />
+          </button>
+        {/each}
+      {/if}
       {#if app.isDemo}
         <div class="dm-note">
-          Демо-режим: DM-каналы симулируются. С реальным ботом DM появятся, когда пользователь напишет боту первым.
+          Демо-режим: сервер, участники и друзья симулируются локально — в приложении здесь будут настоящие данные твоего аккаунта.
         </div>
       {/if}
     </div>
@@ -339,6 +359,14 @@
   }
   .dm-item:hover { background: var(--bg-modifier-hover); color: var(--text-normal); }
   .dm-item.active { background: var(--bg-modifier-active); color: #fff; }
+  .dm-item.new-dm .dm-name { color: var(--green); font-weight: 500; }
+  .dm-section {
+    padding: 14px 8px 4px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
   .dm-name { flex: 1; text-align: left; }
   .dm-note {
     margin: 12px 8px;

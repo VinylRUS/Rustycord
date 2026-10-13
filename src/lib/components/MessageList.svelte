@@ -81,10 +81,20 @@
   {/if}
 
   {#if messages.length === 0 && app.messagesLoaded[channelId ?? '']}
+    {@const ch = app.activeChannel}
+    {@const isDm = ch?.type === 1 || ch?.type === 3}
     <div class="intro">
-      <div class="intro-icon"><Icon name="hash" size={44} color="#949ba4" /></div>
-      <h2>Добро пожаловать в #{app.channelTitle}!</h2>
-      <p class="muted">Это начало канала #{app.channelTitle}.</p>
+      <div class="intro-icon">
+        <Icon name={isDm ? 'chat' : 'hash'} size={44} color="#949ba4" />
+      </div>
+      <h2>{isDm ? '' : '#'}{app.channelTitle}</h2>
+      <p class="muted">
+        {#if isDm}
+          Это начало вашей переписки с {app.channelTitle} — напиши первым 👋
+        {:else}
+          Это начало канала #{app.channelTitle}.
+        {/if}
+      </p>
     </div>
   {/if}
 

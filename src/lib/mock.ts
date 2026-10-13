@@ -8,7 +8,7 @@
  *     is exactly what the Rust core receives from the real Gateway.
  */
 import type { Backend, GetMessageOptions } from './ipc';
-import type { BackendEvent, Channel, Guild, LoginResult, Member, Message, PluginInfo, PluginMeta, Presence, Role, SnowflakeInfo, StateSnapshot, User, VoiceState } from './types';
+import type { BackendEvent, Channel, Guild, LoginResult, Member, Message, PluginInfo, PluginMeta, Presence, Relationship, Role, SnowflakeInfo, StateSnapshot, User, VoiceState } from './types';
 import { parseSnowflakeLocal } from './time';
 
 /* ---------- helpers ---------- */
@@ -28,13 +28,14 @@ function delay(ms: number): Promise<void> {
 
 /* ---------- demo world ---------- */
 
-const BOT: User = {
+/** Демо-аккаунт — пользовательский (как настоящий вход по QR/email). */
+const ME: User = {
   id: '1302000000000000001',
-  username: 'rustycord.bot',
+  username: 'peregovich',
   discriminator: '0',
-  global_name: 'RustyCord',
+  global_name: 'Peregovich',
   avatar: null,
-  bot: true,
+  bot: false,
 };
 
 const GUILD_ID = '1301000000000000010';
@@ -67,7 +68,7 @@ const MEMBERS: Member[] = [
   { user: PYOTR, nick: null, roles: [], joined_at: '2025-12-01T18:00:00.000+00:00' },
   { user: IRINA, nick: null, roles: [], joined_at: '2025-12-03T12:30:00.000+00:00' },
   { user: MELODY, nick: null, roles: ['1301000000000000014'], joined_at: '2025-11-10T08:00:00.000+00:00' },
-  { user: BOT, nick: null, roles: ['1301000000000000014'], joined_at: '2025-12-20T08:00:00.000+00:00' },
+  { user: ME, nick: null, roles: ['1301000000000000014'], joined_at: '2025-12-20T08:00:00.000+00:00' },
 ];
 
 const PRESENCES: Presence[] = [
@@ -116,6 +117,27 @@ const DMS: Channel[] = [
   { id: '1301000000000000401', type: 1, name: null, recipients: [MARINA], last_message_id: sf(2 * H, 90) },
   { id: '1301000000000000402', type: 1, name: null, recipients: [DMITRY], last_message_id: sf(26 * H, 91) },
 ];
+
+/** Отношения демо-аккаунта: друзья + входящая/исходящая заявка. */
+const RELATIONSHIPS: Relationship[] = [
+  { id: MARINA.id, type: 1, user: MARINA, nickname: null },
+  { id: OLYA.id, type: 1, user: OLYA, nickname: null },
+  { id: PYOTR.id, type: 1, user: PYOTR, nickname: null },
+  { id: DMITRY.id, type: 3, user: DMITRY, nickname: null }, // входящая — можно принять
+  { id: IRINA.id, type: 4, user: IRINA, nickname: null }, // исходящая — ждём ответа
+];
+
+/** Статусы друзей (как READY.presences юзер-сессии — без guild_id). */
+const FRIEND_PRESENCES: Presence[] = [
+  { user: { id: MARINA.id }, status: 'idle', activities: [{ name: 'Visual Studio Code', type: 0, state: 'gateway.py' }] },
+  { user: { id: OLYA.id }, status: 'online', activities: [{ name: 'Custom Status', type: 4, state: 'crab rave 🦀' }] },
+  { user: { id: PYOTR.id }, status: 'offline', activities: [] },
+  { user: { id: DMITRY.id }, status: 'dnd', activities: [] },
+  { user: { id: IRINA.id }, status: 'offline', activities: [] },
+];
+
+/** Все известные демо-пользователи — для заявок и создания ЛС. */
+const KNOWN_USERS: User[] = [ALEXEY, MARINA, DMITRY, OLYA, PYOTR, IRINA, MELODY];
 
 function msg(seq: number, agoMs: number, author: User, content: string, channelId: string, extra: Partial<Message> = {}): Message {
   return {
@@ -256,6 +278,7 @@ export class MockBackend implements Backend {
   private handlers = new Set<(ev: BackendEvent) => void>();
   private timers: ReturnType<typeof setTimeout>[] = [];
   private members = [...MEMBERS];
+  private relationships: Relationship[] = RELATIONSHIPS.map((r) => ({ ...r, user: { ...r.user } }));
   private histories: Record<string, Message[]> = Object.fromEntries(
     Object.entries(HISTORY).map(([k, v]) => [k, v.map((m) => ({ ...m }))]),
   );
@@ -281,7 +304,20 @@ export class MockBackend implements Backend {
     this.running = true;
     this.emit({ type: 'status', stage: 'connecting' });
     await delay(350);
-    this.emit({ type: 'ready', user: BOT, session_id: 'demo-session-42' });
+    this.emit({ type: 'ready', user: ME, session_id: 'demo-session-42' });
+    // Полный пользовательский READY — как его теперь пробрасывает Rust-ядро:
+    // relationships, private_channels и presences друзей приезжают сразу.
+    this.emit({
+      type: 'dispatch',
+      t: 'READY',
+      d: {
+        user: ME,
+        session_id: 'demo-session-42',
+        relationships: this.relationships.map((r) => ({ ...r })),
+        private_channels: DMS.map((c) => ({ ...c })),
+        presences: FRIEND_PRESENCES.map((p) => ({ ...p })),
+      },
+    });
     await delay(250);
     // Full GUILD_CREATE, exactly like the real gateway sends it.
     this.emit({
@@ -295,11 +331,9 @@ export class MockBackend implements Backend {
       t: 'GUILD_MEMBERS_CHUNK',
       d: { guild_id: GUILD_ID, members: this.members, chunk_index: 0, chunk_count: 1 },
     });
-    this.emit({ type: 'dispatch', t: 'CHANNEL_CREATE', d: DMS[0] });
-    this.emit({ type: 'dispatch', t: 'CHANNEL_CREATE', d: DMS[1] });
     this.emit({ type: 'status', stage: 'connected' });
     this.runSimulation();
-    return BOT;
+    return ME;
   }
 
   async disconnect(): Promise<void> {
@@ -311,10 +345,35 @@ export class MockBackend implements Backend {
 
   async getState(): Promise<StateSnapshot> {
     return {
-      user: BOT,
+      user: ME,
       guilds: [{ ...GUILD, members: this.members, presences: PRESENCES, voice_states: VOICE_STATES }],
       dms: DMS,
+      relationships: this.relationships.map((r) => ({ ...r })),
+      friend_presences: FRIEND_PRESENCES,
     };
+  }
+
+  /* ---------- друзья и личные беседы (v0.4.0) ---------- */
+
+  async createDm(recipientId: string): Promise<Channel> {
+    const u = KNOWN_USERS.find((x) => x.id === recipientId);
+    if (!u) throw new Error('Пользователь не найден в демо-мире');
+    const existing = DMS.find((c) => c.recipients?.some((r) => r.id === u.id));
+    if (existing) return { ...existing };
+    const channel: Channel = {
+      id: this.nextId(),
+      type: 1,
+      name: null,
+      recipients: [u],
+      last_message_id: null,
+    };
+    DMS.push(channel);
+    this.emit({ type: 'dispatch', t: 'CHANNEL_CREATE', d: { ...channel } });
+    return { ...channel };
+  }
+
+  async listRelationships(): Promise<Relationship[]> {
+    return this.relationships.map((r) => ({ ...r }));
   }
 
   async getMessages(channelId: string, opts?: GetMessageOptions): Promise<Message[]> {
@@ -328,7 +387,7 @@ export class MockBackend implements Backend {
   }
 
   async sendMessage(channelId: string, content: string): Promise<Message> {
-    const message = msg(this.seq++, 0, BOT, content, channelId);
+    const message = msg(this.seq++, 0, ME, content, channelId);
     message.id = this.nextId();
     (this.histories[channelId] ??= []).push(message);
     // A friendly member sometimes reacts to us.
@@ -366,7 +425,7 @@ export class MockBackend implements Backend {
     this.emit({
       type: 'dispatch',
       t: 'MESSAGE_REACTION_ADD',
-      d: { channel_id: channelId, message_id: messageId, user_id: BOT.id, emoji: { id: null, name: emoji } },
+      d: { channel_id: channelId, message_id: messageId, user_id: ME.id, emoji: { id: null, name: emoji } },
     });
   }
 
@@ -412,7 +471,7 @@ export class MockBackend implements Backend {
     this.emit({
       type: 'dispatch',
       t: 'VOICE_STATE_UPDATE',
-      d: { guild_id: guildId, channel_id: channelId, user_id: BOT.id, self_mute: selfMute, self_deaf: selfDeaf, session_id: 'demo-voice-1' },
+      d: { guild_id: guildId, channel_id: channelId, user_id: ME.id, self_mute: selfMute, self_deaf: selfDeaf, session_id: 'demo-voice-1' },
     });
     if (channelId) {
       await delay(500);
@@ -459,7 +518,72 @@ export class MockBackend implements Backend {
 
   async apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
     const m = method.toUpperCase();
+    // ---- друзья (v0.4.0): зеркалим семантику /users/@me/relationships ----
+    if (path === '/users/@me/relationships') {
+      if (m === 'POST') {
+        const username = String((body as { username?: string } | undefined)?.username ?? '').toLowerCase();
+        const target = KNOWN_USERS.find((u) => u.username.toLowerCase() === username);
+        if (!target) {
+          throw new Error('Unknown User: в демо известны только участники сервера — попробуй alexey.dev или melody');
+        }
+        if (this.relationships.some((r) => r.user.id === target.id)) {
+          throw new Error('Relationship already exists: вы уже друзья или заявка уже отправлена');
+        }
+        const rel: Relationship = { id: target.id, type: 4, user: target, nickname: null };
+        this.relationships.push(rel);
+        this.emit({ type: 'dispatch', t: 'RELATIONSHIP_ADD', d: { ...rel } });
+        // Демо-жизнь: через пару секунд собеседник принимает заявку.
+        this.timers.push(
+          setTimeout(() => {
+            if (!this.running) return;
+            this.relationships = this.relationships.filter((r) => r.user.id !== target.id);
+            this.emit({ type: 'dispatch', t: 'RELATIONSHIP_REMOVE', d: { id: target.id, type: 4 } });
+            const friend: Relationship = { id: target.id, type: 1, user: target, nickname: null };
+            this.relationships.push(friend);
+            this.emit({ type: 'dispatch', t: 'RELATIONSHIP_ADD', d: { ...friend } });
+          }, 3000),
+        );
+        return null;
+      }
+      throw new Error(`Демо-режим: ${method} ${path} не поддерживается`);
+    }
+    if (/^\/users\/@me\/relationships\/.+$/.test(path)) {
+      const userId = path.split('/').pop() ?? '';
+      const rel = this.relationships.find((r) => r.user.id === userId);
+      if (m === 'PUT') {
+        const type = Number((body as { type?: number } | undefined)?.type ?? 1) as Relationship['type'];
+        if (!rel) throw new Error('Relationship not found');
+        rel.type = type;
+        this.emit({ type: 'dispatch', t: 'RELATIONSHIP_ADD', d: { ...rel } });
+        return null;
+      }
+      if (m === 'DELETE') {
+        this.relationships = this.relationships.filter((r) => r.user.id !== userId);
+        this.emit({ type: 'dispatch', t: 'RELATIONSHIP_REMOVE', d: { id: userId } });
+        return null;
+      }
+      throw new Error(`Демо-режим: ${method} ${path} не поддерживается`);
+    }
     if (/\/bans$/.test(path) && m === 'GET') return [];
+    if (m === 'POST' && /^\/invites\/.+/.test(path)) {
+      // Демо: вступление по приглашению — GUILD_CREATE приезжает как в реальном клиенте.
+      const newGuild: Guild = {
+        id: '1303000000000000001',
+        name: 'Discord API',
+        icon: null,
+        owner_id: ALEXEY.id,
+        roles: [],
+        channels: [
+          { id: '1303000000000000011', type: 0, guild_id: '1303000000000000001', name: 'общий', position: 0, parent_id: null, topic: 'Новый сервер через демо-приглашение' },
+        ],
+        voice_states: [],
+        presences: [],
+        member_count: 1,
+        large: false,
+      };
+      this.emit({ type: 'dispatch', t: 'GUILD_CREATE', d: newGuild });
+      return { guild: { name: newGuild.name } };
+    }
     if (/\/invites$/.test(path) && m === 'GET') {
       return [{ code: 'demo24h', channel: { id: CH_GENERAL, name: 'основной' }, inviter: ALEXEY, uses: 3, max_uses: 0, expires_at: null, temporary: false }];
     }
@@ -570,13 +694,19 @@ export class MockBackend implements Backend {
           );
         }, 2600),
       );
-      // presence flip mid-step
+      // presence flip mid-step: гильдейский (Дмитрий) и дружеский (Марина)
       this.timers.push(
         setTimeout(() => {
           if (!this.running) return;
           const statuses = ['online', 'dnd'] as const;
           const next = statuses[step % 2];
           this.emit({ type: 'dispatch', t: 'PRESENCE_UPDATE', d: { user: { id: DMITRY.id }, status: next, activities: [] } });
+          const marinaNext = step % 2 ? 'idle' : 'online';
+          this.emit({
+            type: 'dispatch',
+            t: 'PRESENCE_UPDATE',
+            d: { user: { id: MARINA.id }, status: marinaNext, activities: [] },
+          });
         }, 9000),
       );
       // voice speaking pulses (Алексей is in the voice channel)

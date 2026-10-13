@@ -12,10 +12,12 @@
  */
 import type {
   BackendEvent,
+  Channel,
   LoginResult,
   Message,
   PluginInfo,
   PluginMeta,
+  Relationship,
   SnowflakeInfo,
   StateSnapshot,
   User,
@@ -52,6 +54,12 @@ export interface Backend {
   gatewaySendRaw(frame: string): Promise<void>;
   kickMember(guildId: string, userId: string): Promise<void>;
   banMember(guildId: string, userId: string): Promise<void>;
+
+  // друзья и личные беседы (v0.4.0)
+  /** Открыть (или создать) DM с пользователем — POST /users/@me/channels. */
+  createDm(recipientId: string): Promise<Channel>;
+  /** REST-синхронизация друзей/заявок/блок-листа. */
+  listRelationships(): Promise<Relationship[]>;
 
   /** Универсальный REST-прокси (управление сервером + плагины). */
   apiRequest(method: string, path: string, body?: unknown): Promise<unknown>;
@@ -156,6 +164,14 @@ export class TauriBackend implements Backend {
 
   async banMember(guildId: string, userId: string): Promise<void> {
     await this.invoke('ban_member', { guildId, userId });
+  }
+
+  async createDm(recipientId: string): Promise<Channel> {
+    return this.invoke<Channel>('create_dm', { recipientId });
+  }
+
+  async listRelationships(): Promise<Relationship[]> {
+    return this.invoke<Relationship[]>('list_relationships');
   }
 
   async apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {

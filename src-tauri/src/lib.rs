@@ -46,6 +46,9 @@ pub fn run() {
             commands::ban_member,
             commands::join_voice,
             commands::parse_snowflake,
+            // пользовательская сессия: друзья и личные беседы (v0.4.0)
+            commands::create_dm,
+            commands::list_relationships,
             // авторизация пользователя (v0.3.0)
             commands::auth_login_email,
             commands::auth_submit_mfa,

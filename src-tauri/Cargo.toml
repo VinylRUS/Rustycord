@@ -1,6 +1,6 @@
 [package]
 name = "rustycord"
-version = "0.3.1"
+version = "0.4.0"
 description = "RustyCord — an unofficial Discord client built with Tauri, reverse-engineered architecture, native performance"
 authors = ["RustyCord contributors"]
 edition = "2021"

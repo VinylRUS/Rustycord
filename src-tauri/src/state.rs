@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::rest::models::{Channel, Member, Presence, Role, User, VoiceState};
+use crate::rest::models::{Channel, Member, Presence, Relationship, Role, User, VoiceState};
 use crate::voice::{VoiceControls, VoiceWsCmd};
 
 /// Интенты пользовательской сессии: юзер-аккаунту доступны все биты без
@@ -79,6 +79,12 @@ pub struct Cache {
     pub user: Option<User>,
     pub guilds: HashMap<String, GuildState>,
     pub dms: Vec<Channel>,
+    /// User-account friends/pending/blocked (user_id → relationship).
+    /// Bots never populate this — relationships are a user-session concept.
+    pub relationships: HashMap<String, Relationship>,
+    /// Presences of friends (PRESENCE_UPDATE without guild_id + READY
+    /// `presences` array) — guild-member presences live in GuildState.
+    pub friend_presences: HashMap<String, Presence>,
 }
 
 impl Cache {
@@ -86,6 +92,8 @@ impl Cache {
         self.user = None;
         self.guilds.clear();
         self.dms.clear();
+        self.relationships.clear();
+        self.friend_presences.clear();
     }
 }
 

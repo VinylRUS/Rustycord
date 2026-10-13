@@ -172,7 +172,7 @@
 
   <div class="footer">
     <span>Gateway wss://gateway.discord.gg · REST api/v10 · remote-auth v2 · Intents 131071</span>
-    <span>RustyCord v0.3.0 · не аффилирован с Discord Inc.</span>
+    <span>RustyCord v0.4.0 · не аффилирован с Discord Inc.</span>
   </div>
 </div>
 

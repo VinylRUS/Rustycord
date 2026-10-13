@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tauri::Emitter;
 
-use crate::rest::models::{Channel, Guild, Member, Presence, VoiceState};
+use crate::rest::models::{Channel, Guild, Member, Presence, Relationship, VoiceState};
 use crate::state::{GuildState, SharedState};
 use crate::voice::VoiceControls;
 
@@ -41,25 +41,96 @@ pub async fn handle_dispatch(
                     state.cache.write().unwrap().user = Some(u);
                 }
             }
-            // Пользовательский READY (в отличие от бот-READY) несёт DM-каналы
-            // прямо в private_channels — кладём их в кэш, чтобы UI сразу
-            // видел список личных сообщений.
-            if let Some(dms) = d.get("private_channels").and_then(|v| v.as_array()) {
+            {
                 let mut cache = state.cache.write().unwrap();
-                for ch in dms {
-                    if let Ok(c) = serde_json::from_value::<Channel>(ch.clone()) {
-                        if !cache.dms.iter().any(|x| x.id == c.id) {
-                            cache.dms.push(c);
+                // Пользовательский READY (в отличие от бот-READY) несёт DM-каналы
+                // прямо в private_channels — кладём их в кэш, чтобы UI сразу
+                // видел список личных сообщений.
+                if let Some(dms) = d.get("private_channels").and_then(|v| v.as_array()) {
+                    for ch in dms {
+                        if let Ok(c) = serde_json::from_value::<Channel>(ch.clone()) {
+                            if !cache.dms.iter().any(|x| x.id == c.id) {
+                                cache.dms.push(c);
+                            }
+                        }
+                    }
+                }
+                // Друзья/заявки/блок-лист — тоже часть пользовательского READY.
+                // Бот-аккаунты этот массив не получают.
+                if let Some(rels) = d.get("relationships").and_then(|v| v.as_array()) {
+                    for r in rels {
+                        if let Ok(rel) = serde_json::from_value::<Relationship>(r.clone()) {
+                            if let Some(uid) = r
+                                .get("user")
+                                .and_then(|u| u.get("id"))
+                                .and_then(|v| v.as_str())
+                            {
+                                cache.relationships.insert(uid.to_string(), rel);
+                            }
+                        }
+                    }
+                }
+                // READY.presences у юзер-сессии — это статусы друзей (без
+                // guild_id); разкладываем их отдельно от гильдейских.
+                if let Some(presences) = d.get("presences").and_then(|v| v.as_array()) {
+                    for p in presences {
+                        if let Ok(pr) = serde_json::from_value::<Presence>(p.clone()) {
+                            if pr.guild_id.is_none() {
+                                cache.friend_presences.insert(pr.user.id.clone(), pr);
+                            }
                         }
                     }
                 }
             }
-            tracing::info!("gateway: READY — {username} ({user_id}), session {session_id}");
+            let rel_count = d
+                .get("relationships")
+                .and_then(|v| v.as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+            let dm_count = d
+                .get("private_channels")
+                .and_then(|v| v.as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+            tracing::info!(
+                "gateway: READY — {username} ({user_id}), session {session_id}, {rel_count} отношений, {dm_count} ЛС"
+            );
             let _ = app.emit(
                 "discord://ready",
                 json!({ "user": d["user"], "session_id": session_id }),
             );
+            // Полный READY вперёд как dispatch: фронтенду нужны
+            // private_channels, relationships и presences, которых нет в
+            // коротком ready-событии выше. Без этого список ЛС и друзья
+            // оставались бы пустыми до первого CHANNEL_CREATE.
+            let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
             state.emit_status("connected", None);
+        }
+
+        "RELATIONSHIP_ADD" => {
+            // {id, type, user, nickname?} — id совпадает с user.id.
+            if let Ok(rel) = serde_json::from_value::<Relationship>(d.clone()) {
+                let uid = rel.user.id.clone();
+                let kind = rel.kind;
+                state
+                    .cache
+                    .write()
+                    .unwrap()
+                    .relationships
+                    .insert(uid.clone(), rel);
+                tracing::debug!("gateway: RELATIONSHIP_ADD {uid} (type {kind})");
+            }
+            let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
+        }
+
+        "RELATIONSHIP_REMOVE" => {
+            let uid = d["id"].as_str().unwrap_or_default().to_string();
+            if !uid.is_empty() {
+                let mut cache = state.cache.write().unwrap();
+                cache.relationships.remove(&uid);
+                cache.friend_presences.remove(&uid);
+            }
+            let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "GUILD_CREATE" => {
@@ -275,11 +346,18 @@ pub async fn handle_dispatch(
 
         "PRESENCE_UPDATE" => {
             if let Ok(p) = serde_json::from_value::<Presence>(d.clone()) {
-                if let Some(gid) = p.guild_id.clone() {
-                    let uid = p.user.id.clone();
-                    let mut cache = state.cache.write().unwrap();
-                    if let Some(gs) = cache.guilds.get_mut(&gid) {
-                        gs.presences.insert(uid, p);
+                match p.guild_id.clone() {
+                    Some(gid) => {
+                        let uid = p.user.id.clone();
+                        let mut cache = state.cache.write().unwrap();
+                        if let Some(gs) = cache.guilds.get_mut(&gid) {
+                            gs.presences.insert(uid, p);
+                        }
+                    }
+                    None => {
+                        // Дружеский статус (вне гильдий) — обновляем кэш друзей.
+                        let uid = p.user.id.clone();
+                        state.cache.write().unwrap().friend_presences.insert(uid, p);
                     }
                 }
             }

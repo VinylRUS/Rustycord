@@ -17,6 +17,7 @@ import type {
   Message,
   Presence,
   QrStage,
+  Relationship,
   Role,
   User,
   VoiceState,
@@ -72,6 +73,10 @@ export class AppStore {
   sessionId = $state('');
   guilds = $state<Guild[]>([]);
   dms = $state<Channel[]>([]);
+  /** Друзья/заявки/блок-лист (user_id → relationship). Юзер-аккаунт только. */
+  relationships = $state<Record<string, Relationship>>({});
+  /** Статусы друзей (PRESENCE_UPDATE без guild_id + READY.presences). */
+  friendPresences = $state<Record<string, Presence>>({});
   membersByGuild = $state<Record<string, Record<string, Member>>>({});
   presencesByGuild = $state<Record<string, Record<string, Presence>>>({});
   voiceByGuild = $state<Record<string, VoiceState[]>>({});
@@ -106,6 +111,44 @@ export class AppStore {
 
   get activeGuild(): Guild | null {
     return this.guilds.find((g) => g.id === this.activeGuildId) ?? null;
+  }
+
+  /** Бот-аккаунт? Управляет копирайтом и лендингом после входа. */
+  get isBotAccount(): boolean {
+    return !!this.user?.bot;
+  }
+
+  /** Друзья, отсортированные по имени (type 1). */
+  get friendsList(): Relationship[] {
+    return Object.values(this.relationships)
+      .filter((r) => r.type === 1)
+      .sort((a, b) => displayName(a.user).localeCompare(displayName(b.user), 'ru'));
+  }
+
+  /** Входящие заявки в друзья (type 3) — ждут нашего ответа. */
+  get incomingReqs(): Relationship[] {
+    return Object.values(this.relationships)
+      .filter((r) => r.type === 3)
+      .sort((a, b) => displayName(a.user).localeCompare(displayName(b.user), 'ru'));
+  }
+
+  /** Исходящие заявки (type 4) — ждём ответа собеседника. */
+  get outgoingReqs(): Relationship[] {
+    return Object.values(this.relationships)
+      .filter((r) => r.type === 4)
+      .sort((a, b) => displayName(a.user).localeCompare(displayName(b.user), 'ru'));
+  }
+
+  /** Блок-лист (type 2). */
+  get blockedList(): Relationship[] {
+    return Object.values(this.relationships)
+      .filter((r) => r.type === 2)
+      .sort((a, b) => displayName(a.user).localeCompare(displayName(b.user), 'ru'));
+  }
+
+  /** DM-каналы как в оригинале: свежая переписка сверху (по last_message_id). */
+  get dmRows(): Channel[] {
+    return [...this.dms].sort((a, b) => (b.last_message_id ?? '0').localeCompare(a.last_message_id ?? '0'));
   }
 
   get activeChannel(): Channel | null {
@@ -305,6 +348,8 @@ export class AppStore {
     this.user = null;
     this.guilds = [];
     this.dms = [];
+    this.relationships = {};
+    this.friendPresences = {};
     this.membersByGuild = {};
     this.presencesByGuild = {};
     this.voiceByGuild = {};
@@ -344,6 +389,10 @@ export class AppStore {
         this.user = ev.user;
         this.sessionId = ev.session_id;
         plugins.emit('ready', ev.user);
+        // Юзер-аккаунт: тихая REST-синхронизация друзей как страховка
+        // (READY-dispatch обычно уже всё принёс, но после RESUME массив
+        // отношений мог не прийти повторно).
+        if (!ev.user.bot) void this.syncRelationships();
         break;
       case 'dispatch':
         this.handleDispatch(ev.t, ev.d);
@@ -419,15 +468,41 @@ export class AppStore {
     plugins.emit('dispatch', { t, d });
     switch (t) {
       case 'READY': {
-        const p = d as { user: User; session_id: string; private_channels?: Channel[] };
+        const p = d as {
+          user: User;
+          session_id: string;
+          private_channels?: Channel[];
+          relationships?: Relationship[];
+          presences?: Presence[];
+        };
         this.user = p.user;
         this.sessionId = p.session_id;
-        // Юзер-READY несёт DM-каналы сразу — Rust уже положил их в кэш,
-        // здесь отражаем на фронтенд.
+        // Юзер-READY несёт DM-каналы, друзей и их статусы сразу — Rust
+        // теперь пробрасывает полный payload (раньше отношения и ЛС
+        // терялись между ядром и UI, и главная выглядела «пустой»).
         if (p.private_channels) {
+          const seen = new Set(this.dms.map((x) => x.id));
           for (const c of p.private_channels) {
-            if (!this.dms.some((x) => x.id === c.id)) this.dms.push(c);
+            if (!seen.has(c.id)) {
+              this.dms.push(c);
+              seen.add(c.id);
+            }
           }
+        }
+        if (p.relationships) {
+          const map = { ...this.relationships };
+          for (const r of p.relationships) map[r.user.id] = r;
+          this.relationships = map;
+        }
+        if (p.presences) {
+          // В READY это статусы друзей — без guild_id.
+          const map = { ...this.friendPresences };
+          for (const pr of p.presences) {
+            if (!('guild_id' in pr) || (pr as { guild_id?: string }).guild_id == null) {
+              map[pr.user.id] = pr;
+            }
+          }
+          this.friendPresences = map;
         }
         break;
       }
@@ -444,8 +519,9 @@ export class AppStore {
         for (const p of g.presences ?? []) pres[p.user.id] = p;
         this.presencesByGuild[g.id] = pres;
         this.voiceByGuild[g.id] = g.voice_states ?? [];
-        // auto-select first guild for a lively landing view
-        if (!this.activeGuildId) this.selectGuild(g.id);
+        // Автовыбор первой гильдии — только бот-аккаунтам (демо-режим).
+        // Юзер после входа попадает на «Друзья», как в официальном клиенте.
+        if (!this.activeGuildId && this.isBotAccount) this.selectGuild(g.id);
         break;
       }
       case 'GUILD_UPDATE': {
@@ -607,12 +683,33 @@ export class AppStore {
       }
       case 'PRESENCE_UPDATE': {
         const p = d as Presence;
+        if ((p as { guild_id?: string }).guild_id == null) {
+          // Статус друга (вне гильдии) — обновляем карту друзей.
+          this.friendPresences = { ...this.friendPresences, [p.user.id]: p };
+        }
         for (const gid of Object.keys(this.presencesByGuild)) {
           const map = this.presencesByGuild[gid];
           if (map[p.user.id] || this.membersByGuild[gid]?.[p.user.id]) {
             map[p.user.id] = p;
           }
         }
+        break;
+      }
+      case 'RELATIONSHIP_ADD': {
+        const r = d as Relationship;
+        if (r?.user?.id) {
+          this.relationships = { ...this.relationships, [r.user.id]: r };
+        }
+        break;
+      }
+      case 'RELATIONSHIP_REMOVE': {
+        const p = d as { id: string; type?: number; nickname?: string };
+        const map = { ...this.relationships };
+        delete map[p.id];
+        this.relationships = map;
+        const pres = { ...this.friendPresences };
+        delete pres[p.id];
+        this.friendPresences = pres;
         break;
       }
       case 'VOICE_STATE_UPDATE': {
@@ -883,6 +980,127 @@ export class AppStore {
     return this.apiCall('GET', `/guilds/${guildId}/invites`);
   }
 
+  /* ================= friends & DMs (v0.4.0) ================= */
+
+  /** Статус друга/участника ЛС — сначала гильдейские статусы, затем друзья. */
+  friendStatus(userId: string): string {
+    return this.friendPresences[userId]?.status ?? 'offline';
+  }
+
+  /** Найти существующий DM с пользователем (по списку получателей). */
+  dmWith(userId: string): Channel | null {
+    return this.dms.find((c) => (c.type === 1 || c.type === 3) && c.recipients?.some((r) => r.id === userId)) ?? null;
+  }
+
+  /** Открыть личную беседу: существующий DM или создать через REST.
+   *  Работает для юзер-аккаунта — писать первым можно друзьям и тем,
+   *  с кем есть общие серверы. */
+  async openDmWith(userId: string) {
+    if (!this.backend) return;
+    const existing = this.dmWith(userId);
+    if (existing) {
+      this.activeGuildId = null;
+      this.selectChannel(existing.id);
+      return;
+    }
+    try {
+      const ch = await this.backend.createDm(userId);
+      if (!this.dms.some((x) => x.id === ch.id)) this.dms.push(ch);
+      this.activeGuildId = null;
+      this.selectChannel(ch.id);
+    } catch (e) {
+      this.toast(`Не удалось открыть беседу: ${errMsg(e)}`, 'error');
+    }
+  }
+
+  /** Отправить заявку в друзья по имени пользователя (без #). */
+  async sendFriendRequest(handle: string): Promise<boolean> {
+    const name = handle.trim().replace(/^@/, '');
+    if (!name) {
+      this.toast('Введи имя пользователя', 'error');
+      return false;
+    }
+    try {
+      // Новый формат имён: просто username. Старый «name#1234» приводим к нему.
+      const [username, discriminator] = name.split('#');
+      const body: Record<string, string> = { username };
+      if (discriminator && discriminator !== '0') body.discriminator = discriminator;
+      await this.apiCall('POST', '/users/@me/relationships', body);
+      this.toast(`Заявка для @${username} отправлена`, 'info');
+      void this.syncRelationships();
+      return true;
+    } catch (e) {
+      this.toast(friendlyFriendError(errMsg(e)), 'error');
+      return false;
+    }
+  }
+
+  /** Принять входящую заявку (или добавить принятого в друзья). */
+  async acceptFriend(userId: string) {
+    try {
+      await this.apiCall('PUT', `/users/@me/relationships/${userId}`, { type: 1 });
+      this.toast('Заявка принята — теперь вы друзья', 'info');
+    } catch (e) {
+      this.toast(`Не получилось: ${errMsg(e)}`, 'error');
+    }
+  }
+
+  /** Блокировать пользователя. */
+  async blockUser(userId: string) {
+    try {
+      await this.apiCall('PUT', `/users/@me/relationships/${userId}`, { type: 2 });
+      this.toast('Пользователь заблокирован', 'info');
+    } catch (e) {
+      this.toast(`Не получилось: ${errMsg(e)}`, 'error');
+    }
+  }
+
+  /** Удалить из друзей / отменить заявку / отклонить входящую / разблокировать. */
+  async removeRelationship(userId: string, what: string) {
+    try {
+      await this.apiCall('DELETE', `/users/@me/relationships/${userId}`);
+      this.toast(what, 'info');
+    } catch (e) {
+      this.toast(`Не получилось: ${errMsg(e)}`, 'error');
+    }
+  }
+
+  /** REST-синхронизация друзей — страховка от потерянного READY-массива. */
+  async syncRelationships() {
+    if (!this.backend || this.isBotAccount) return;
+    try {
+      const rels = await this.backend.listRelationships();
+      const map: Record<string, Relationship> = {};
+      for (const r of rels) map[r.user.id] = r;
+      this.relationships = map;
+    } catch {
+      /* тихо: страницу друзей покажет и gateway-кэш */
+    }
+  }
+
+  /** Присоединиться к серверу по ссылке-приглашению (юзер-аккаунт). */
+  async joinServer(invite: string) {
+    const code = invite
+      .trim()
+      .replace(/^https?:\/\/(www\.)?discord\.(gg|com\/invite)\//i, '')
+      .replace(/^\/+/, '')
+      .split(/[?#]/)[0]
+      .trim();
+    if (!code) {
+      this.toast('Вставь ссылку-приглашение или код', 'error');
+      return;
+    }
+    try {
+      const res = (await this.apiCall('POST', `/invites/${encodeURIComponent(code)}`)) as {
+        guild?: { name?: string };
+      };
+      // GUILD_CREATE придёт от gateway сам; тост — немедленный отклик.
+      this.toast(`Присоединился к «${res.guild?.name ?? code}»`, 'info');
+    } catch (e) {
+      this.toast(`Не получилось: ${errMsg(e)}`, 'error');
+    }
+  }
+
   /* ================= helpers ================= */
 
   memberName(guildId: string, userId: string): string {
@@ -951,7 +1169,10 @@ export class AppStore {
   }
 
   statusOf(guildId: string, userId: string): string {
-    return this.presencesByGuild[guildId]?.[userId]?.status ?? 'offline';
+    const guild = this.presencesByGuild[guildId]?.[userId];
+    if (guild) return guild.status;
+    // Вне гильдии (друзья, ЛС) — карта дружеских статусов.
+    return this.friendPresences[userId]?.status ?? 'offline';
   }
 
   voiceUsers(guildId: string, channelId: string): VoiceState[] {
@@ -995,6 +1216,30 @@ export class AppStore {
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** Человеческие формулировки для частых ошибок заявок в друзья. */
+function friendlyFriendError(raw: string): string {
+  const m = raw.toLowerCase();
+  if (m.includes('relationship already') || m.includes('уже друзья')) {
+    return 'Вы уже друзья';
+  }
+  if (m.includes('friend request already') || m.includes('already sent')) {
+    return 'Заявка уже отправлена — ждём ответа';
+  }
+  if (m.includes('maximum number of friends') || m.includes('max friends')) {
+    return 'Достигнут лимит друзей — сначала удали кого-нибудь';
+  }
+  if (m.includes('too many requests') || m.includes('too many friend')) {
+    return 'Слишком много заявок подряд — подожди немного';
+  }
+  if (m.includes('не хватает прав') || m.includes('403')) {
+    return 'Не хватает прав для этого действия';
+  }
+  if (m.includes('unknown user') || m.includes('404')) {
+    return 'Пользователь не найден — проверь имя (имя_пользователя без #)';
+  }
+  return `Заявка не отправилась: ${raw}`;
 }
 
 function detectTauri(): boolean {

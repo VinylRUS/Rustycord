@@ -207,6 +207,18 @@ export interface Invite {
   temporary: boolean;
 }
 
+/* ---------- Friends / relationships (v0.4.0) ---------- */
+
+/** Тип отношения из протокола: 1 друг · 2 в блок-листе · 3 входящая · 4 исходящая заявка. */
+export type RelationshipType = 1 | 2 | 3 | 4;
+
+export interface Relationship {
+  id: string; // = user.id
+  type: RelationshipType;
+  user: User;
+  nickname?: string | null;
+}
+
 /* ---------- Plugins (v0.3.0, Vencord-style) ---------- */
 
 export interface PluginMeta {
@@ -261,4 +273,6 @@ export interface StateSnapshot {
   user: User | null;
   guilds: Guild[];
   dms: Channel[];
+  relationships?: Relationship[];
+  friend_presences?: Presence[];
 }

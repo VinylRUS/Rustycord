@@ -30,6 +30,20 @@ pub struct User {
 /// `/users/@me` returns the same shape — bot identity included.
 pub type CurrentUser = User;
 
+/// Relationship entry from the user READY payload / RELATIONSHIP_ADD.
+/// `kind` follows the protocol numbering:
+/// 1 = friend, 2 = blocked, 3 = pending incoming, 4 = pending outgoing.
+/// User accounts only — bots don't have relationships.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Relationship {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: u8,
+    pub user: User,
+    #[serde(default)]
+    pub nickname: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Role {
     pub id: String,
