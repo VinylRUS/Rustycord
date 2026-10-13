@@ -441,11 +441,12 @@ export class MockBackend implements Backend {
   }
 
   async startQr(): Promise<void> {
-    // Симулируем QR-флоу: через секунду «просканировано», ещё через две — токен.
-    await delay(400);
+    // Симулируем QR-флоу v2: подключение → QR → отсканировано (с профилем) → токен.
+    this.emit({ type: 'qr', stage: 'connecting', message: 'Подключаемся к Discord…' });
+    await delay(500);
     this.emit({ type: 'qr', stage: 'fingerprint', svg: demoQrSvg(), fingerprint: 'demo-fingerprint' });
     await delay(1200);
-    this.emit({ type: 'qr', stage: 'scanned' });
+    this.emit({ type: 'qr', stage: 'scanned', username: 'alexey.dev', userId: '1301000000000000201' });
     await delay(800);
     this.emit({ type: 'qr', stage: 'done', token: 'demo-token' });
   }

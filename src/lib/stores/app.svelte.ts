@@ -55,10 +55,12 @@ export class AppStore {
   booted = false;
 
   /* ---------- user auth (v0.3.0) ---------- */
-  /** QR-флоу: qrStage 'fingerprint' → qrSvg доступен; 'done' → автологин. */
+  /** QR-флоу: 'connecting' → 'fingerprint' → qrSvg доступен; 'done' → автологин. */
   qrStage = $state<QrStage | 'idle'>('idle');
   qrSvg = $state('');
   qrFingerprint = $state('');
+  /** Кто отсканировал QR (из pending_ticket) — показываем на экране подтверждения. */
+  qrScannedBy = $state('');
   /** email-логин дошёл до 2FA — ждём код из приложения. */
   mfaTicket = $state<string | null>(null);
 
@@ -179,6 +181,7 @@ export class AppStore {
     this.qrStage = 'idle';
     this.qrSvg = '';
     this.qrFingerprint = '';
+    this.qrScannedBy = '';
     this.mfaTicket = null;
     if (this.mode === 'mock') {
       // Демо-режим: моковый QR «выдал» токен — просто стартуем демо-сессию.
@@ -227,9 +230,11 @@ export class AppStore {
   /** QR-логин: стартуем сессию, дальнейшее — через события qr. */
   async startQr() {
     const backend = await this.ensureBackend();
-    this.qrStage = 'idle';
+    // Оптимистично показываем «подключаемся», чтобы не мигал плейсхолдер.
+    this.qrStage = 'connecting';
     this.qrSvg = '';
     this.qrFingerprint = '';
+    this.qrScannedBy = '';
     this.loginError = '';
     try {
       await backend.startQr();
@@ -318,6 +323,7 @@ export class AppStore {
     this.qrStage = 'idle';
     this.qrSvg = '';
     this.qrFingerprint = '';
+    this.qrScannedBy = '';
     this.mfaTicket = null;
   }
 
@@ -356,14 +362,18 @@ export class AppStore {
 
   /* ---------- QR remote-auth поток ---------- */
 
-  handleQr(ev: { stage: QrStage; svg?: string; fingerprint?: string; token?: string; message?: string }) {
+  handleQr(ev: { stage: QrStage; svg?: string; fingerprint?: string; token?: string; username?: string; userId?: string; message?: string }) {
     this.qrStage = ev.stage;
     switch (ev.stage) {
+      case 'connecting':
+        break; // спиннер «Подключаемся к Discord…»
       case 'fingerprint':
         this.qrSvg = ev.svg ?? '';
         this.qrFingerprint = ev.fingerprint ?? '';
         break;
       case 'scanned':
+        // pending_ticket: сервер сообщил, кто сканирует — показываем это.
+        this.qrScannedBy = ev.username ?? '';
         break; // просто индикатор «подтверди на телефоне»
       case 'done':
         if (ev.token) void this.finishLogin(ev.token);

@@ -81,10 +81,14 @@
           <button class="btn-blurple submit" onclick={() => void app.startQr()}>
             {isTauri ? 'Сгенерировать QR-код' : 'Показать демо-QR'}
           </button>
+        {:else if app.qrStage === 'error' && !app.qrSvg}
+          <div class="qr-box placeholder">
+            <p>Не удалось подключиться к Discord.<br />Если ошибка повторяется — проверь сеть или VPN.</p>
+          </div>
         {:else if !app.qrSvg}
           <div class="qr-box placeholder">
             <div class="spinner"></div>
-            <p>Генерируем QR-код…</p>
+            <p>{app.qrStage === 'connecting' ? 'Подключаемся к Discord…' : 'Генерируем QR-код…'}</p>
           </div>
         {:else}
           <div class="qr-box" class:scanned={app.qrStage === 'scanned' || app.qrStage === 'done'}>
@@ -95,7 +99,7 @@
         {#if app.qrStage === 'fingerprint'}
           <p class="hint">Открой приложение Discord на телефоне: <b>Настройки → Устройства → Сканировать QR-код</b></p>
         {:else if app.qrStage === 'scanned'}
-          <p class="hint ok">Код отсканирован — подтвердите вход на телефоне ✅</p>
+          <p class="hint ok">Отсканировал{app.qrScannedBy ? ` @${app.qrScannedBy}` : 'и'} — подтвердите вход на телефоне ✅</p>
         {:else if app.qrStage === 'timeout' || app.qrStage === 'cancelled' || app.qrStage === 'error'}
           <button class="btn-blurple submit" onclick={() => void app.startQr()}>Попробовать снова</button>
         {/if}

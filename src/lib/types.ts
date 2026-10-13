@@ -177,13 +177,16 @@ export interface LoginResult {
   sms?: boolean;
 }
 
-export type QrStage = 'fingerprint' | 'scanned' | 'done' | 'cancelled' | 'timeout' | 'error';
+export type QrStage = 'connecting' | 'fingerprint' | 'scanned' | 'done' | 'cancelled' | 'timeout' | 'error';
 
 export interface QrEvent {
   stage: QrStage;
   svg?: string;
   fingerprint?: string;
   token?: string;
+  /** pending_ticket: кто отсканировал QR (id:disc:avatar:username). */
+  username?: string;
+  userId?: string;
   message?: string;
 }
 
@@ -236,7 +239,7 @@ export type BackendEvent =
   | { type: 'status'; stage: ConnStage; detail?: string }
   | { type: 'ready'; user: User; session_id: string }
   | { type: 'dispatch'; t: string; d: unknown }
-  | { type: 'qr'; stage: QrStage; svg?: string; fingerprint?: string; token?: string; message?: string }
+  | { type: 'qr'; stage: QrStage; svg?: string; fingerprint?: string; token?: string; username?: string; userId?: string; message?: string }
   | {
       type: 'voice';
       kind: 'connected' | 'disconnected' | 'speaking';

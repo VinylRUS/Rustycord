@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tauri::State;
+use tauri::{Emitter, State};
 use tokio_util::sync::CancellationToken;
 
 use crate::auth;
@@ -93,8 +93,13 @@ pub async fn auth_start_qr(
     *state.qr_cancel.write().unwrap() = Some(cancel.clone());
     let app_for_task = app.clone();
     let task = tauri::async_runtime::spawn(async move {
-        if let Err(e) = auth::remote::run_remote_auth(app_for_task, cancel).await {
+        if let Err(e) = auth::remote::run_remote_auth(app_for_task.clone(), cancel).await {
             tracing::warn!("remote-auth: {e:#}");
+            // Ошибка обязана попасть в UI — иначе QR просто «не появится».
+            let _ = app_for_task.emit(
+                "discord://qr",
+                json!({ "stage": "error", "message": format!("{e:#}") }),
+            );
         }
     });
     *state.qr_task.lock().await = Some(task);

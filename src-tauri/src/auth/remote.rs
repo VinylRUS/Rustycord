@@ -1,17 +1,24 @@
-//! Remote auth (QR-код) — протокол, которым официальный десктоп-клиент
-//! логинится через телефон: wss://remote-auth-gateway.discord.gg/?v=2
+//! Remote auth (QR-код), протокол v2 — wss://remote-auth-gateway.discord.gg/?v=2
+//!
+//! Протокол, которым официальный клиент логинится через телефон.
+//! Спецификация: docs.discord.food «Remote Authentication (Desktop)»;
+//! проверен вживую пробником scripts/qr-probe.mjs.
 //!
 //! Флоу:
-//!  1. генерируем RSA-2048 пару, шлём публичный ключ (op:init);
-//!  2. сервер присылает зашифрованный nonce (op:nonce_proof) — доказываем
-//!     владение приватным ключом через HMAC-proof (op:pending_verify);
-//!  3. op:pending_remote_auth → fingerprint → рисуем QR
-//!     «https://discord.com/ra/{fingerprint}»;
-//!  4. человек подтверждает в приложении → op:pending_ticket (просканировано);
-//!  5. op:pending_login → encrypted_token, расшифровываем своим ключом.
-//!
-//! Отмена/таймаут: op:cancel / op:timeout. Heartbeat — сервер шлёт op:heartbeat,
-//! мы эхом отвечаем тем же кадром (плюс поддерживаем поле interval).
+//!  1. hello (heartbeat_interval, timeout_ms) — сразу шлём op:init с нашим
+//!     RSA-2048 публичным ключом (SPKI DER → base64);
+//!  2. nonce_proof (encrypted_nonce) — расшифровываем и ЭХОМ возвращаем
+//!     nonce в base64URL без «=» (v2: никаких HMAC-proof);
+//!  3. pending_remote_init (fingerprint = SHA-256 нашего ключа) — рисуем QR
+//!     «https://discord.com/ra/{fingerprint}»; fingerprint сверяем с хэшем
+//!     своего ключа (защита от подмены);
+//!  4. heartbeat — шлём каждые hello.heartbeat_interval мс, сервер отвечает
+//!     heartbeat_ack; нет ACK — соединение «зомби», обрываем;
+//!  5. телефон сканирует QR → pending_ticket (зашифрованный профиль
+//!     «id:discriminator:avatar:username») → «отсканировал такой-то юзер»;
+//!  6. pending_login (ticket) — REST POST /users/@me/remote-auth/login
+//!     → encrypted_token → RSA-OAEP-SHA256 → пользовательский токен;
+//!  7. cancel / close 4003 — отмена на телефоне / QR истёк.
 
 use std::time::Duration;
 
@@ -24,11 +31,13 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
-use super::{nonce_proof, RemoteAuthKeys};
+use super::{nonce_echo, RemoteAuthKeys};
 use crate::superprops::BROWSER_UA;
 use crate::wsutil;
 
 const REMOTE_AUTH_URL: &str = "wss://remote-auth-gateway.discord.gg/?v=2";
+/// Обмен QR-тикетa на токен (docs.discord.food, Endpoints).
+const TICKET_EXCHANGE_URL: &str = "https://discord.com/api/v10/users/@me/remote-auth/login";
 
 /// Собрать компактный QR-SVG (только чёрные модули, quiet zone 4).
 fn qr_svg(data: &str) -> Result<String> {
@@ -58,6 +67,36 @@ fn qr_svg(data: &str) -> Result<String> {
     ))
 }
 
+/// Обменять ticket на токен: POST {ticket} → encrypted_token → RSA → токен.
+/// Это финальный шаг v2: сам WebSocket токен больше не приносит.
+async fn exchange_ticket(keys: &RemoteAuthKeys, ticket: &str) -> Result<String> {
+    let client = reqwest::Client::builder()
+        .user_agent(BROWSER_UA)
+        .timeout(Duration::from_secs(15))
+        .build()
+        .context("не удалось создать HTTP-клиент")?;
+    let resp = client
+        .post(TICKET_EXCHANGE_URL)
+        .header("Origin", "https://discord.com")
+        .json(&json!({ "ticket": ticket }))
+        .send()
+        .await
+        .context("не удалось обменять ticket (POST remote-auth/login)")?;
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        bail!(
+            "обмен ticket: HTTP {status} — {}",
+            body["message"].as_str().unwrap_or("нет описания")
+        );
+    }
+    let enc = body["encrypted_token"]
+        .as_str()
+        .context("в ответе нет encrypted_token")?;
+    let bytes = keys.decrypt(enc).context("не удалось расшифровать токен")?;
+    String::from_utf8(bytes).context("токен не UTF-8")
+}
+
 /// Одна QR-сессия. Отменяется через `cancel` (пользователь закрыл экран логина).
 pub async fn run_remote_auth(app: tauri::AppHandle, cancel: CancellationToken) -> Result<()> {
     let emit = |stage: &str, extra: Value| {
@@ -72,9 +111,15 @@ pub async fn run_remote_auth(app: tauri::AppHandle, cancel: CancellationToken) -
         let _ = app.emit("discord://qr", payload);
     };
 
+    emit(
+        "connecting",
+        json!({ "message": "Подключаемся к Discord…" }),
+    );
+
     let keys = RemoteAuthKeys::generate().context("не удалось сгенерировать RSA-ключи")?;
 
     let mut request = REMOTE_AUTH_URL.into_client_request()?;
+    // Origin обязателен (docs): без него шлюз отклоняет соединение.
     request.headers_mut().insert(
         "User-Agent",
         reqwest::header::HeaderValue::from_static(BROWSER_UA),
@@ -99,11 +144,12 @@ pub async fn run_remote_auth(app: tauri::AppHandle, cancel: CancellationToken) -
     )
     .await?;
 
-    // heartbeat: отвечаем эхом; interval-поле (если придёт) включает свой таймер.
-    let mut hb_own = tokio::time::interval(Duration::from_secs(10));
-    hb_own.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    hb_own.tick().await; // проглотить немедленный тик
-    let mut hb_enabled = false;
+    // Heartbeat: интервал приходит в hello; тикаем сами, ждём heartbeat_ack.
+    let mut hb = tokio::time::interval(Duration::from_secs(41));
+    hb.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    hb.tick().await; // проглотить немедленный тик
+    let mut hb_on = false;
+    let mut hb_acked = true;
 
     loop {
         tokio::select! {
@@ -114,56 +160,107 @@ pub async fn run_remote_auth(app: tauri::AppHandle, cancel: CancellationToken) -
                 return Ok(());
             }
 
-            _ = hb_own.tick(), if hb_enabled => {
+            _ = hb.tick(), if hb_on => {
+                if !hb_acked {
+                    bail!("remote-auth: нет heartbeat_ack — соединение потеряно");
+                }
                 wsutil::send_json(&mut writer, &json!({"op": "heartbeat"})).await?;
+                hb_acked = false;
             }
 
             msg = reader.next() => {
                 let Some(msg) = msg else { bail!("remote-auth: соединение закрыто") };
                 let msg = msg.context("remote-auth ws ошибка")?;
+
+                // Close-кадр: 4003 = QR истёк, остальное — ошибка сессии.
+                if let Message::Close(frame) = &msg {
+                    let code = frame.as_ref().map(|f| u16::from(f.code));
+                    match code {
+                        Some(4003) => {
+                            let _ = writer.send(Message::Close(None)).await;
+                            emit("timeout", json!({ "message": "QR-код истёк — попробуй снова" }));
+                            return Ok(());
+                        }
+                        other => bail!("remote-auth: сервер закрыл соединение (код {other:?})"),
+                    }
+                }
                 let Message::Text(text) = msg else { continue };
                 let v: Value = serde_json::from_str(&text).context("remote-auth: битый JSON")?;
                 let op = v["op"].as_str().unwrap_or_default().to_string();
 
                 match op.as_str() {
-                    "heartbeat" => {
-                        // Эхо-ответ; заодно могли прислать интервал.
-                        if let Some(interval) = v["interval"].as_u64() {
-                            hb_own = tokio::time::interval(Duration::from_millis(interval.clamp(2000, 60_000)));
-                            hb_own.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                            hb_own.tick().await;
-                            hb_enabled = true;
+                    "hello" => {
+                        // Узнали интервал — запускаем свои heartbeat-тики.
+                        if let Some(interval) = v["heartbeat_interval"].as_u64() {
+                            hb = tokio::time::interval(Duration::from_millis(
+                                interval.clamp(5_000, 120_000),
+                            ));
+                            hb.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                            hb.tick().await;
+                            hb_on = true;
                         }
-                        wsutil::send_json(&mut writer, &json!({"op": "heartbeat"})).await?;
+                    }
+                    "heartbeat_ack" => {
+                        hb_acked = true;
                     }
                     "nonce_proof" => {
-                        let nonce = v["nonce"].as_str().unwrap_or_default();
-                        let proof = nonce_proof(nonce, &keys)
-                            .context("nonce_proof отклонён (ключ/формат)")?;
-                        wsutil::send_json(&mut writer, &json!({
-                            "op": "pending_verify",
-                            "proof": proof
-                        }))
+                        let enc = v["encrypted_nonce"]
+                            .as_str()
+                            .context("в nonce_proof нет encrypted_nonce")?;
+                        let echo = nonce_echo(enc, &keys)
+                            .context("не удалось расшифровать nonce сервера")?;
+                        wsutil::send_json(
+                            &mut writer,
+                            &json!({
+                                "op": "nonce_proof",
+                                "nonce": echo
+                            }),
+                        )
                         .await?;
                     }
-                    "pending_remote_auth" => {
-                        let fingerprint = v["fingerprint"].as_str().unwrap_or_default().to_string();
+                    "pending_remote_init" => {
+                        let fingerprint =
+                            v["fingerprint"].as_str().unwrap_or_default().to_string();
+                        if fingerprint.is_empty() {
+                            bail!("pending_remote_init без fingerprint");
+                        }
+                        // Безопасность: fingerprint = SHA-256 нашего ключа.
+                        if fingerprint != keys.expected_fingerprint() {
+                            bail!("fingerprint не совпал с SHA-256 нашего ключа — возможна подмена");
+                        }
                         let qr_data = format!("https://discord.com/ra/{fingerprint}");
                         let svg = qr_svg(&qr_data)?;
                         emit("fingerprint", json!({ "svg": svg, "fingerprint": fingerprint }));
                     }
                     "pending_ticket" => {
-                        // Телефон просканировал QR — ждём подтверждения.
-                        emit("scanned", json!({}));
+                        // Телефон просканировал QR: показываем, кто это был.
+                        let enc = v["encrypted_user_payload"]
+                            .as_str()
+                            .context("в pending_ticket нет encrypted_user_payload")?;
+                        let payload = keys
+                            .decrypt(enc)
+                            .context("не удалось расшифровать профиль пользователя")
+                            .and_then(|b| {
+                                String::from_utf8(b).context("профиль не UTF-8")
+                            })?;
+                        // Формат: id:discriminator:avatar:username
+                        let parts: Vec<&str> = payload.splitn(4, ':').collect();
+                        let (user_id, username) = if parts.len() == 4 {
+                            (parts[0], parts[3])
+                        } else {
+                            ("", "")
+                        };
+                        emit(
+                            "scanned",
+                            json!({ "username": username, "userId": user_id }),
+                        );
                     }
                     "pending_login" => {
-                        let enc = v["encrypted_token"].as_str().unwrap_or_default();
-                        let token = keys
-                            .decrypt(enc)
-                            .context("не удалось расшифровать токен")
-                            .and_then(|bytes| {
-                                String::from_utf8(bytes).context("токен не UTF-8")
-                            })?;
+                        // Телефон подтвердил вход: меняем ticket на токен.
+                        let ticket = v["ticket"]
+                            .as_str()
+                            .context("в pending_login нет ticket")?;
+                        let token = exchange_ticket(&keys, ticket).await?;
                         let _ = writer.send(Message::Close(None)).await;
                         emit("done", json!({ "token": token }));
                         return Ok(());
@@ -173,6 +270,7 @@ pub async fn run_remote_auth(app: tauri::AppHandle, cancel: CancellationToken) -
                         emit("cancelled", json!({ "message": "Вход отменён на телефоне" }));
                         return Ok(());
                     }
+                    // v1-легаси: в v2 таймаут приходит Close-кадром 4003.
                     "timeout" => {
                         let _ = writer.send(Message::Close(None)).await;
                         emit("timeout", json!({ "message": "QR-код истёк — попробуй снова" }));
