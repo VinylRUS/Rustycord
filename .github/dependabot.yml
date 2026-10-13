@@ -1,0 +1,30 @@
+version: 2
+updates:
+  # Фронтенд: svelte, vite, @tauri-apps/api
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - frontend
+
+  # Rust-крейты: tauri, tokio, reqwest и т.д.
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+
+  # Сами workflow (actions/checkout, tauri-action, кэши)
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    labels:
+      - dependencies
+      - ci

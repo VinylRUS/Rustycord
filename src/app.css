@@ -1,0 +1,148 @@
+/* ============================================================
+   RustyCord — Discord-faithful dark theme
+   Colors extracted from the official client's design tokens
+   ============================================================ */
+
+:root {
+  /* Backgrounds */
+  --bg-base: #1e1f22;          /* app base / server rail */
+  --bg-secondary: #2b2d31;     /* sidebars / member list */
+  --bg-primary: #313338;       /* chat area */
+  --bg-tertiary: #1e1f22;
+  --bg-modifier-hover: #35373c;
+  --bg-modifier-active: #404249;
+  --bg-modifier-selected: #404249;
+  --input-background: #383a40;
+  --button-secondary: #4e5058;
+  --channeldeep: #232428;      /* user panel */
+
+  /* Text */
+  --text-normal: #dbdee1;
+  --text-muted: #949ba4;
+  --text-link: #00a8fc;
+  --header-primary: #f2f3f5;
+  --text-default: #fff;
+  --input-placeholder: #6d6f78;
+
+  /* Brand */
+  --blurple: #5865f2;
+  --blurple-hover: #4752c4;
+  --green: #23a55a;
+  --yellow: #f0b232;
+  --red: #f23f43;
+  --pink: #eb459e;
+
+  /* Misc */
+  --mention-bg: rgba(88, 101, 242, 0.3);
+  --mention-text: #c9cdfb;
+  --divider: #3f4147;
+  --scrollbar-thumb: #1a1b1e;
+  --scrollbar-thumb-hover: #111214;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --font-primary: 'Noto Sans', 'gg sans', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  --font-code: 'Sarasa Mono SC', 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #app {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-primary);
+  background: var(--bg-tertiary);
+  color: var(--text-normal);
+  font-size: 15px;
+  line-height: 1.375;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* Discord-style thin scrollbars */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 8px;
+  min-height: 40px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* Text selection like Discord */
+::selection { background: rgba(88, 101, 242, 0.5); }
+
+/* Selectable content areas (messages, code) */
+.selectable, .selectable * { user-select: text; }
+
+button {
+  font-family: inherit;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: inherit;
+}
+
+input, textarea {
+  font-family: inherit;
+  color: var(--text-normal);
+  border: none;
+  outline: none;
+  background: transparent;
+}
+
+a { color: var(--text-link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ---------- Utility ---------- */
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.muted { color: var(--text-muted); }
+.clickable { cursor: pointer; }
+.danger { color: var(--red); }
+
+/* ---------- Scrollable column helper ---------- */
+.scroller {
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ---------- Buttons ---------- */
+.btn-blurple {
+  background: var(--blurple);
+  color: #fff;
+  border-radius: var(--radius-sm);
+  padding: 11px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background 0.15s ease, transform 0.05s ease;
+}
+.btn-blurple:hover { background: var(--blurple-hover); }
+.btn-blurple:active { transform: translateY(1px); }
+.btn-blurple:disabled { background: var(--button-secondary); color: #949ba4; cursor: not-allowed; }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-normal);
+  border-radius: var(--radius-sm);
+  padding: 11px 16px;
+  font-size: 14px;
+  font-weight: 500;
+}
+.btn-ghost:hover { text-decoration: underline; }
+
+/* ---------- Animations ---------- */
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes popIn { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
+@keyframes pulseRing {
+  0%, 100% { box-shadow: 0 0 0 2px var(--bg-secondary), 0 0 0 4px var(--green); }
+  50% { box-shadow: 0 0 0 2px var(--bg-secondary), 0 0 0 4px transparent; }
+}
+@keyframes typingDot {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.6; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}

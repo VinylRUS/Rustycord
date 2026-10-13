@@ -1,0 +1,106 @@
+name: Release
+
+# Автосборка релиза: пушните тег v* (например v0.1.0) — и workflow
+#   1. проверит, что версии в package.json / tauri.conf.json / Cargo.toml совпадают с тегом
+#   2. соберёт установщики на трёх платформах (macOS universal, Linux deb/rpm/AppImage, Windows NSIS/MSI)
+#   3. создаст черновик GitHub Release со всеми артефактами — опубликуйте его вручную
+#
+# Локально: git tag v0.1.0 && git push origin v0.1.0
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 1. Версии во всех манифестах обязаны совпадать с тегом релиза
+  # ─────────────────────────────────────────────────────────────────────────────
+  check-version:
+    name: Verify version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare tag with manifest versions
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO="$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/version *= *"([^"]+)"/\1/')"
+          TAURI="$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
+          PKG="$(python3 -c "import json; print(json.load(open('package.json'))['version'])")"
+          echo "tag=${TAG}  cargo=${CARGO}  tauri.conf=${TAURI}  package.json=${PKG}"
+          if [ "$TAG" != "$CARGO" ] || [ "$TAG" != "$TAURI" ] || [ "$TAG" != "$PKG" ]; then
+            echo "::error::Версии не совпадают с тегом ${GITHUB_REF_NAME}. Обновите version во всех трёх манифестах."
+            exit 1
+          fi
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 2. Мультиплатформенная сборка + черновик релиза
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest # один универсальный .dmg (Apple Silicon + Intel)
+            args: --target universal-apple-darwin
+          - platform: ubuntu-latest
+            args: ''
+          - platform: windows-latest
+            args: ''
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # tauri-action: соберёт бандлы, создаст draft-релиз и приложит все файлы.
+      # Раздел CHANGELOG.md с версией попадёт в тело релиза (см. шаг ниже).
+      - name: Build and upload to GitHub Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'RustyCord ${{ github.ref_name }}'
+          releaseBody: 'Полный список изменений — в [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md). Ниже — готовые установщики для вашей платформы.'
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+      # Опционально: автообновления. Раскомментируйте, если настроите ключи
+      # (см. README, раздел «Автообновления») и включите createUpdaterArtifacts
+      # в src-tauri/tauri.conf.json.
+      # env:
+      #   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

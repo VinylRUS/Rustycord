@@ -1,0 +1,32 @@
+{
+  "name": "rustycord",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Unofficial Discord client built with Rust + Tauri + Svelte 5 (reverse-engineered architecture)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VinylRUS/Rustycord.git"
+  },
+  "bugs": "https://github.com/VinylRUS/Rustycord/issues",
+  "homepage": "https://github.com/VinylRUS/Rustycord#readme",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.2.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "@tauri-apps/cli": "^2.2.0",
+    "@tsconfig/svelte": "^5.0.4",
+    "svelte": "^5.16.0",
+    "svelte-check": "^4.1.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  }
+}

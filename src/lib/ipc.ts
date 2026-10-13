@@ -1,0 +1,172 @@
+/**
+ * IPC layer — the single seam between UI and the Rust core.
+ *
+ * Two implementations share this interface:
+ *  - `TauriBackend`  → invoke()/listen() over Tauri IPC to the Rust process
+ *  - `MockBackend`   → pure-TypeScript simulation of the Discord Gateway,
+ *                      lets the UI run in any browser without a token
+ *                      (and doubles as a protocol playground).
+ *
+ * This mirrors what the official client does with its "native modules" —
+ * except our native layer is Rust, not a Chromium Embedded Framework.
+ */
+import type { BackendEvent, Message, SnowflakeInfo, StateSnapshot, User } from './types';
+
+export interface GetMessageOptions {
+  limit?: number;
+  before?: string;
+}
+
+export interface Backend {
+  readonly mode: 'tauri' | 'mock';
+
+  // lifecycle
+  connect(token: string): Promise<User>;
+  disconnect(): Promise<void>;
+  getState(): Promise<StateSnapshot>;
+
+  // REST-ish
+  getMessages(channelId: string, opts?: GetMessageOptions): Promise<Message[]>;
+  sendMessage(channelId: string, content: string): Promise<Message>;
+  editMessage(channelId: string, messageId: string, content: string): Promise<Message>;
+  deleteMessage(channelId: string, messageId: string): Promise<void>;
+  addReaction(channelId: string, messageId: string, emoji: string): Promise<void>;
+  triggerTyping(channelId: string): Promise<void>;
+  requestMembers(guildId: string): Promise<void>;
+  /** Escape hatch: отправить сырой JSON-кадр в gateway (протокольные эксперименты). */
+  gatewaySendRaw(frame: string): Promise<void>;
+  kickMember(guildId: string, userId: string): Promise<void>;
+  banMember(guildId: string, userId: string): Promise<void>;
+
+  // voice
+  joinVoice(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean): Promise<void>;
+
+  // tools
+  parseSnowflake(id: string): Promise<SnowflakeInfo>;
+
+  // unified event stream (status / ready / dispatch / voice / warning)
+  onEvent(handler: (ev: BackendEvent) => void): () => void;
+}
+
+/* ------------------------------------------------------------------ */
+/* Tauri implementation                                                */
+/* ------------------------------------------------------------------ */
+
+export class TauriBackend implements Backend {
+  readonly mode = 'tauri' as const;
+
+  private async invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return invoke<T>(cmd, args);
+  }
+
+  async connect(token: string): Promise<User> {
+    return this.invoke<User>('connect', { token });
+  }
+
+  async disconnect(): Promise<void> {
+    await this.invoke('disconnect');
+  }
+
+  async getState(): Promise<StateSnapshot> {
+    return this.invoke<StateSnapshot>('get_state');
+  }
+
+  async getMessages(channelId: string, opts?: GetMessageOptions): Promise<Message[]> {
+    return this.invoke<Message[]>('get_messages', {
+      channelId,
+      limit: opts?.limit ?? 50,
+      before: opts?.before ?? null,
+    });
+  }
+
+  async sendMessage(channelId: string, content: string): Promise<Message> {
+    return this.invoke<Message>('send_message', { channelId, content });
+  }
+
+  async editMessage(channelId: string, messageId: string, content: string): Promise<Message> {
+    return this.invoke<Message>('edit_message', { channelId, messageId, content });
+  }
+
+  async deleteMessage(channelId: string, messageId: string): Promise<void> {
+    await this.invoke('delete_message', { channelId, messageId });
+  }
+
+  async addReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
+    await this.invoke('add_reaction', { channelId, messageId, emoji });
+  }
+
+  async triggerTyping(channelId: string): Promise<void> {
+    await this.invoke('trigger_typing', { channelId });
+  }
+
+  async requestMembers(guildId: string): Promise<void> {
+    await this.invoke('request_members', { guildId });
+  }
+
+  async gatewaySendRaw(frame: string): Promise<void> {
+    await this.invoke('gateway_send_raw', { frame });
+  }
+
+  async kickMember(guildId: string, userId: string): Promise<void> {
+    await this.invoke('kick_member', { guildId, userId });
+  }
+
+  async banMember(guildId: string, userId: string): Promise<void> {
+    await this.invoke('ban_member', { guildId, userId });
+  }
+
+  async joinVoice(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean): Promise<void> {
+    await this.invoke('join_voice', { guildId, channelId, selfMute, selfDeaf });
+  }
+
+  async parseSnowflake(id: string): Promise<SnowflakeInfo> {
+    return this.invoke<SnowflakeInfo>('parse_snowflake', { id });
+  }
+
+  onEvent(handler: (ev: BackendEvent) => void): () => void {
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+
+    const bind = async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      const subs: Array<[string, (payload: unknown) => void]> = [
+        ['discord://status', (d) => handler({ type: 'status', ...(d as object) } as BackendEvent)],
+        ['discord://ready', (d) => handler({ type: 'ready', ...(d as object) } as BackendEvent)],
+        ['discord://dispatch', (d) => handler({ type: 'dispatch', ...(d as object) } as BackendEvent)],
+        ['discord://voice', (d) => handler({ type: 'voice', ...(d as object) } as BackendEvent)],
+        ['discord://warning', (d) => handler({ type: 'warning', ...(d as object) } as BackendEvent)],
+      ];
+      for (const [event, fn] of subs) {
+        const un = await listen(event, (e) => fn(e.payload));
+        if (disposed) {
+          un();
+        } else {
+          unlisteners.push(un);
+        }
+      }
+    };
+    bind().catch((err) => console.error('[tauri] event bind failed', err));
+
+    return () => {
+      disposed = true;
+      for (const un of unlisteners) un();
+    };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Factory                                                             */
+/* ------------------------------------------------------------------ */
+
+export function detectMode(): 'tauri' | 'mock' {
+  // Tauri injects this global before any user script runs.
+  return '__TAURI_INTERNALS__' in window ? 'tauri' : 'mock';
+}
+
+export async function createBackend(mode?: 'tauri' | 'mock'): Promise<Backend> {
+  const m = mode ?? detectMode();
+  if (m === 'tauri') return new TauriBackend();
+  const { MockBackend } = await import('./mock');
+  return new MockBackend();
+}
