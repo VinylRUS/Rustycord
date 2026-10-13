@@ -263,13 +263,3 @@ pub struct VoiceState {
     #[serde(default)]
     pub suppress: bool,
 }
-
-/// Response of GET /gateway/bot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GatewayBot {
-    pub url: String,
-    #[serde(default)]
-    pub shards: Option<u32>,
-    #[serde(default)]
-    pub session_start_limit: Option<serde_json::Value>,
-}

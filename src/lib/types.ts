@@ -167,10 +167,76 @@ export interface SnowflakeInfo {
 
 export type ConnStage = 'connecting' | 'connected' | 'reconnecting' | 'disconnected' | 'shutdown';
 
+/* ---------- User auth (v0.3.0) ---------- */
+
+/** Ответ /auth/login: сразу токен или запрос 2FA-кода. */
+export interface LoginResult {
+  status: 'ok' | 'mfa';
+  token?: string;
+  ticket?: string;
+  sms?: boolean;
+}
+
+export type QrStage = 'fingerprint' | 'scanned' | 'done' | 'cancelled' | 'timeout' | 'error';
+
+export interface QrEvent {
+  stage: QrStage;
+  svg?: string;
+  fingerprint?: string;
+  token?: string;
+  message?: string;
+}
+
+/* ---------- Guild management ---------- */
+
+export interface BanEntry {
+  reason: string | null;
+  user: User;
+}
+
+export interface Invite {
+  code: string;
+  channel: { id: string; name?: string } | null;
+  inviter: User | null;
+  uses: number;
+  max_uses: number;
+  expires_at: string | null;
+  temporary: boolean;
+}
+
+/* ---------- Plugins (v0.3.0, Vencord-style) ---------- */
+
+export interface PluginMeta {
+  name?: string;
+  version?: string;
+  author?: string;
+  description?: string;
+}
+
+export interface PluginInfo {
+  file: string;
+  enabled: boolean;
+  meta: PluginMeta | null;
+  size: number;
+}
+
+export type PluginEventName =
+  | 'ready'
+  | 'dispatch'
+  | 'message:create'
+  | 'message:update'
+  | 'message:delete'
+  | 'message:send' // хук перед отправкой: может вернуть string|false
+  | 'guild:create'
+  | 'guild:update'
+  | 'guild:delete'
+  | 'voice:state';
+
 export type BackendEvent =
   | { type: 'status'; stage: ConnStage; detail?: string }
   | { type: 'ready'; user: User; session_id: string }
   | { type: 'dispatch'; t: string; d: unknown }
+  | { type: 'qr'; stage: QrStage; svg?: string; fingerprint?: string; token?: string; message?: string }
   | {
       type: 'voice';
       kind: 'connected' | 'disconnected' | 'speaking';

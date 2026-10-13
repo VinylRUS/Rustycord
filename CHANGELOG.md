@@ -9,8 +9,47 @@
 
 ### Planned
 - Адаптивная глубина jitter-буфера (сейчас фиксированный пре-ролл 40 мс).
-- Вложенные вложения (attachment) и embeds в сообщениях.
-- Отправка/редактирование/удаление сообщений через REST.
+- Вложения (attachment) и embeds в сообщениях.
+- Трансляция экрана: захват (PipeWire/DXGI/ScreenCaptureKit) → кодек → voice-транспорт.
+- Вкладка «Друзья» (relationships из READY).
+
+## [0.3.0] — 2026-10-13
+
+Из бот-клиента — в полноценный клиент: вход своим аккаунтом (как Vesktop),
+управление сервером и система плагинов в духе Vencord.
+
+### Changed
+- **Авторизация пользователя вместо bot-token**: QR-код (remote-auth v2:
+  RSA-2048, OAEP-SHA256, HMAC-nonce-proof, зашифрованный токен), email+пароль
+  (POST /auth/login) с двухфакторкой (TOTP), ручная вставка токена. Капча
+  при email-входе честно детектится и предлагается QR.
+- **Пользовательская сессия на всех слоях**: Authorization без префикса `Bot`,
+  X-Super-Properties (base64-паспорт браузера), браузерный User-Agent,
+  автоподтяжка client_build_number с discord.com, X-Context-Properties на
+  логине, юзер-интенты (все 17 бит, включая «привилегированные» для ботов),
+  presence в IDENTIFY. READY теперь разбирает private_channels — DM-список
+  доступен сразу.
+
+### Added
+- **Управление сервером** (модалка по клику на имя сервера): имя (PATCH),
+  каналы — создание/переименование/удаление с выбором типа и категории,
+  роли — создание/удаление/цвет/hoist/41 флаг прав, участники — ник, роли,
+  кик/бан, бан-лист с разбаном, инвайты — создание/отзыв.
+- **Универсальный REST-прокси `api_request`**: любой метод/путь через
+  Rust-слой с общими rate limits и заголовками — фундамент для UI и плагинов.
+- **Плагины (Vencord-style)**: JS-объект-литералы в app_data/plugins,
+  исполнение в WebView через `new Function` с sourceURL, события
+  (message:create/update/delete/send, dispatch, ready, guild:*, voice:state),
+  хук `message:send` (заменить/отменить отправку), REST-мост, CSS-инъекции
+  с авто-чисткой, suppress-флаги (`typing`), изолированный storage, тосты.
+  UI: вкладка «Плагины» в настройках (установка из кода, вкл/выкл, код,
+  удаление). Примеры: silent-typing, message-logger.
+- QR-SVG генерируется на Rust (crate `qrcode`, path-only, quiet zone 4).
+- Демо-режим: симуляция QR-логина, мини-REST для настроек сервера,
+  in-memory плагины — весь новый UI можно потрогать в браузере.
+
+### Dependencies
+- + rsa 0.9, sha2 0.10, hmac 0.12, base64 0.22, rand 0.8, qrcode 0.14
 
 ## [0.2.0] — 2026-10-13
 
@@ -103,6 +142,7 @@
   (`.github/workflows/release.yml`).
 - Dependabot (npm + cargo + actions), шаблоны issue/PR, .editorconfig, CHANGELOG.
 
-[Unreleased]: https://github.com/VinylRUS/Rustycord/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/VinylRUS/Rustycord/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/VinylRUS/Rustycord/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/VinylRUS/Rustycord/releases/tag/v0.2.0
 [0.1.0]: https://github.com/VinylRUS/Rustycord/releases/tag/v0.1.0

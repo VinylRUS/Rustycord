@@ -41,6 +41,19 @@ pub async fn handle_dispatch(
                     state.cache.write().unwrap().user = Some(u);
                 }
             }
+            // Пользовательский READY (в отличие от бот-READY) несёт DM-каналы
+            // прямо в private_channels — кладём их в кэш, чтобы UI сразу
+            // видел список личных сообщений.
+            if let Some(dms) = d.get("private_channels").and_then(|v| v.as_array()) {
+                let mut cache = state.cache.write().unwrap();
+                for ch in dms {
+                    if let Ok(c) = serde_json::from_value::<Channel>(ch.clone()) {
+                        if !cache.dms.iter().any(|x| x.id == c.id) {
+                            cache.dms.push(c);
+                        }
+                    }
+                }
+            }
             tracing::info!("gateway: READY — {username} ({user_id}), session {session_id}");
             let _ = app.emit(
                 "discord://ready",

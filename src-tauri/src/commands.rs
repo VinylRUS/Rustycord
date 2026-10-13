@@ -1,17 +1,21 @@
 //! Tauri IPC commands — the seam the Svelte UI calls through `invoke()`.
 //! Each command is a thin, typed wrapper over the REST client or gateway.
 
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tauri::State;
+use tokio_util::sync::CancellationToken;
 
+use crate::auth;
 use crate::gateway::client::run_gateway;
 use crate::rest::client::{urlencode, RestClient};
-use crate::rest::models::{Channel, CurrentUser, GatewayBot, Message};
+use crate::rest::models::{Channel, CurrentUser, Message};
 use crate::snowflake;
-use crate::state::{AppState, GatewayCommand, INTENTS_FULL};
+use crate::state::{AppState, GatewayCommand, INTENTS_USER};
+use crate::superprops;
 use crate::voice::coordinator;
 
 fn es<E: std::fmt::Display>(e: E) -> String {
@@ -24,8 +28,9 @@ fn rest_of(state: &State<'_, Arc<AppState>>) -> Result<RestClient, String> {
         .read()
         .unwrap()
         .clone()
-        .ok_or_else(|| "Не подключено — войди через Bot Token".to_string())?;
-    RestClient::new(&token).map_err(es)
+        .ok_or_else(|| "Не подключено — войди в аккаунт".to_string())?;
+    let build = state.build_number.load(Ordering::SeqCst);
+    RestClient::new(&token, build).map_err(es)
 }
 
 /// Stop gateway + voice tasks (if running).
@@ -43,7 +48,80 @@ async fn stop_tasks(state: &State<'_, Arc<AppState>>) {
     state.voice_handshake.lock().unwrap().clear();
 }
 
-/// Validate the token, snapshot gateway info, spawn the gateway task.
+/* ============================ AUTH ============================ */
+
+/// Шаг 1 входа по email+паролю. Возможен второй шаг (2FA) — тогда
+/// возвращаем {status:"mfa", ticket} и UI просит код.
+#[tauri::command]
+pub async fn auth_login_email(email: String, password: String) -> Result<Value, String> {
+    let email = email.trim().to_string();
+    if email.is_empty() || password.is_empty() {
+        return Err("Заполни email и пароль".into());
+    }
+    match auth::login::login(&email, &password).await {
+        Ok(auth::login::LoginOutcome::Token(token)) => {
+            Ok(json!({ "status": "ok", "token": token }))
+        }
+        Ok(auth::login::LoginOutcome::Mfa { ticket, sms }) => {
+            Ok(json!({ "status": "mfa", "ticket": ticket, "sms": sms }))
+        }
+        Err(e) => Err(format!("{e:#}")),
+    }
+}
+
+/// Шаг 2: код из приложения-аутентификатора (TOTP).
+#[tauri::command]
+pub async fn auth_submit_mfa(code: String, ticket: String) -> Result<Value, String> {
+    match auth::login::submit_mfa(code.trim(), &ticket).await {
+        Ok(auth::login::LoginOutcome::Token(token)) => {
+            Ok(json!({ "status": "ok", "token": token }))
+        }
+        Ok(_) => Err("Неожиданный ответ 2FA".into()),
+        Err(e) => Err(format!("{e:#}")),
+    }
+}
+
+/// QR-логин: стартуем remote-auth сессию. Дальше UI слушает события
+/// `discord://qr` (fingerprint → scanned → done) и рисует QR-код.
+#[tauri::command]
+pub async fn auth_start_qr(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    qr_stop(&state).await;
+    let cancel = CancellationToken::new();
+    *state.qr_cancel.write().unwrap() = Some(cancel.clone());
+    let app_for_task = app.clone();
+    let task = tauri::async_runtime::spawn(async move {
+        if let Err(e) = auth::remote::run_remote_auth(app_for_task, cancel).await {
+            tracing::warn!("remote-auth: {e:#}");
+        }
+    });
+    *state.qr_task.lock().await = Some(task);
+    Ok(())
+}
+
+/// Отменить QR-сессию (пользователь ушёл с таба/закрыл экран логина).
+#[tauri::command]
+pub async fn auth_cancel_qr(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    qr_stop(&state).await;
+    Ok(())
+}
+
+async fn qr_stop(state: &State<'_, Arc<AppState>>) {
+    if let Some(cancel) = state.qr_cancel.write().unwrap().take() {
+        cancel.cancel();
+    }
+    // Даём задаче ~мгновение на вежливый close-кадр перед abort.
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    if let Some(task) = state.qr_task.lock().await.take() {
+        task.abort();
+    }
+}
+
+/* ========================== CONNECT =========================== */
+
+/// Validate the user token, spawn the gateway + voice tasks.
 #[tauri::command]
 pub async fn connect(
     app: tauri::AppHandle,
@@ -58,31 +136,39 @@ pub async fn connect(
     stop_tasks(&state).await;
 
     // Fail fast on invalid token / network before spawning anything.
-    let rest = RestClient::new(&token).map_err(es)?;
+    let build = state.build_number.load(Ordering::SeqCst);
+    let rest = RestClient::new(&token, build).map_err(es)?;
     let me: CurrentUser = rest.get_json("/users/@me").await.map_err(|e| {
-        // 401 → понятное сообщение вместо сырой ошибки.
         let msg = e.to_string();
         if msg.contains("401") {
-            "Неверный токен (401). Перепроверь его в Developer Portal → Bot → Reset Token."
+            "Токен отклонён (401) — сессия могла быть сброшена. Войди заново через QR или email."
                 .to_string()
         } else {
             msg
         }
     })?;
-    let gw: GatewayBot = rest.get_json("/gateway/bot").await.map_err(es)?;
+
+    // Свежий client_build_number в фоне — следующие REST-вызовы возьмут его
+    // из state (см. rest_of). /users/@me работает и со старым, так что
+    // логин не ждёт.
+    {
+        let state_inner: Arc<AppState> = Arc::clone(state.inner());
+        tauri::async_runtime::spawn(async move {
+            if let Some(b) = superprops::fetch_build_number().await {
+                state_inner.build_number.store(b, Ordering::SeqCst);
+            }
+        });
+    }
 
     // Fresh state.
     state.cache.write().unwrap().reset();
     state.cache.write().unwrap().user = Some(me.clone());
     *state.token.write().unwrap() = Some(token);
-    state.intents.store(INTENTS_FULL, Ordering::SeqCst);
-    *state.gateway_url.write().unwrap() = gw.url;
-    tracing::info!(
-        "connect: бот @{} (id {}), shards={:?}",
-        me.username,
-        me.id,
-        gw.shards
-    );
+    state.intents.store(INTENTS_USER, Ordering::SeqCst);
+    // Пользовательская сессия ходит на общий gateway (без /gateway/bot,
+    // это бот-эндпоинт — юзеру он вернёт 401).
+    *state.gateway_url.write().unwrap() = "wss://gateway.discord.gg".to_string();
+    tracing::info!("connect: пользователь @{} (id {})", me.username, me.id);
 
     // Gateway task.
     let (tx, rx) = tokio::sync::mpsc::channel(64);
@@ -113,6 +199,212 @@ pub async fn disconnect(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.emit_status("shutdown", None);
     Ok(())
 }
+
+/* ===================== GENERIC REST (UI + plugins) ===================== */
+
+/// Универсальный REST-прокси: любой метод/путь относительно /api/v10.
+/// Это «escape hatch» для управления сервером и для плагинов — UI строит
+/// запросы сам, Rust отвечает за заголовки и rate limits.
+#[tauri::command]
+pub async fn api_request(
+    state: State<'_, Arc<AppState>>,
+    method: String,
+    path: String,
+    body: Option<Value>,
+) -> Result<Value, String> {
+    let rest = rest_of(&state)?;
+    let path = if path.starts_with('/') {
+        path
+    } else {
+        format!("/{path}")
+    };
+    let method = method.to_uppercase();
+    let result: Result<Value, _> = match method.as_str() {
+        "GET" => rest.get_json::<Value>(&path).await,
+        "POST" => {
+            rest.post_json::<Value>(&path, body.unwrap_or(Value::Null))
+                .await
+        }
+        "PATCH" => {
+            rest.patch_json::<Value>(&path, body.unwrap_or(Value::Null))
+                .await
+        }
+        "PUT" => match body {
+            Some(b) => rest.put_json::<Value>(&path, b).await,
+            None => rest.put_empty(&path).await.map(|_| Value::Null),
+        },
+        "DELETE" => rest.delete::<Value>(&path).await,
+        other => return Err(format!("Неизвестный метод: {other}")),
+    };
+    result.map_err(|e| humanize_api_error(&e.to_string()))
+}
+
+/// Человекочастные сообщения для типовых ошибок управления сервером.
+fn humanize_api_error(raw: &str) -> String {
+    if raw.contains("403") {
+        return format!("{raw} — не хватает прав (проверь свою роль и иерархию)");
+    }
+    if raw.contains("401") {
+        return format!("{raw} — сессия сброшена, войди заново");
+    }
+    raw.to_string()
+}
+
+/* ========================== PLUGINS =========================== */
+
+fn plugins_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    use tauri::Manager;
+    let dir = app.path().app_data_dir().map_err(es)?.join("plugins");
+    std::fs::create_dir_all(&dir).map_err(es)?;
+    Ok(dir)
+}
+
+/// plugins.json: { "file.js": { "enabled": bool, "meta": {...} } }
+fn plugins_index_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(plugins_dir(app)?.join("plugins.json"))
+}
+
+fn read_plugins_index(app: &tauri::AppHandle) -> Value {
+    plugins_index_path(app)
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
+fn write_plugins_index(app: &tauri::AppHandle, idx: &Value) -> Result<(), String> {
+    let path = plugins_index_path(app)?;
+    std::fs::write(&path, serde_json::to_string_pretty(idx).map_err(es)?).map_err(es)
+}
+
+/// Валидное имя файла плагина: [a-zA-Z0-9_-]+.js
+fn safe_plugin_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    let base = name.strip_suffix(".js").unwrap_or(name);
+    if base.is_empty()
+        || !base
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("Имя плагина: только латиница, цифры, - и _".into());
+    }
+    Ok(format!("{base}.js"))
+}
+
+#[tauri::command]
+pub async fn plugin_list(app: tauri::AppHandle) -> Result<Value, String> {
+    let dir = plugins_dir(&app)?;
+    let idx = read_plugins_index(&app);
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(es)? {
+        let Ok(entry) = entry else { continue };
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if !file_name.ends_with(".js") || file_name == "plugins.json" {
+            continue;
+        }
+        let entry_idx = idx.get(&file_name).cloned().unwrap_or(Value::Null);
+        out.push(json!({
+            "file": file_name,
+            "enabled": entry_idx.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+            "meta": entry_idx.get("meta").cloned().unwrap_or(Value::Null),
+            "size": entry.metadata().map(|m| m.len()).unwrap_or(0),
+        }));
+    }
+    out.sort_by(|a, b| {
+        a["file"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["file"].as_str().unwrap_or(""))
+    });
+    Ok(Value::Array(out))
+}
+
+#[tauri::command]
+pub async fn plugin_save(
+    app: tauri::AppHandle,
+    name: String,
+    code: String,
+) -> Result<Value, String> {
+    let file = safe_plugin_name(&name)?;
+    let dir = plugins_dir(&app)?;
+    std::fs::write(dir.join(&file), code).map_err(es)?;
+    let mut idx = read_plugins_index(&app);
+    // Новый/обновлённый плагин по умолчанию выключен — включит пользователь.
+    if idx.get(&file).is_none() {
+        idx[file.as_str()] = json!({ "enabled": false, "meta": null });
+    }
+    write_plugins_index(&app, &idx)?;
+    Ok(json!({ "file": file, "saved": true }))
+}
+
+#[tauri::command]
+pub async fn plugin_delete(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    let file = safe_plugin_name(&name)?;
+    let dir = plugins_dir(&app)?;
+    let target = dir.join(&file);
+    if target.exists() {
+        std::fs::remove_file(&target).map_err(es)?;
+    }
+    let mut idx = read_plugins_index(&app);
+    if let Some(obj) = idx.as_object_mut() {
+        obj.remove(&file);
+    }
+    write_plugins_index(&app, &idx)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn plugin_set_enabled(
+    app: tauri::AppHandle,
+    name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let file = safe_plugin_name(&name)?;
+    let dir = plugins_dir(&app)?;
+    if !dir.join(&file).exists() {
+        return Err(format!("Плагин {file} не найден"));
+    }
+    let mut idx = read_plugins_index(&app);
+    let entry = idx
+        .as_object_mut()
+        .ok_or_else(|| "битый plugins.json".to_string())?
+        .entry(file.clone())
+        .or_insert(json!({ "enabled": false, "meta": null }));
+    entry["enabled"] = json!(enabled);
+    write_plugins_index(&app, &idx)?;
+    Ok(())
+}
+
+/// Фронт после исполнения кода плагина присылает его манифест (name,
+/// version, author, description) — сохраняем, чтобы список показывал
+/// человекочитаемые карточки без исполнения JS.
+#[tauri::command]
+pub async fn plugin_set_meta(
+    app: tauri::AppHandle,
+    name: String,
+    meta: Value,
+) -> Result<(), String> {
+    let file = safe_plugin_name(&name)?;
+    let mut idx = read_plugins_index(&app);
+    let entry = idx
+        .as_object_mut()
+        .ok_or_else(|| "битый plugins.json".to_string())?
+        .entry(file.clone())
+        .or_insert(json!({ "enabled": false, "meta": null }));
+    entry["meta"] = meta;
+    write_plugins_index(&app, &idx)?;
+    Ok(())
+}
+
+/// Прочитать код плагина (например, для редактирования в UI).
+#[tauri::command]
+pub async fn plugin_read(app: tauri::AppHandle, name: String) -> Result<String, String> {
+    let file = safe_plugin_name(&name)?;
+    let dir = plugins_dir(&app)?;
+    std::fs::read_to_string(dir.join(&file)).map_err(|e| format!("Плагин {file}: {e}"))
+}
+
+/* ====================== MESSENGER / CORE ====================== */
 
 /// Full cache snapshot (used for hot-reload recovery).
 #[tauri::command]

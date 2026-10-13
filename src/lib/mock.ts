@@ -8,7 +8,7 @@
  *     is exactly what the Rust core receives from the real Gateway.
  */
 import type { Backend, GetMessageOptions } from './ipc';
-import type { BackendEvent, Channel, Guild, Member, Message, Presence, Role, SnowflakeInfo, StateSnapshot, User, VoiceState } from './types';
+import type { BackendEvent, Channel, Guild, LoginResult, Member, Message, PluginInfo, PluginMeta, Presence, Role, SnowflakeInfo, StateSnapshot, User, VoiceState } from './types';
 import { parseSnowflakeLocal } from './time';
 
 /* ---------- helpers ---------- */
@@ -214,6 +214,42 @@ const SCRIPT: Array<{ typing: User; author: User; text: string; channel: string 
 
 /* ---------- backend ---------- */
 
+/** Схематичный QR для демо-режима (без зависимостей). */
+function demoQrSvg(): string {
+  const cells: Array<[number, number]> = [];
+  // finder-паттерны + псевдослучайная «пыль»
+  for (let i = 0; i < 7; i++) {
+    for (let j = 0; j < 7; j++) {
+      const edge = i === 0 || i === 6 || j === 0 || j === 6;
+      const core = i >= 2 && i <= 4 && j >= 2 && j <= 4;
+      if (edge || core) cells.push([i, j], [i + 17, j], [i, j + 17]);
+    }
+  }
+  for (let i = 8; i < 16; i++) {
+    for (let j = 8; j < 16; j++) {
+      if ((i * 7 + j * 13) % 5 < 2) cells.push([i, j]);
+    }
+  }
+  const path = cells.map(([x, y]) => `M${x + 2},${y + 2}h1v1h-1z`).join('');
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 25 25" shape-rendering="crispEdges"><rect width="100%" height="100%" fill="#ffffff"/><path d="${path}" fill="#060607"/></svg>`;
+}
+
+/** Демо-плагин: показывает формат плагинов RustyCord. */
+const DEMO_PLUGIN_SILENT_TYPING = `/* RustyCord plugin — объект-литерал, как у Vencord, только проще */
+({
+  name: 'Silent Typing',
+  version: '1.0.0',
+  author: 'RustyCord',
+  description: 'Не отправлять индикатор «печатает…»',
+  start(api) {
+    api.suppress('typing', true);
+  },
+  stop(api) {
+    api.suppress('typing', false);
+  }
+});
+`;
+
 export class MockBackend implements Backend {
   readonly mode = 'mock' as const;
 
@@ -392,6 +428,110 @@ export class MockBackend implements Backend {
 
   async parseSnowflake(id: string): Promise<SnowflakeInfo> {
     return parseSnowflakeLocal(id);
+  }
+
+  /* ---------- user auth (демо: недоступно, только в Tauri-режиме) ---------- */
+
+  async loginEmail(): Promise<LoginResult> {
+    throw new Error('Демо-режим: вход по email доступен только в приложении (Tauri)');
+  }
+
+  async submitMfa(): Promise<LoginResult> {
+    throw new Error('Демо-режим: 2FA доступна только в приложении (Tauri)');
+  }
+
+  async startQr(): Promise<void> {
+    // Симулируем QR-флоу: через секунду «просканировано», ещё через две — токен.
+    await delay(400);
+    this.emit({ type: 'qr', stage: 'fingerprint', svg: demoQrSvg(), fingerprint: 'demo-fingerprint' });
+    await delay(1200);
+    this.emit({ type: 'qr', stage: 'scanned' });
+    await delay(800);
+    this.emit({ type: 'qr', stage: 'done', token: 'demo-token' });
+  }
+
+  async cancelQr(): Promise<void> {
+    /* no-op */
+  }
+
+  /* ---------- generic REST (мини-эмуляция для настроек сервера) ---------- */
+
+  async apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
+    const m = method.toUpperCase();
+    if (/\/bans$/.test(path) && m === 'GET') return [];
+    if (/\/invites$/.test(path) && m === 'GET') {
+      return [{ code: 'demo24h', channel: { id: CH_GENERAL, name: 'основной' }, inviter: ALEXEY, uses: 3, max_uses: 0, expires_at: null, temporary: false }];
+    }
+    if (m === 'PATCH' && /^\/channels\//.test(path)) {
+      const id = path.split('/')[2];
+      const name = (body as { name?: string } | undefined)?.name;
+      const ch = GUILD.channels?.find((c) => c.id === id);
+      if (ch && name) {
+        ch.name = name;
+        this.emit({ type: 'dispatch', t: 'CHANNEL_UPDATE', d: { ...ch } });
+        return ch;
+      }
+      return {};
+    }
+    if (m === 'POST' && /^\/guilds\/.+\/channels$/.test(path)) {
+      const b = (body ?? {}) as { name?: string; type?: number; parent_id?: string | null };
+      const channel: Channel = {
+        id: this.nextId(),
+        type: (b.type ?? 0) as Channel['type'],
+        guild_id: GUILD_ID,
+        name: b.name ?? 'новый-канал',
+        position: 99,
+        parent_id: b.parent_id ?? null,
+      };
+      GUILD.channels?.push(channel);
+      this.emit({ type: 'dispatch', t: 'CHANNEL_CREATE', d: channel });
+      return channel;
+    }
+    if (m === 'DELETE' && /^\/channels\//.test(path)) {
+      const id = path.split('/')[2];
+      const ch = GUILD.channels?.find((c) => c.id === id);
+      if (GUILD.channels) GUILD.channels = GUILD.channels.filter((c) => c.id !== id);
+      if (ch) this.emit({ type: 'dispatch', t: 'CHANNEL_DELETE', d: ch });
+      return {};
+    }
+    if (m === 'PATCH' && /^\/guilds\/[^/]+$/.test(path)) {
+      const name = (body as { name?: string } | undefined)?.name;
+      if (name) this.emit({ type: 'dispatch', t: 'GUILD_UPDATE', d: { ...GUILD, name } });
+      return { ok: true };
+    }
+    throw new Error(`Демо-режим: ${method} ${path} не поддерживается (нужен Tauri + реальный аккаунт)`);
+  }
+
+  /* ---------- plugins (in-memory, чтобы UI можно было потрогать) ---------- */
+
+  private pluginStore: Map<string, { code: string; enabled: boolean; meta: PluginMeta | null }> = new Map([
+    ['silent-typing.js', { code: DEMO_PLUGIN_SILENT_TYPING, enabled: true, meta: { name: 'Silent Typing', version: '1.0.0', author: 'RustyCord', description: 'Не отправлять индикатор «печатает…»' } }],
+  ]);
+
+  async listPlugins(): Promise<PluginInfo[]> {
+    return [...this.pluginStore.entries()].map(([file, v]) => ({ file, enabled: v.enabled, meta: v.meta, size: v.code.length }));
+  }
+
+  async savePlugin(name: string, code: string): Promise<void> {
+    this.pluginStore.set(name, { code, enabled: false, meta: null });
+  }
+
+  async deletePlugin(name: string): Promise<void> {
+    this.pluginStore.delete(name);
+  }
+
+  async setPluginEnabled(name: string, enabled: boolean): Promise<void> {
+    const v = this.pluginStore.get(name);
+    if (v) v.enabled = enabled;
+  }
+
+  async setPluginMeta(name: string, meta: PluginMeta): Promise<void> {
+    const v = this.pluginStore.get(name);
+    if (v) v.meta = meta;
+  }
+
+  async readPlugin(name: string): Promise<string> {
+    return this.pluginStore.get(name)?.code ?? '';
   }
 
   /** The "live gateway": looping script of realistic events. */

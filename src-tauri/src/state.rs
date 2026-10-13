@@ -3,7 +3,7 @@
 //! plumbing handles for the gateway task and voice sessions.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::sync::mpsc;
@@ -12,19 +12,29 @@ use tokio_util::sync::CancellationToken;
 use crate::rest::models::{Channel, Member, Presence, Role, User, VoiceState};
 use crate::voice::{VoiceControls, VoiceWsCmd};
 
-/// Gateway intents we request on connect.
-/// GUILDS | GUILD_MEMBERS* | GUILD_VOICE_STATES | GUILD_PRESENCES* |
-/// GUILD_MESSAGES | GUILD_MESSAGE_TYPING | DIRECT_MESSAGES |
-/// DIRECT_MESSAGE_TYPING | MESSAGE_CONTENT*   (* = privileged)
-pub const INTENTS_FULL: u32 = (1 << 0)
+/// Интенты пользовательской сессии: юзер-аккаунту доступны все биты без
+/// аппрува в Developer Portal (в отличие от ботов). Включаем всё вплоть до
+/// GUILD_SCHEDULED_EVENTS — как это делает официальный клиент.
+///   0..14 — GUILDS … DIRECT_MESSAGE_TYPING
+///   15    — MESSAGE_CONTENT (для ботов privileged, для юзера — обычный)
+///   16    — GUILD_SCHEDULED_EVENTS
+pub const INTENTS_USER: u32 = (1 << 0)
     | (1 << 1)
+    | (1 << 2)
+    | (1 << 3)
+    | (1 << 4)
+    | (1 << 5)
+    | (1 << 6)
     | (1 << 7)
     | (1 << 8)
     | (1 << 9)
     | (1 << 10)
+    | (1 << 11)
     | (1 << 12)
     | (1 << 13)
-    | (1 << 15);
+    | (1 << 14)
+    | (1 << 15)
+    | (1 << 16);
 
 /// Graceful degradation when the portal has privileged intents disabled:
 /// we drop the three privileged bits and keep basic chat working.
@@ -117,10 +127,15 @@ pub struct AppState {
     pub token: RwLock<Option<String>>,
     /// Active intents bitfield (may degrade after close code 4014).
     pub intents: AtomicU32,
+    /// client_build_number для X-Super-Properties (тянем с discord.com).
+    pub build_number: AtomicU64,
     pub gateway_url: RwLock<String>,
     pub gateway_tx: RwLock<Option<mpsc::Sender<GatewayCommand>>>,
     pub gateway_task: tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     pub shutdown: RwLock<CancellationToken>,
+    /// QR remote-auth: таск + токен отмены (живёт только на экране логина).
+    pub qr_task: tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    pub qr_cancel: RwLock<Option<CancellationToken>>,
     /// guild_id → partially assembled voice handshake.
     pub voice_handshake: Mutex<HashMap<String, VoiceHandshake>>,
     /// guild_id → running voice session.
@@ -140,11 +155,14 @@ impl AppState {
             app,
             cache: RwLock::new(Cache::default()),
             token: RwLock::new(None),
-            intents: AtomicU32::new(INTENTS_FULL),
+            intents: AtomicU32::new(INTENTS_USER),
+            build_number: AtomicU64::new(crate::superprops::FALLBACK_BUILD_NUMBER),
             gateway_url: RwLock::new("wss://gateway.discord.gg".to_string()),
             gateway_tx: RwLock::new(None),
             gateway_task: tokio::sync::Mutex::new(None),
             shutdown: RwLock::new(CancellationToken::new()),
+            qr_task: tokio::sync::Mutex::new(None),
+            qr_cancel: RwLock::new(None),
             voice_handshake: Mutex::new(HashMap::new()),
             voice_tasks: tokio::sync::Mutex::new(HashMap::new()),
             voice_sessions: Mutex::new(HashMap::new()),

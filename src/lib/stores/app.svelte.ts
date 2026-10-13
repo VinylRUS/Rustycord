@@ -6,13 +6,17 @@
  * Components read reactive fields; only this file mutates them.
  */
 import { createBackend, type Backend } from '../ipc';
+import { plugins, onPluginToast } from '../plugins/manager';
 import type {
+  BanEntry,
   Channel,
   ConnStage,
   Guild,
+  Invite,
   Member,
   Message,
   Presence,
+  QrStage,
   Role,
   User,
   VoiceState,
@@ -20,6 +24,7 @@ import type {
 import { displayName } from '../avatars';
 
 const TOKEN_KEY = 'rustycord.token';
+const ME_KEY = 'rustycord.me';
 const TYPING_TTL = 8000;
 const SPEAKING_TTL = 2500;
 
@@ -42,11 +47,23 @@ export class AppStore {
   /* ---------- connection ---------- */
   backend: Backend | null = null;
   unlisten: (() => void) | null = null;
+  unlistenToast: (() => void) | null = null;
   mode = $state<'none' | 'tauri' | 'mock'>('none');
   connStage = $state<ConnStage | 'offline'>('offline');
   loginBusy = $state(false);
   loginError = $state('');
   booted = false;
+
+  /* ---------- user auth (v0.3.0) ---------- */
+  /** QR-флоу: qrStage 'fingerprint' → qrSvg доступен; 'done' → автологин. */
+  qrStage = $state<QrStage | 'idle'>('idle');
+  qrSvg = $state('');
+  qrFingerprint = $state('');
+  /** email-логин дошёл до 2FA — ждём код из приложения. */
+  mfaTicket = $state<string | null>(null);
+
+  /* ---------- модалка управления сервером ---------- */
+  showGuildSettings = $state<string | null>(null);
 
   /* ---------- cache (mirror of Rust cache) ---------- */
   user = $state<User | null>(null);
@@ -133,6 +150,8 @@ export class AppStore {
       const user = await backend.connect(token);
       this.user = user;
       localStorage.setItem(TOKEN_KEY, token);
+      localStorage.setItem(ME_KEY, JSON.stringify({ id: user.id, username: user.username }));
+      void plugins.loadAll();
     } catch (e) {
       this.loginError = e instanceof Error ? e.message : String(e);
       this.detach();
@@ -144,6 +163,91 @@ export class AppStore {
     }
   }
 
+  /* ---------- user auth (v0.3.0) ---------- */
+
+  /** Бэкенд для экрана логина: Tauri если запущены в приложении, mock в браузере. */
+  private async ensureBackend(): Promise<Backend> {
+    if (!this.backend) {
+      const backend = await createBackend(detectTauri() ? 'tauri' : 'mock');
+      this.attach(backend);
+    }
+    return this.backend!;
+  }
+
+  /** Общий финал всех трёх способов входа: есть токен → connect. */
+  async finishLogin(token: string) {
+    this.qrStage = 'idle';
+    this.qrSvg = '';
+    this.qrFingerprint = '';
+    this.mfaTicket = null;
+    if (this.mode === 'mock') {
+      // Демо-режим: моковый QR «выдал» токен — просто стартуем демо-сессию.
+      await this.startDemo();
+      return;
+    }
+    await this.login(token);
+  }
+
+  /** Шаг 1: email+пароль. Может вернуть mfaTicket — тогда ждём код. */
+  async loginEmail(email: string, password: string) {
+    const backend = await this.ensureBackend();
+    this.loginBusy = true;
+    this.loginError = '';
+    try {
+      const res = await backend.loginEmail(email, password);
+      if (res.status === 'ok' && res.token) {
+        await this.finishLogin(res.token);
+      } else if (res.status === 'mfa' && res.ticket) {
+        this.mfaTicket = res.ticket;
+      }
+    } catch (e) {
+      this.loginError = e instanceof Error ? e.message : String(e);
+    } finally {
+      this.loginBusy = false;
+    }
+  }
+
+  /** Шаг 2: код из приложения-аутентификатора. */
+  async submitMfa(code: string) {
+    if (!this.backend || !this.mfaTicket) return;
+    this.loginBusy = true;
+    this.loginError = '';
+    try {
+      const res = await this.backend.submitMfa(code.trim(), this.mfaTicket);
+      if (res.status === 'ok' && res.token) {
+        await this.finishLogin(res.token);
+      }
+    } catch (e) {
+      this.loginError = e instanceof Error ? e.message : String(e);
+    } finally {
+      this.loginBusy = false;
+    }
+  }
+
+  /** QR-логин: стартуем сессию, дальнейшее — через события qr. */
+  async startQr() {
+    const backend = await this.ensureBackend();
+    this.qrStage = 'idle';
+    this.qrSvg = '';
+    this.qrFingerprint = '';
+    this.loginError = '';
+    try {
+      await backend.startQr();
+    } catch (e) {
+      this.loginError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async cancelQr() {
+    try {
+      await this.backend?.cancelQr();
+    } catch {
+      /* silent */
+    }
+    this.qrStage = 'idle';
+    this.qrSvg = '';
+  }
+
   async startDemo() {
     this.loginBusy = true;
     this.loginError = '';
@@ -152,6 +256,8 @@ export class AppStore {
       this.attach(backend);
       const user = await backend.connect('demo');
       this.user = user;
+      localStorage.setItem(ME_KEY, JSON.stringify({ id: user.id, username: user.username }));
+      void plugins.loadAll();
     } catch (e) {
       this.loginError = e instanceof Error ? e.message : String(e);
       this.detach();
@@ -162,6 +268,8 @@ export class AppStore {
 
   async logout() {
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(ME_KEY);
+    await plugins.stopAll();
     try {
       await this.backend?.disconnect();
     } catch {
@@ -175,12 +283,16 @@ export class AppStore {
     this.detach();
     this.backend = backend;
     this.mode = backend.mode;
+    plugins.attach(backend);
     this.unlisten = backend.onEvent((ev) => this.handleEvent(ev));
+    this.unlistenToast = onPluginToast((text) => this.toast(text));
   }
 
   private detach() {
     this.unlisten?.();
     this.unlisten = null;
+    this.unlistenToast?.();
+    this.unlistenToast = null;
     this.backend = null;
   }
 
@@ -202,6 +314,11 @@ export class AppStore {
     this.connStage = 'offline';
     this.mode = 'none';
     this.showSettings = false;
+    this.showGuildSettings = null;
+    this.qrStage = 'idle';
+    this.qrSvg = '';
+    this.qrFingerprint = '';
+    this.mfaTicket = null;
   }
 
   /* ================= event stream ================= */
@@ -220,15 +337,41 @@ export class AppStore {
       case 'ready':
         this.user = ev.user;
         this.sessionId = ev.session_id;
+        plugins.emit('ready', ev.user);
         break;
       case 'dispatch':
         this.handleDispatch(ev.t, ev.d);
+        break;
+      case 'qr':
+        this.handleQr(ev);
         break;
       case 'voice':
         this.handleVoice(ev.kind, ev.data);
         break;
       case 'warning':
         this.toast(ev.message, 'error');
+        break;
+    }
+  }
+
+  /* ---------- QR remote-auth поток ---------- */
+
+  handleQr(ev: { stage: QrStage; svg?: string; fingerprint?: string; token?: string; message?: string }) {
+    this.qrStage = ev.stage;
+    switch (ev.stage) {
+      case 'fingerprint':
+        this.qrSvg = ev.svg ?? '';
+        this.qrFingerprint = ev.fingerprint ?? '';
+        break;
+      case 'scanned':
+        break; // просто индикатор «подтверди на телефоне»
+      case 'done':
+        if (ev.token) void this.finishLogin(ev.token);
+        break;
+      case 'cancelled':
+      case 'timeout':
+      case 'error':
+        this.loginError = ev.message ?? 'QR-сессия прервана';
         break;
     }
   }
@@ -262,17 +405,27 @@ export class AppStore {
   }
 
   handleDispatch(t: string, d: unknown) {
+    // Все сырые события — плагинам (как Vencord прокидывает dispatch).
+    plugins.emit('dispatch', { t, d });
     switch (t) {
       case 'READY': {
-        const p = d as { user: User; session_id: string };
+        const p = d as { user: User; session_id: string; private_channels?: Channel[] };
         this.user = p.user;
         this.sessionId = p.session_id;
+        // Юзер-READY несёт DM-каналы сразу — Rust уже положил их в кэш,
+        // здесь отражаем на фронтенд.
+        if (p.private_channels) {
+          for (const c of p.private_channels) {
+            if (!this.dms.some((x) => x.id === c.id)) this.dms.push(c);
+          }
+        }
         break;
       }
       case 'GUILD_CREATE': {
         const g = d as Guild;
         this.guilds = this.guilds.filter((x) => x.id !== g.id);
         this.guilds.push(g);
+        plugins.emit('guild:create', g);
         // seed caches
         const members: Record<string, Member> = {};
         for (const m of g.members ?? []) if (m.user) members[m.user.id] = m;
@@ -289,12 +442,14 @@ export class AppStore {
         const g = d as Guild;
         const idx = this.guilds.findIndex((x) => x.id === g.id);
         if (idx >= 0) this.guilds[idx] = { ...this.guilds[idx], ...g };
+        plugins.emit('guild:update', g);
         break;
       }
       case 'GUILD_DELETE': {
         const g = d as { id: string };
         this.guilds = this.guilds.filter((x) => x.id !== g.id);
         if (this.activeGuildId === g.id) this.selectGuild(this.guilds[0]?.id ?? null);
+        plugins.emit('guild:delete', g);
         break;
       }
       case 'GUILD_ROLE_UPDATE':
@@ -380,6 +535,7 @@ export class AppStore {
         this.appendMessage(m.channel_id, m);
         if (m.channel_id !== this.activeChannelId) this.unread[m.channel_id] = true;
         this.clearTyping(m.channel_id, m.author.id);
+        plugins.emit('message:create', m);
         break;
       }
       case 'MESSAGE_UPDATE': {
@@ -389,12 +545,14 @@ export class AppStore {
           const i = list.findIndex((x) => x.id === m.id);
           if (i >= 0) list[i] = { ...list[i], ...m };
         }
+        plugins.emit('message:update', m);
         break;
       }
       case 'MESSAGE_DELETE': {
         const p = d as { channel_id: string; id: string };
         const list = this.messagesByChannel[p.channel_id];
         if (list) this.messagesByChannel[p.channel_id] = list.filter((m) => m.id !== p.id);
+        plugins.emit('message:delete', p);
         break;
       }
       case 'MESSAGE_REACTION_ADD':
@@ -449,6 +607,7 @@ export class AppStore {
       }
       case 'VOICE_STATE_UPDATE': {
         const vs = d as VoiceState;
+        plugins.emit('voice:state', vs);
         if (!vs.guild_id) break;
         const list = (this.voiceByGuild[vs.guild_id] ?? []).filter((v) => v.user_id !== vs.user_id);
         if (vs.channel_id) list.push(vs);
@@ -539,12 +698,20 @@ export class AppStore {
     if (!ch || !this.backend) return;
     const content = this.draft.trim();
     if (!content) return;
+    // Хук плагинов: могут изменить текст или отменить отправку (вернуть false).
+    const finalContent = await plugins.beforeSend(content);
+    if (finalContent === false) {
+      this.draft = '';
+      return;
+    }
+    const text = (typeof finalContent === 'string' ? finalContent : content).trim();
+    if (!text) return;
     this.draft = '';
     try {
-      const m = await this.backend.sendMessage(ch, content);
+      const m = await this.backend.sendMessage(ch, text);
       this.appendMessage(ch, m);
     } catch (e) {
-      this.draft = content;
+      this.draft = text;
       this.toast(`Не удалось отправить: ${errMsg(e)}`, 'error');
     }
   }
@@ -605,6 +772,8 @@ export class AppStore {
   async typingPing() {
     const ch = this.activeChannelId;
     if (!ch || !this.backend) return;
+    // Плагины (например, Silent Typing) могут подавить индикатор.
+    if (plugins.suppressions['typing']) return;
     const now = Date.now();
     if (now - (this.lastTypingSent[ch] ?? 0) < 7000) return;
     this.lastTypingSent[ch] = now;
@@ -686,6 +855,22 @@ export class AppStore {
   async gatewaySendRaw(frame: string) {
     if (!this.backend) throw new Error('Нет подключения');
     return this.backend.gatewaySendRaw(frame);
+  }
+
+  /* ================= guild management (v0.3.0) ================= */
+
+  /** Универсальный REST-вызов через Rust-слой (rate limits + заголовки сессии). */
+  async apiCall(method: string, path: string, body?: unknown): Promise<any> {
+    if (!this.backend) throw new Error('Нет подключения');
+    return this.backend.apiRequest(method, path, body);
+  }
+
+  async listBans(guildId: string): Promise<BanEntry[]> {
+    return this.apiCall('GET', `/guilds/${guildId}/bans`);
+  }
+
+  async listInvites(guildId: string): Promise<Invite[]> {
+    return this.apiCall('GET', `/guilds/${guildId}/invites`);
   }
 
   /* ================= helpers ================= */

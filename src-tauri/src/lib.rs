@@ -1,8 +1,10 @@
+mod auth;
 mod commands;
 mod gateway;
 mod rest;
 mod snowflake;
 mod state;
+mod superprops;
 mod voice;
 mod wsutil;
 
@@ -44,6 +46,20 @@ pub fn run() {
             commands::ban_member,
             commands::join_voice,
             commands::parse_snowflake,
+            // авторизация пользователя (v0.3.0)
+            commands::auth_login_email,
+            commands::auth_submit_mfa,
+            commands::auth_start_qr,
+            commands::auth_cancel_qr,
+            // универсальный REST-прокси + управление сервером
+            commands::api_request,
+            // плагины
+            commands::plugin_list,
+            commands::plugin_save,
+            commands::plugin_delete,
+            commands::plugin_set_enabled,
+            commands::plugin_set_meta,
+            commands::plugin_read,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RustyCord");

@@ -35,7 +35,7 @@ jobs:
             args: ''
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-latest'
@@ -43,7 +43,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf libasound2-dev libopus-dev cmake
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
@@ -65,7 +65,7 @@ jobs:
         run: npx tauri build ${{ matrix.args }}
 
       - name: Upload installers
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: rustycord-dev-${{ matrix.platform }}
           if-no-files-found: error

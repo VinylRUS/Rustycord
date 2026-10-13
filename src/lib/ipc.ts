@@ -10,7 +10,16 @@
  * This mirrors what the official client does with its "native modules" —
  * except our native layer is Rust, not a Chromium Embedded Framework.
  */
-import type { BackendEvent, Message, SnowflakeInfo, StateSnapshot, User } from './types';
+import type {
+  BackendEvent,
+  LoginResult,
+  Message,
+  PluginInfo,
+  PluginMeta,
+  SnowflakeInfo,
+  StateSnapshot,
+  User,
+} from './types';
 
 export interface GetMessageOptions {
   limit?: number;
@@ -25,6 +34,12 @@ export interface Backend {
   disconnect(): Promise<void>;
   getState(): Promise<StateSnapshot>;
 
+  // user auth (v0.3.0)
+  loginEmail(email: string, password: string): Promise<LoginResult>;
+  submitMfa(code: string, ticket: string): Promise<LoginResult>;
+  startQr(): Promise<void>;
+  cancelQr(): Promise<void>;
+
   // REST-ish
   getMessages(channelId: string, opts?: GetMessageOptions): Promise<Message[]>;
   sendMessage(channelId: string, content: string): Promise<Message>;
@@ -38,13 +53,24 @@ export interface Backend {
   kickMember(guildId: string, userId: string): Promise<void>;
   banMember(guildId: string, userId: string): Promise<void>;
 
+  /** Универсальный REST-прокси (управление сервером + плагины). */
+  apiRequest(method: string, path: string, body?: unknown): Promise<unknown>;
+
+  // plugins (v0.3.0)
+  listPlugins(): Promise<PluginInfo[]>;
+  savePlugin(name: string, code: string): Promise<void>;
+  deletePlugin(name: string): Promise<void>;
+  setPluginEnabled(name: string, enabled: boolean): Promise<void>;
+  setPluginMeta(name: string, meta: PluginMeta): Promise<void>;
+  readPlugin(name: string): Promise<string>;
+
   // voice
   joinVoice(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean): Promise<void>;
 
   // tools
   parseSnowflake(id: string): Promise<SnowflakeInfo>;
 
-  // unified event stream (status / ready / dispatch / voice / warning)
+  // unified event stream (status / ready / dispatch / voice / warning / qr)
   onEvent(handler: (ev: BackendEvent) => void): () => void;
 }
 
@@ -62,6 +88,22 @@ export class TauriBackend implements Backend {
 
   async connect(token: string): Promise<User> {
     return this.invoke<User>('connect', { token });
+  }
+
+  async loginEmail(email: string, password: string): Promise<LoginResult> {
+    return this.invoke<LoginResult>('auth_login_email', { email, password });
+  }
+
+  async submitMfa(code: string, ticket: string): Promise<LoginResult> {
+    return this.invoke<LoginResult>('auth_submit_mfa', { code, ticket });
+  }
+
+  async startQr(): Promise<void> {
+    await this.invoke('auth_start_qr');
+  }
+
+  async cancelQr(): Promise<void> {
+    await this.invoke('auth_cancel_qr');
   }
 
   async disconnect(): Promise<void> {
@@ -116,6 +158,34 @@ export class TauriBackend implements Backend {
     await this.invoke('ban_member', { guildId, userId });
   }
 
+  async apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
+    return this.invoke('api_request', { method, path, body: body ?? null });
+  }
+
+  async listPlugins(): Promise<PluginInfo[]> {
+    return this.invoke<PluginInfo[]>('plugin_list');
+  }
+
+  async savePlugin(name: string, code: string): Promise<void> {
+    await this.invoke('plugin_save', { name, code });
+  }
+
+  async deletePlugin(name: string): Promise<void> {
+    await this.invoke('plugin_delete', { name });
+  }
+
+  async setPluginEnabled(name: string, enabled: boolean): Promise<void> {
+    await this.invoke('plugin_set_enabled', { name, enabled });
+  }
+
+  async setPluginMeta(name: string, meta: PluginMeta): Promise<void> {
+    await this.invoke('plugin_set_meta', { name, meta });
+  }
+
+  async readPlugin(name: string): Promise<string> {
+    return this.invoke<string>('plugin_read', { name });
+  }
+
   async joinVoice(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean): Promise<void> {
     await this.invoke('join_voice', { guildId, channelId, selfMute, selfDeaf });
   }
@@ -136,6 +206,7 @@ export class TauriBackend implements Backend {
         ['discord://dispatch', (d) => handler({ type: 'dispatch', ...(d as object) } as BackendEvent)],
         ['discord://voice', (d) => handler({ type: 'voice', ...(d as object) } as BackendEvent)],
         ['discord://warning', (d) => handler({ type: 'warning', ...(d as object) } as BackendEvent)],
+        ['discord://qr', (d) => handler({ type: 'qr', ...(d as object) } as BackendEvent)],
       ];
       for (const [event, fn] of subs) {
         const un = await listen(event, (e) => fn(e.payload));

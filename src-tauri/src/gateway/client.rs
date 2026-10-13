@@ -137,7 +137,11 @@ async fn run_session(
         .await?;
     } else {
         let intents = state.intents.load(Ordering::SeqCst);
-        tracing::info!("gateway: IDENTIFY с intents={intents}");
+        let build = state.build_number.load(Ordering::SeqCst);
+        tracing::info!("gateway: IDENTIFY (user session) с intents={intents}");
+        // Properties-набор как у браузерного клиента discord.com/app —
+        // то, что официальный веб шлёт в identify; совпадает с нашим
+        // X-Super-Properties, чтобы сессия выглядела консистентно.
         wsutil::send_json(
             &mut writer,
             &json!({
@@ -146,10 +150,28 @@ async fn run_session(
                     "token": token,
                     "intents": intents,
                     "properties": {
-                        "os": "linux",
-                        "browser": "RustyCord",
-                        "device": "RustyCord"
-                    }
+                        "os": "Windows",
+                        "browser": "Chrome",
+                        "device": "",
+                        "system_locale": "ru-RU",
+                        "browser_user_agent": crate::superprops::BROWSER_UA,
+                        "browser_version": "131.0.0.0",
+                        "os_version": "10",
+                        "referrer": "",
+                        "referring_domain": "",
+                        "referrer_current": "",
+                        "referring_domain_current": "",
+                        "release_channel": "stable",
+                        "client_build_number": build,
+                        "client_event_source": null
+                    },
+                    "presence": {
+                        "status": "online",
+                        "since": null,
+                        "activities": [],
+                        "afk": false
+                    },
+                    "compress": false
                 }
             }),
         )
@@ -255,7 +277,7 @@ async fn run_session(
                         let code = u16::from(cf.code);
                         tracing::warn!("gateway: закрыто сервером, код {code} ({})", cf.reason);
                         match code {
-                            4004 => return Ok(End::Fatal("Токен отклонён (close 4004). Проверь Bot Token.".into())),
+                            4004 => return Ok(End::Fatal("Токен отклонён (close 4004). Возможно, сессия сброшена — войди заново.".into())),
                             4010 | 4011 => return Ok(End::Fatal("Неподдерживаемая конфигурация шардирования (close {code}).".into())),
                             4013 | 4014 => {
                                 // Privileged intents выключены в Developer Portal.

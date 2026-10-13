@@ -72,19 +72,32 @@ pub fn urlencode(s: &str) -> String {
 }
 
 impl RestClient {
-    pub fn new(token: &str) -> Result<Self> {
+    /// Клиент для **пользовательской** сессии: Authorization без префикса
+    /// `Bot`, плюс «паспорт браузера» — X-Super-Properties и браузерный UA.
+    /// Без них юзер-токены получают 401 на большинстве write-эндпоинтов.
+    pub fn new(token: &str, build_number: u64) -> Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
-        let auth = reqwest::header::HeaderValue::from_str(&format!("Bot {token}"))
+        let auth = reqwest::header::HeaderValue::from_str(token)
             .map_err(|_| anyhow::anyhow!("Токен содержит недопустимые символы"))?;
         headers.insert(reqwest::header::AUTHORIZATION, auth);
+        let sp = reqwest::header::HeaderValue::from_str(&crate::superprops::super_properties(
+            build_number,
+        ))
+        .map_err(|_| anyhow::anyhow!("super-properties: недопустимые символы"))?;
+        headers.insert("X-Super-Properties", sp);
+        headers.insert(
+            "X-Discord-Locale",
+            reqwest::header::HeaderValue::from_static("ru-RU"),
+        );
+        headers.insert(
+            reqwest::header::ACCEPT_LANGUAGE,
+            reqwest::header::HeaderValue::from_static("ru-RU,ru;q=0.9"),
+        );
         let http = Client::builder()
             .default_headers(headers)
-            // Discord asks library authors to identify themselves.
-            .user_agent(concat!(
-                "RustyCord/",
-                env!("CARGO_PKG_VERSION"),
-                " (personal study client, +https://github.com)"
-            ))
+            // Маскируемся под браузерный клиент — то же, что делает Vesktop:
+            // серверы Discord видят обычную сессию discord.com/app.
+            .user_agent(crate::superprops::BROWSER_UA)
             .timeout(Duration::from_secs(25))
             .build()?;
         Ok(Self {
@@ -121,6 +134,11 @@ impl RestClient {
     /// PUT without a body (e.g. adding a reaction, creating a ban).
     pub async fn put_empty(&self, path: &str) -> Result<()> {
         self.request(Method::PUT, path, &[], None).await
+    }
+
+    /// PUT with a JSON body (e.g. ban with delete_message_seconds).
+    pub async fn put_json<T: DeserializeOwned>(&self, path: &str, body: Value) -> Result<T> {
+        self.request(Method::PUT, path, &[], Some(body)).await
     }
 
     /// POST without a body (e.g. the typing trigger).

@@ -49,11 +49,11 @@
 
 <aside class="sidebar">
   {#if isGuild && guild}
-    <!-- Guild header: клик показывает toast с ID — декоративный обработчик -->
+    <!-- Guild header: клик открывает настройки сервера (как в оригинале) -->
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <header class="guild-header clickable" onclick={() => app.toast(`ID сервера: ${guild.id} — скопировано в буфер`, 'info')}>
+    <header class="guild-header clickable" onclick={() => (app.showGuildSettings = guild.id)} title="Настройки сервера">
       <span class="guild-name truncate">{guild.name}</span>
-      <Icon name="chevron" size={16} color="#949ba4" />
+      <Icon name="settings" size={16} color="#949ba4" />
     </header>
 
     <div class="scroller">

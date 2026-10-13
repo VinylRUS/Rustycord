@@ -10,6 +10,7 @@
   import ContextMenu from './lib/components/ContextMenu.svelte';
   import ProfileCard from './lib/components/ProfileCard.svelte';
   import SettingsModal from './lib/components/SettingsModal.svelte';
+  import GuildSettingsModal from './lib/components/GuildSettingsModal.svelte';
   import Toasts from './lib/components/Toasts.svelte';
 
   // Auto-login with a saved token (Tauri only).
@@ -70,6 +71,7 @@
 <ContextMenu />
 <ProfileCard />
 <SettingsModal />
+<GuildSettingsModal />
 <Toasts />
 
 <style>

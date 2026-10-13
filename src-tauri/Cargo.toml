@@ -1,6 +1,6 @@
 [package]
 name = "rustycord"
-version = "0.2.0"
+version = "0.3.0"
 description = "RustyCord — an unofficial Discord client built with Tauri, reverse-engineered architecture, native performance"
 authors = ["RustyCord contributors"]
 edition = "2021"
@@ -46,6 +46,14 @@ xsalsa20poly1305 = "0.9"
 # Opus-кодек (libopus): на Linux линкуется системной библиотекой (libopus-dev),
 # на Windows/macOS audiopus_sys собирает vendored-opus через cmake.
 audiopus = "0.3.0-rc.0"
+# User-auth: QR remote-auth (RSA-OAEP-SHA256 + HMAC proof), /auth/login.
+rsa = "0.9"
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+rand = "0.8"
+# QR-матрица для remote-auth (SVG собираем сами — без тяжёлых зависимостей).
+qrcode = { version = "0.14", default-features = false }
 # Аудиоустройства — только с фичей `audio` (см. [features]).
 cpal = { version = "0.15", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
