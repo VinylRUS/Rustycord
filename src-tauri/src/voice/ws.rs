@@ -22,13 +22,20 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tauri::Emitter;
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_util::sync::CancellationToken;
 
-use crate::state::{SharedState, VoiceHandshake};
+use crate::state::{SharedState, VoiceHandshake, VoiceSessionHandle};
+use crate::voice::codec::VoiceDecoder;
 use crate::voice::crypto::VoiceCrypto;
+use crate::voice::jitter::Mixer;
 use crate::voice::udp;
+use crate::voice::{sender, VoiceControls, VoiceWsCmd};
 use crate::wsutil;
+
+#[cfg(feature = "audio")]
+use crate::voice::devices;
 
 pub async fn run_voice(
     app: tauri::AppHandle,
@@ -37,7 +44,7 @@ pub async fn run_voice(
     cancel: CancellationToken,
 ) {
     tracing::info!("voice: запускаем сессию для гильдии {}", hs.guild_id);
-    if let Err(e) = voice_session(&app, &hs, &cancel).await {
+    if let Err(e) = voice_session(&app, &state, &hs, &cancel).await {
         tracing::error!("voice: ошибка сессии: {e:#}");
         let _ = app.emit(
             "discord://voice",
@@ -46,11 +53,14 @@ pub async fn run_voice(
     }
     // Self-cleanup so a fresh join can start immediately.
     state.voice_tasks.lock().await.remove(&hs.guild_id);
+    state.voice_sessions.lock().unwrap().remove(&hs.guild_id);
+    state.voice_desired.lock().unwrap().remove(&hs.guild_id);
     tracing::info!("voice: сессия {} завершена", hs.guild_id);
 }
 
 async fn voice_session(
     app: &tauri::AppHandle,
+    state: &SharedState,
     hs: &VoiceHandshake,
     cancel: &CancellationToken,
 ) -> Result<()> {
@@ -155,11 +165,70 @@ async fn voice_session(
 
     // ssrc → user_id, shared between the WS loop (op 12/13) and the RTP reader.
     let ssrc_map: Arc<Mutex<HashMap<u32, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let sock = Arc::new(sock);
+
+    // ---- 7.5. Аудиодвижок ----
+    // Стартовые флаги мьюта — из последнего op4 (их записал join_voice),
+    // дальше события-эхо в events.rs обновляют `controls` на лету.
+    let (d_mute, d_deaf) = state
+        .voice_desired
+        .lock()
+        .unwrap()
+        .get(&hs.guild_id)
+        .cloned()
+        .unwrap_or((false, false));
+    let controls = Arc::new(Mutex::new(VoiceControls::new(d_mute, d_deaf)));
+    let mixer = Arc::new(Mutex::new(Mixer::default()));
+    let mic = Arc::new(Mutex::new(Vec::<i16>::with_capacity(2048)));
+    let (ws_cmd_tx, mut ws_cmd_rx) = mpsc::unbounded_channel::<VoiceWsCmd>();
+    let rx_decoder = match VoiceDecoder::new() {
+        Ok(d) => Some(d),
+        Err(e) => {
+            tracing::warn!("voice: декодер недоступен, приём без декодирования: {e:#}");
+            None
+        }
+    };
+
+    // Устройства: динамики + микрофон (cpal). Живут до конца сессии —
+    // дроп Stream останавливает вывод/ввод. В headless-сборке их нет.
+    #[cfg(feature = "audio")]
+    let (_out_stream, _in_stream) = {
+        let d = devices::open(&mixer, &controls, &mic);
+        (d.output, d.input)
+    };
+    #[cfg(not(feature = "audio"))]
+    let (_out_stream, _in_stream): (Option<()>, Option<()>) = (None, None);
+
+    // Отправитель: микрофон → opus → RTP → UDP (std-поток, см. sender.rs).
+    let _sender = sender::spawn(
+        Arc::clone(&sock),
+        Arc::clone(&crypto),
+        Arc::clone(&controls),
+        Arc::clone(&mic),
+        ssrc,
+        ws_cmd_tx.clone(),
+        cancel.clone(),
+    );
+
+    // Регистрируем сессию: events.rs будет подтягивать controls по эху op4.
+    state.voice_sessions.lock().unwrap().insert(
+        hs.guild_id.clone(),
+        VoiceSessionHandle {
+            controls: Arc::clone(&controls),
+            ws_cmd: ws_cmd_tx.clone(),
+        },
+    );
 
     // ---- 8. SPEAKING (ssrc as string — известная странность протокола) ----
+    // Если стартуем замьюченным/без микрофона — честно говорим, что не передаём.
+    let speak_now: i32 = if d_mute || d_deaf || !_in_stream.is_some() {
+        0
+    } else {
+        1
+    };
     wsutil::send_json(
         &mut writer,
-        &json!({ "op": 5, "d": { "speaking": 1, "delay": 0, "ssrc": ssrc.to_string() } }),
+        &json!({ "op": 5, "d": { "speaking": speak_now, "delay": 0, "ssrc": ssrc.to_string() } }),
     )
     .await?;
 
@@ -178,8 +247,7 @@ async fn voice_session(
         }),
     );
 
-    // ---- UDP: keepalive + RTP sniffing ----
-    let sock = Arc::new(sock);
+    // ---- UDP: keepalive ----
     {
         let sock = Arc::clone(&sock);
         let cancel = cancel.clone();
@@ -194,34 +262,56 @@ async fn voice_session(
             }
         });
     }
+
+    // ---- UDP: приём RTP → decrypt → opus → jitter-микшер ----
     {
         let sock = Arc::clone(&sock);
         let cancel = cancel.clone();
         let crypto = Arc::clone(&crypto);
         let ssrc_map = Arc::clone(&ssrc_map);
+        let mixer = Arc::clone(&mixer);
+        let mut rx_decoder = rx_decoder;
         tauri::async_runtime::spawn(async move {
             let mut buf = [0u8; 1500];
+            // до 120 мс стерео-ёмкости на кадр
+            let mut pcm = [0i16; 5760 * 2];
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     res = sock.recv(&mut buf) => {
                         let Ok(n) = res else { break };
                         let Some(h) = udp::parse_rtp_header(&buf[..n]) else { continue };
-                        // Расшифровываем кадр (nonce = RTP-заголовок) — пайплайн
-                        // проверен здесь; вывод opus на динамики — в роадмапе.
                         match crypto.decrypt_rtp(&buf[..h.header_len], &buf[h.header_len..n]) {
                             Ok(plain) => {
+                                if plain.is_empty() {
+                                    continue; // пустые keepalive-кадры Discord
+                                }
                                 let who = ssrc_map.lock().unwrap().get(&h.ssrc).cloned();
-                                tracing::debug!(
-                                    ssrc = h.ssrc,
-                                    seq = h.sequence,
-                                    ts = h.timestamp,
-                                    marker = h.marker,
-                                    pt = h.payload_type,
-                                    opus_bytes = plain.len(),
-                                    user = who.as_deref().unwrap_or("?"),
-                                    "voice: opus frame decrypted"
-                                );
+                                let decoded = rx_decoder.as_mut().and_then(|dec| {
+                                    dec.decode_packet(&plain, &mut pcm).ok().map(|per_ch| {
+                                        let n = per_ch * 2; // стерео-интерлив
+                                        let frame: Vec<f32> =
+                                            pcm[..n].iter().map(|&s| s as f32 / 32768.0).collect();
+                                        frame
+                                    })
+                                });
+                                match decoded {
+                                    Some(frame) => {
+                                        mixer.lock().unwrap().on_frame(h.ssrc, h.sequence, frame);
+                                        tracing::trace!(
+                                            ssrc = h.ssrc,
+                                            seq = h.sequence,
+                                            ts = h.timestamp,
+                                            marker = h.marker,
+                                            pt = h.payload_type,
+                                            user = who.as_deref().unwrap_or("?"),
+                                            "voice: кадр в буфер"
+                                        );
+                                    }
+                                    None => {
+                                        tracing::debug!(ssrc = h.ssrc, "voice: кадр не декодирован")
+                                    }
+                                }
                             }
                             Err(e) => tracing::debug!(ssrc = h.ssrc, error = %e, "voice: bad rtp frame"),
                         }
@@ -248,6 +338,18 @@ async fn voice_session(
                 wsutil::send_json(&mut writer, &json!({
                     "op": 3, "d": chrono::Utc::now().timestamp_millis()
                 })).await?;
+            }
+            // Команды от аудиоотправителя (op 5 SPEAKING по переходам VAD).
+            cmd = ws_cmd_rx.recv() => {
+                match cmd {
+                    Some(VoiceWsCmd::SetSpeaking(on)) => {
+                        let spk: i32 = if on { 1 } else { 0 };
+                        wsutil::send_json(&mut writer, &json!({
+                            "op": 5, "d": { "speaking": spk, "delay": 0, "ssrc": ssrc.to_string() }
+                        })).await?;
+                    }
+                    None => break Ok(()),
+                }
             }
             msg = reader.next() => {
                 let Some(msg) = msg else { break Ok(()) };
@@ -285,6 +387,7 @@ async fn voice_session(
                         let uid = v["d"]["user_id"].as_str().unwrap_or_default().to_string();
                         if let Some(k) = ssrc_map.lock().unwrap().iter().find(|(_, u)| **u == uid).map(|(k, _)| *k) {
                             ssrc_map.lock().unwrap().remove(&k);
+                            mixer.lock().unwrap().remove_channel(k);
                         }
                         let _ = app.emit("discord://voice", json!({
                             "kind": "speaking",

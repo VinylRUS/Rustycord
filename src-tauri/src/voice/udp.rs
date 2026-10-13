@@ -53,6 +53,19 @@ pub fn keepalive_packet(ssrc: u32) -> [u8; 74] {
     pkt
 }
 
+/// Собирает RTP-заголовок для отправляемого кадра (v2, без расширений).
+/// Discord принимает любой payload type; мы используем 0x78 «opus/audio»,
+/// как большинство клиентов. `marker` ставится на первый кадр всплеска речи.
+pub fn build_rtp_header(marker: bool, sequence: u16, timestamp: u32, ssrc: u32) -> [u8; 12] {
+    let mut h = [0u8; 12];
+    h[0] = 0x80; // v2, без padding, без extension, cc=0
+    h[1] = if marker { 0x80 | 0x78 } else { 0x78 };
+    h[2..4].copy_from_slice(&sequence.to_be_bytes());
+    h[4..8].copy_from_slice(&timestamp.to_be_bytes());
+    h[8..12].copy_from_slice(&ssrc.to_be_bytes());
+    h
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct RtpHeader {
     /// RTP version — всегда 2 (валидируется в `parse_rtp_header`).
@@ -131,5 +144,21 @@ mod tests {
         let h = parse_rtp_header(&pkt).unwrap();
         assert!(h.extension);
         assert_eq!(h.header_len, 12 + 4 + 8);
+    }
+
+    #[test]
+    fn build_then_parse_roundtrip() {
+        let wire = build_rtp_header(true, 0xBEEF, 0x1122_3344, 0xDEAD_BEEF);
+        let h = parse_rtp_header(&wire).unwrap();
+        assert_eq!(h.version, 2);
+        assert!(h.marker, "маркер должен читаться");
+        assert_eq!(h.payload_type, 0x78);
+        assert_eq!(h.sequence, 0xBEEF);
+        assert_eq!(h.timestamp, 0x1122_3344);
+        assert_eq!(h.ssrc, 0xDEAD_BEEF);
+        assert_eq!(h.header_len, 12);
+        let wire2 = build_rtp_header(false, 1, 960, 7);
+        let h2 = parse_rtp_header(&wire2).unwrap();
+        assert!(!h2.marker);
     }
 }

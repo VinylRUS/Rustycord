@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::rest::models::{Channel, Member, Presence, Role, User, VoiceState};
+use crate::voice::{VoiceControls, VoiceWsCmd};
 
 /// Gateway intents we request on connect.
 /// GUILDS | GUILD_MEMBERS* | GUILD_VOICE_STATES | GUILD_PRESENCES* |
@@ -97,6 +98,19 @@ impl VoiceHandshake {
     }
 }
 
+/// Живая голосовая сессия: события эхо op4 (events.rs) обновляют мьют-флаги
+/// через `controls`, а аудиоотправитель говорит сигналингу op 5 SPEAKING
+/// через `ws_cmd`.
+#[derive(Debug)]
+pub struct VoiceSessionHandle {
+    pub controls: Arc<Mutex<VoiceControls>>,
+    /// Не читается намеренно: этот клон держит канал открытым всё время
+    /// жизни сессии — иначе ранний выход отправителя (нет микрофона) закрыл
+    /// бы WS-цикл через recv() → None. Читает ws.rs, дропает run_voice.
+    #[allow(dead_code)]
+    pub ws_cmd: mpsc::UnboundedSender<VoiceWsCmd>,
+}
+
 pub struct AppState {
     pub app: tauri::AppHandle,
     pub cache: RwLock<Cache>,
@@ -113,6 +127,10 @@ pub struct AppState {
     pub voice_tasks: tokio::sync::Mutex<
         HashMap<String, (tauri::async_runtime::JoinHandle<()>, CancellationToken)>,
     >,
+    /// guild_id → controls for a live voice session (mute flags + WS commands).
+    pub voice_sessions: Mutex<HashMap<String, VoiceSessionHandle>>,
+    /// Last desired op4 flags (written by join_voice, read by a starting session).
+    pub voice_desired: Mutex<HashMap<String, (bool, bool)>>,
     pub voice_notify: tokio::sync::Notify,
 }
 
@@ -129,6 +147,8 @@ impl AppState {
             shutdown: RwLock::new(CancellationToken::new()),
             voice_handshake: Mutex::new(HashMap::new()),
             voice_tasks: tokio::sync::Mutex::new(HashMap::new()),
+            voice_sessions: Mutex::new(HashMap::new()),
+            voice_desired: Mutex::new(HashMap::new()),
             voice_notify: tokio::sync::Notify::new(),
         }
     }

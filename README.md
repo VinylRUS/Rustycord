@@ -231,7 +231,13 @@ sequenceDiagram
 - **ssrc то число, то строка** — op 2 присылает число, а op 5 ожидает строку. Классика живого протокола, о которой знают только те, кто его трогал руками.
 - **Кто говорит** — ssrc→user маппинг строится из op 12 `CLIENT_CONNECTED` (`audio_ssrc` + `user_id`), а индикация речи приходит в op 5. По ним мы рисуем зелёные кольца вокруг аватарок.
 
-В v1 реализован весь сигналинг: вход/выход в канал, mute/deafen, список участников, «кто говорит», heartbeat, UDP keepalive, разбор RTP-заголовков и расшифровка (без вывода в аудиоустройство — см. [Roadmap](#-roadmap)).
+В v0.2 реализован весь сигналинг **и полный аудиодуплекс**:
+
+- **Приём**: расшифрованные opus-кадры декодируются (libopus), раскладываются по SSRC-дорожкам jitter-буфера (переупорядочивание, дедупликация, тишина вместо коротких потерь, ресинк вместо длинных), микшируются и выводятся через cpal — WASAPI / CoreAudio / ALSA. Устройства с частотой ≠ 48 кГц подключаются через линейный ресемплер.
+- **Передача**: микрофон → моно 48 кГц → opus (Voip, 20 мс) → RTP с seq/timestamp/marker → xsalsa20poly1305 → UDP. Энергетический VAD с гистерезисом ~300 мс шлёт op 5 SPEAKING только на переходах — как voice activity официального клиента.
+- **Мьют/деафиен** едут тем же op 4; ядро слушает эхо VOICE_STATE_UPDATE и останавливает/возобновляет звук на лету, без переподключения сессии.
+
+Сборка `--no-default-features` даёт headless-вариант: сигналинг и криптография работают, аудиоустройства не открываются.
 
 ---
 
@@ -241,7 +247,7 @@ sequenceDiagram
 
 | Слой | Технологии |
 |---|---|
-| Нативное ядро | Rust 1.77+, tokio, tokio-tungstenite (rustls), reqwest, xsalsa20poly1305 |
+| Нативное ядро | Rust 1.77+, tokio, tokio-tungstenite (rustls), reqwest, xsalsa20poly1305, audiopus (libopus), cpal |
 | Оболочка | Tauri 2 (системный WebView, capabilities-модель безопасности) |
 | UI | Svelte 5 (runes: `$state` / `$derived` / `$effect`), TypeScript, Vite 6 |
 | Стили | Ручной CSS с дизайн-токенами Discord (`#313338`, `#5865F2`, …) |
@@ -291,7 +297,8 @@ rustycord/
 │   ├── src/
 │   │   ├── gateway/              #   опкоды, heartbeat, RESUME, chunking
 │   │   ├── rest/                 #   модели v10 + rate-limit-клиент
-│   │   ├── voice/                #   сигналинг, UDP discovery, RTP, crypto
+│   │   ├── voice/                #   сигналинг v4, UDP/RTP, crypto, codec (opus),
+│   │   │                         #   jitter-микшер, sender (микрофон), devices (cpal)
 │   │   ├── snowflake.rs          #   декодер ID
 │   │   ├── state.rs              #   кэш + каналы задач
 │   │   └── commands.rs           #   16 Tauri-команд
@@ -344,7 +351,7 @@ rustycord/
 - [Node.js](https://nodejs.org) ≥ 20 и npm
 - [Rust](https://rustup.rs) ≥ 1.77 (stable)
 - Системные библиотеки Tauri:
-  - **Ubuntu/Debian**: `sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`
+  - **Ubuntu/Debian**: `sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libopus-dev cmake`
   - **macOS**: Xcode Command Line Tools
   - **Windows**: [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (уже есть в Win 11) + [MSVC Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
 
@@ -468,10 +475,12 @@ Tauri 2 умеет подписанные дельта-обновления, н�
 | Модерация: kick / ban | ✅ |
 | Голос: вход/выход, mute/deafen, участники, «кто говорит» | ✅ |
 | Голос: полный сигналинг v4 (WS + UDP discovery + xsalsa20poly1305) | ✅ |
+| **Аудиодвижок: приём opus → jitter-буфер → микшер → динамики** | ✅ v0.2.0 |
+| **Аудиодвижок: микрофон → opus → RTP → UDP + VAD** | ✅ v0.2.0 |
 | Инспектор Snowflake (дата создания любого ID) | ✅ |
 | Консоль протокола: сырые JSON-кадры прямо в Gateway | ✅ |
 | Демо-режим без токена (симуляция Gateway) | ✅ |
-| Воспроизведение opus-аудио / микрофон | 🚧 roadmap |
+| Воспроизведение opus-аудио / микрофон | ✅ v0.2.0 |
 | Вложения файлов, эмбеды | 🚧 roadmap |
 | Поиск по сообщениям | 🚧 roadmap |
 
@@ -489,7 +498,8 @@ Tauri 2 умеет подписанные дельта-обновления, н�
 
 ## 🧭 Roadmap
 
-- [ ] **Аудио-движок**: захват микрофона (cpal), кодек opus, RTP-отправка с sequence/timestamp, jitter buffer
+- [x] **Аудио-движок** (v0.2.0): cpal + libopus, полный дуплекс, jitter-буфер, энергетический VAD, ресемплер под устройства
+- [ ] Адаптивная глубина jitter-буфера (сейчас фиксированный пре-ролл 40 мс)
 - [ ] Вложения файлов (drag&drop → multipart POST)
 - [ ] Рендер эмбедов и web-превью ссылок
 - [ ] Поиск по истории (REST `/channels/{id}/messages/search` для серверов с бустом… или локальный)

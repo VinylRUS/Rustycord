@@ -7,6 +7,7 @@ use tauri::Emitter;
 
 use crate::rest::models::{Channel, Guild, Member, Presence, VoiceState};
 use crate::state::{GuildState, SharedState};
+use crate::voice::VoiceControls;
 
 /// Session state accumulated from DISPATCH events. Lives across reconnects
 /// so the gateway loop can RESUME instead of re-IDENTIFYing.
@@ -295,9 +296,18 @@ pub async fn handle_dispatch(
                         entry.guild_id = gid.clone();
                         entry.user_id = vs.user_id.clone();
                         entry.session_id = Some(sid);
+                        drop(hs);
+                        // Эхо op4: подтягиваем живую сессию к актуальным флагам.
+                        let sessions = state.voice_sessions.lock().unwrap();
+                        if let Some(handle) = sessions.get(&gid) {
+                            *handle.controls.lock().unwrap() =
+                                VoiceControls::new(vs.self_mute, vs.self_deaf);
+                        }
                     } else if vs.channel_id.is_none() {
                         // Выход из войса: гасим голосовую сессию.
                         state.voice_handshake.lock().unwrap().remove(&gid);
+                        state.voice_sessions.lock().unwrap().remove(&gid);
+                        state.voice_desired.lock().unwrap().remove(&gid);
                         let mut tasks = state.voice_tasks.lock().await;
                         if let Some((handle, token)) = tasks.remove(&gid) {
                             token.cancel();

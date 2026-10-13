@@ -340,6 +340,20 @@ pub async fn join_voice(
         .unwrap()
         .clone()
         .ok_or("Gateway не подключён")?;
+    // Желаемое состояние мьюта на случай, если сессия стартует раньше,
+    // чем придёт первое эхо VOICE_STATE_UPDATE (events.rs обновляет её дальше).
+    {
+        let desired = if channel_id.is_some() {
+            (self_mute, self_deaf)
+        } else {
+            (false, false)
+        };
+        state
+            .voice_desired
+            .lock()
+            .unwrap()
+            .insert(guild_id.clone(), desired);
+    }
     tx.send(GatewayCommand::VoiceStateUpdate {
         guild_id,
         channel_id,
