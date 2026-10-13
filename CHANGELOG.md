@@ -49,6 +49,9 @@
 **Инфраструктура**
 - audiopus: на Linux линкуется системным libopus (libopus-dev в CI),
   на Windows/macOS собирает vendored-opus через cmake.
+- CI: `CMAKE_POLICY_VERSION_MINIMUM=3.5` — vendored-opus несовместим с
+  CMake >= 4 (совместимость с < 3.5 из CMake удалена); Linux не задет,
+  там pkg-config.
 - Тесты: 7 (jitter) + 3 (ресемплер) + opus roundtrip (steady state, 5 кадров)
   + RTP build/parse roundtrip; локальный logic-test — 16/16 с реальным
   libopus.

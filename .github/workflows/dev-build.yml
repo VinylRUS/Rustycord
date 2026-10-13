@@ -15,6 +15,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Vendored-opus у audiopus_sys (macOS/Windows собирает libopus через cmake)
+  # имеет доисторический CMakeLists (< 3.5), с которым несовместим CMake >= 4
+  # на раннерах. Эта переменная возвращает совместимость (CMake 4.0+).
+  CMAKE_POLICY_VERSION_MINIMUM: 3.5
 
 jobs:
   build:
