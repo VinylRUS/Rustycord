@@ -16,7 +16,9 @@
 //! документе окна — фильтруется по discord.com):
 //!  * `__rcAuth.request(cfg)` — POST на эндпоинты Discord (список с
 //!    фолбеком по 404: v9 → v10) с X-Super-Properties, собранным из
-//!    настоящего navigator, X-Context-Properties и X-Captcha-* на ретрае;
+//!    настоящего navigator, X-Context-Properties; на ретрае капчи решение
+//!    уходит ДВАЖДЫ — заголовками X-Captcha-* и полями JSON-тела
+//!    captcha_key/captcha_rqtoken/captcha_session_id;
 //!  * `__rcAuth.challenge(cfg)` — карточка с виджетом hCaptcha (sitekey +
 //!    rqdata из вызова, порождённого ЭТИМ ЖЕ окном);
 //!  * пока страница грузится и POST летит — «вуаль» поверх чужого логина.
@@ -236,13 +238,26 @@ const INIT_SCRIPT: &str = r#"
       } else {
         veil(cfg.veil || 'Проверяем…');
       }
+      // Ретрай капчи: решение уходит ДВАЖДЫ — заголовками X-Captcha-*
+      // (механизм веб-клиента) и полями JSON-тела captcha_key /
+      // captcha_rqtoken / captcha_session_id (remote-auth/login — путь
+      // десктопного QR-входа — читает тело). Сервер использует один
+      // механизм, второй игнорирует.
+      function payload() {
+        if (!cfg.captchaKey) return JSON.stringify(cfg.body);
+        var b = Object.assign({}, cfg.body);
+        b.captcha_key = cfg.captchaKey;
+        if (cfg.rqtoken) b.captcha_rqtoken = cfg.rqtoken;
+        if (cfg.sessionId) b.captcha_session_id = cfg.sessionId;
+        return JSON.stringify(b);
+      }
       var i = 0;
       function go() {
         return fetch(cfg.urls[i], {
           method: 'POST',
           credentials: 'include',
           headers: headers(cfg),
-          body: JSON.stringify(cfg.body)
+          body: payload()
         }).then(function (r) {
           if (r.status === 404 && i + 1 < cfg.urls.length) { i++; return go(); }
           return r.text().then(function (t) { return { status: r.status, body: t }; });
@@ -297,7 +312,9 @@ fn challenge_js(challenge: &CaptchaChallenge, context: &str) -> String {
 }
 
 /// JS-вызов POST-запроса из браузерного контекста discord.com.
-/// `captcha_key`/`session_id`/`rqtoken` — заголовки ретрая после решения.
+/// `captcha_key`/`session_id`/`rqtoken` — ретрай после решения: значения
+/// уходят и заголовками X-Captcha-*, и полями JSON-тела (см. `payload`
+/// в INIT_SCRIPT).
 fn request_js(
     urls: &[&str],
     body: &Value,
@@ -407,8 +424,9 @@ pub enum BrowserPost {
 ///
 /// Весь цикл живёт в одном контексте: страница сама делает первый POST,
 /// при 400+captcha показывает виджет с rqdata из ЭТОГО ЖЕ ответа (rqdata
-/// из чужого контекста — «Access Denied»), решение уходит заголовками
-/// X-Captcha-Key/-Session-Id/-Rqtoken в повторный POST
+/// из чужого контекста — «Access Denied»), решение уходит в повторный POST
+/// и заголовками X-Captcha-Key/-Session-Id/-Rqtoken, и полями тела
+/// captcha_key/captcha_rqtoken/captcha_session_id
 /// (≤ CAPTCHA_MAX_ATTEMPTS решений подряд).
 ///
 /// * `context` — qr | login | mfa: подпись карточки капчи;
@@ -495,9 +513,14 @@ async fn drive(
                                          {CAPTCHA_MAX_ATTEMPTS} раз подряд"
                                     );
                                 }
+                                // Полное тело 400-ответа на КАЖДОЙ попытке:
+                                // видно состав полей (есть ли captcha_rqtoken?)
+                                // и меняются ли значения между отказами.
+                                let raw: String = text.chars().take(2000).collect();
                                 tracing::warn!(
-                                    "captcha-webview: HTTP 400, показываем капчу \
-                                     (отказов {rejections}, invisible={})",
+                                    "captcha-webview: HTTP 400 + капча \
+                                     (отказов {rejections}, invisible={}), \
+                                     ответ: {raw}",
                                     next.invisible
                                 );
                                 let js = challenge_js(&next, context);
@@ -514,7 +537,15 @@ async fn drive(
                         return Ok(BrowserPost::Rejected(text));
                     }
                     "captcha" => {
-                        // Решение получено: повторяем POST с X-Captcha-*.
+                        // Решение получено: повторяем POST — captcha-поля
+                        // и в теле, и в X-Captcha-*. Токен в лог целиком не
+                        // пишем — только длину и префикс.
+                        let prefix: String = data.chars().take(10).collect();
+                        tracing::warn!(
+                            "captcha-webview: решение hCaptcha получено \
+                             (len={}, начинается с «{prefix}») — повторяем запрос",
+                            data.len()
+                        );
                         let Some(ch) = challenge.as_ref() else {
                             // Решение без живого вызова (перезагрузка?) —
                             // начинаем цикл заново чистым POST.

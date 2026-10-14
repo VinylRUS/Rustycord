@@ -11,13 +11,19 @@
 //!     к домену, а rqdata Enterprise — к контексту сессии: и виджет, и
 //!     POST, породивший вызов, живут в одном окне на discord.com
 //!     (auth/captcha_webview.rs).
-//!  3. Просьба повторяется заголовками: `X-Captcha-Key` — решение,
-//!     `X-Captcha-Session-Id` и `X-Captcha-Rqtoken` — если были в вызове.
+//!  3. Просьба повторяется с решением И В ЗАГОЛОВКАХ (`X-Captcha-Key` —
+//!     решение, `X-Captcha-Session-Id`/`X-Captcha-Rqtoken` — привязка
+//!     вызова), И В ПОЛЯХ JSON-ТЕЛА (`captcha_key`/`captcha_rqtoken`/
+//!     `captcha_session_id`): веб-эндпоинты читают заголовки,
+//!     remote-auth/login (путь десктопного QR-входа) — тело; второй
+//!     механизм сервер игнорирует.
 //!  4. Отказ (низкий trust score / повторное использование) — снова 400
 //!     с новым вызовом: показываем следующий (не более CAPTCHA_MAX_ATTEMPTS).
 //!
-//! Перенос решения в JSON-теле (`captcha_key` в body) задепрекейтен —
-//! только заголовки.
+//! Отдельного `captcha_rqtoken` в вызове может не быть — тогда эхом в
+//! ретрае идёт сам `captcha_rqdata` (в перехватах веб-клиента
+//! X-Captcha-Rqtoken несёт именно значение rqdata из вызова; ретрай
+//! без rqtoken отклоняется тем же 400).
 
 use serde_json::Value;
 
@@ -31,7 +37,9 @@ pub struct CaptchaChallenge {
     pub sitekey: String,
     /// hCaptcha Enterprise: ОБЯЗАН уйти в виджет (иначе решение не примут).
     pub rqdata: Option<String>,
-    /// Токен запроса вызова — в ретрай как X-Captcha-Rqtoken.
+    /// Токен вызова для ретрая (заголовок X-Captcha-Rqtoken + поле тела
+    /// captcha_rqtoken): явный `captcha_rqtoken` из ответа, а при его
+    /// отсутствии — эхо `captcha_rqdata`.
     pub rqtoken: Option<String>,
     /// Привязка решения к сессии — в ретрай как X-Captcha-Session-Id.
     pub session_id: Option<String>,
@@ -61,6 +69,10 @@ impl CaptchaChallenge {
             rqtoken: body
                 .get("captcha_rqtoken")
                 .and_then(|v| v.as_str())
+                // Без rqtoken повторный POST отклоняется тем же 400
+                // (цикл одинаковых отказов): если отдельного поля нет,
+                // эхом идёт сам rqdata — так делает официальный веб-клиент.
+                .or_else(|| body.get("captcha_rqdata").and_then(|v| v.as_str()))
                 .map(String::from),
             session_id: body
                 .get("captcha_session_id")

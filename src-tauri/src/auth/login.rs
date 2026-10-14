@@ -93,13 +93,19 @@ async fn post_with_captcha(
             } else {
                 None
             };
+            // Живой client_build_number для X-Super-Properties повторного
+            // запроса: статичный фолбэк устаревает, а несуществующий билд
+            // в XSP поднимает риск-скоринг (лишние капчи).
+            let build = superprops::fetch_build_number()
+                .await
+                .unwrap_or(superprops::FALLBACK_BUILD_NUMBER);
             let outcome = captcha_webview::browser_post(
                 app,
                 context,
                 &[path],
                 &build_body(),
                 ctx_props.as_deref(),
-                superprops::FALLBACK_BUILD_NUMBER,
+                build,
             )
             .await?;
             return match outcome {
