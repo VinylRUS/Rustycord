@@ -51,7 +51,7 @@ async-trait = "0.1"
 # User-auth: QR remote-auth (RSA-OAEP-SHA256 + HMAC proof), /auth/login.
 rsa = "0.9"
 sha2 = "0.10"
-hmac = "0.12"
+hmac = "0.13"
 base64 = "0.22"
 rand = "0.8"
 # QR-матрица для remote-auth (SVG собираем сами — без тяжёлых зависимостей).
