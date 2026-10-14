@@ -103,6 +103,12 @@
     <path d="M10 8H5v7h5l4 4v-15z" fill="currentColor" stroke="none" />
   {:else if name === 'signal'}
     <path d="M4 18v-3M9 18v-7M14 18V7M19 18V3" />
+  {:else if name === 'screen'}
+    <rect x="3" y="4.5" width="18" height="12.5" rx="1.5" />
+    <path d="M9 20.5h6M12 17v3.5" />
+  {:else if name === 'camera'}
+    <rect x="2.5" y="6.5" width="13" height="11" rx="2" />
+    <path d="M15.5 10.5 21 7.5v9l-5.5-3z" />
   {:else if name === 'check'}
     <polyline points="4 12.5 9.5 18 20 6.5" />
   {:else if name === 'shield'}

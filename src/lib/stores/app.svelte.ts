@@ -52,9 +52,22 @@ interface MyVoice {
   channelId: string;
   selfMute: boolean;
   selfDeaf: boolean;
+  /** Камера «включена» на уровне op4 (без передачи видео пока). */
+  selfVideo: boolean;
   mode?: string;
   endpoint?: string;
   ssrc?: number;
+}
+
+/** Активная трансляция (стрим) в голосовом канале — своя или чужая. */
+export interface StreamInfo {
+  streamKey: string;
+  guildId: string;
+  channelId: string;
+  userId: string;
+  type: 'screen' | 'camera' | string;
+  viewerCount?: number;
+  paused?: boolean;
 }
 
 export class AppStore {
@@ -129,6 +142,15 @@ export class AppStore {
   showSearch = $state(false);
   /** Свой статус (online/idle/dnd/invisible) — для пикера в юзер-панели. */
   myStatus = $state('online');
+  /** Трансляции в голосовых каналах: stream_key → инфо (свои и чужие). */
+  streams = $state<Record<string, StreamInfo>>({});
+  /** Локальное превью своего захвата (экран/камера) — MediaStream webview. */
+  localPreview: MediaStream | null = $state(null);
+  /** Тип активного собственного захвата для превью. */
+  localPreviewKind = $state<'screen' | 'camera' | null>(null);
+  /** Запрос «показать сообщение» от поиска: MessageList расширяет окно
+   *  рендера до него и скроллит (nonce — повторные запросы того же id). */
+  reveal = $state<{ id: string; nonce: number } | null>(null);
   toasts = $state<{ id: number; text: string; kind: 'info' | 'error' }[]>([]);
 
   private toastSeq = 1;
@@ -530,7 +552,8 @@ export class AppStore {
           ssrc: data.ssrc,
         };
       }
-      this.toast(`Голос подключён · ${data.mode ?? ''} · ${data.ip}:${data.port}`, 'info');
+      const where = data.ip ? ` · ${data.ip}:${data.port}` : '';
+      this.toast(`Голос подключён · ${data.mode ?? 'opus'}${where}`, 'info');
     } else if (kind === 'disconnected') {
       this.toast('Голосовой канал отключён', 'info');
     } else if (kind === 'speaking' && data.user_id) {
@@ -557,6 +580,9 @@ export class AppStore {
           private_channels?: Channel[];
           relationships?: Relationship[];
           presences?: Presence[];
+          guilds?: { id: string; name?: string; icon?: string | null }[];
+          merged_presences?: { friends?: Presence[]; guilds?: Presence[][] };
+          merged_members?: Member[][];
         };
         this.user = p.user;
         this.sessionId = p.session_id;
@@ -593,6 +619,39 @@ export class AppStore {
           }
           this.friendPresences = map;
         }
+        // Гильдии-стабы из READY (id+name+icon): рейл серверов рисуется
+        // СРАЗУ — GUILD_CREATE (после op 37-подписки) наполнит каналы
+        // и участников, заменив стабы. Так ведёт себя официальный клиент.
+        if (p.guilds) {
+          const known = new Set(this.guilds.map((g) => g.id));
+          for (const g of p.guilds) {
+            if (g?.id && !known.has(g.id)) {
+              this.guilds.push({
+                id: g.id,
+                name: g.name ?? '…',
+                icon: g.icon ?? null,
+                owner_id: '',
+                roles: [],
+                channels: [],
+              } as Guild);
+            }
+          }
+        }
+        this.applyMerged(p.guilds ?? [], p.merged_presences, p.merged_members);
+        break;
+      }
+      case 'READY_SUPPLEMENTAL': {
+        // Едет сразу после потока GUILD_CREATE: голосовые состояния
+        // гильдий + merged-массивы (статусы друзей и участников).
+        const p = d as {
+          guilds?: { id: string; voice_states?: VoiceState[] }[];
+          merged_presences?: { friends?: Presence[]; guilds?: Presence[][] };
+          merged_members?: Member[][];
+        };
+        for (const g of p.guilds ?? []) {
+          this.voiceByGuild[g.id] = g.voice_states ?? [];
+        }
+        this.applyMerged(p.guilds ?? [], p.merged_presences, p.merged_members);
         break;
       }
       case 'GUILD_CREATE': {
@@ -608,6 +667,12 @@ export class AppStore {
         for (const p of g.presences ?? []) pres[p.user.id] = p;
         this.presencesByGuild[g.id] = pres;
         this.voiceByGuild[g.id] = g.voice_states ?? [];
+        // Каналы только что приехали (GUILD_CREATE после op 37-подписки).
+        // Если это активная гильдия — добиваем подписку op 14 (при клике по
+        // стабу каналов ещё не было, subscribe_guild честно ждал этого момента).
+        if (g.id === this.activeGuildId && !this.isBotAccount && this.mode === 'tauri') {
+          void this.backend?.subscribeGuild(g.id).catch(() => undefined);
+        }
         // Автовыбор первой гильдии — только бот-аккаунтам (демо-режим).
         // Юзер после входа попадает на «Друзья», как в официальном клиенте.
         if (!this.activeGuildId && this.isBotAccount) this.selectGuild(g.id);
@@ -644,10 +709,23 @@ export class AppStore {
         break;
       }
       case 'GUILD_MEMBERS_CHUNK': {
-        const p = d as { guild_id: string; members: Member[]; chunk_index: number; chunk_count: number };
+        const p = d as {
+          guild_id: string;
+          members: Member[];
+          chunk_index: number;
+          chunk_count: number;
+          presences?: Presence[];
+        };
         const map = { ...(this.membersByGuild[p.guild_id] ?? {}) };
         for (const m of p.members) if (m.user) map[m.user.id] = m;
         this.membersByGuild[p.guild_id] = map;
+        // Ответ на op 14 несёт и пресенсы (activities: true) — без них
+        // список участников выглядит «все офлайн».
+        if (p.presences?.length) {
+          const pmap = { ...(this.presencesByGuild[p.guild_id] ?? {}) };
+          for (const pr of p.presences) pmap[pr.user.id] = pr;
+          this.presencesByGuild[p.guild_id] = pmap;
+        }
         if (p.chunk_index + 1 >= p.chunk_count) this.chunksDone[p.guild_id] = true;
         break;
       }
@@ -838,10 +916,62 @@ export class AppStore {
               channelId: vs.channel_id,
               selfMute: !!vs.self_mute,
               selfDeaf: !!vs.self_deaf,
+              selfVideo: !!vs.self_video,
             };
           } else {
             this.myVoice = null;
           }
+        }
+        break;
+      }
+      case 'STREAM_CREATE': {
+        // Трансляция начата (нами или другим участником канала).
+        const s = d as {
+          stream_key: string;
+          guild_id?: string;
+          channel_id?: string;
+          user_id?: string;
+          type?: string;
+          viewer_count?: number;
+          paused?: boolean;
+        };
+        if (s.stream_key) {
+          this.streams = {
+            ...this.streams,
+            [s.stream_key]: {
+              streamKey: s.stream_key,
+              guildId: s.guild_id ?? '',
+              channelId: s.channel_id ?? '',
+              userId: s.user_id ?? '',
+              type: s.type ?? 'screen',
+              viewerCount: s.viewer_count ?? 0,
+              paused: !!s.paused,
+            },
+          };
+        }
+        break;
+      }
+      case 'STREAM_UPDATE': {
+        const s = d as { stream_key: string; paused?: boolean; viewer_count?: number };
+        const cur = this.streams[s.stream_key];
+        if (cur) {
+          this.streams = {
+            ...this.streams,
+            [s.stream_key]: {
+              ...cur,
+              paused: s.paused ?? cur.paused,
+              viewerCount: s.viewer_count ?? cur.viewerCount,
+            },
+          };
+        }
+        break;
+      }
+      case 'STREAM_DELETE': {
+        const s = d as { stream_key: string };
+        if (this.streams[s.stream_key]) {
+          const map = { ...this.streams };
+          delete map[s.stream_key];
+          this.streams = map;
         }
         break;
       }
@@ -852,7 +982,47 @@ export class AppStore {
     }
   }
 
+  /** merged-массивы из READY / READY_SUPPLEMENTAL: статусы друзей и
+   *  участников по гильдиям + собственные карточки участников.
+   *  merged_presences.guilds[i] и merged_members[i] параллельны guilds[i]. */
+  private applyMerged(
+    guilds: { id: string }[],
+    mergedPresences?: { friends?: Presence[]; guilds?: Presence[][] },
+    mergedMembers?: Member[][],
+  ) {
+    if (mergedPresences?.friends?.length) {
+      const map = { ...this.friendPresences };
+      for (const pr of mergedPresences.friends) map[pr.user.id] = pr;
+      this.friendPresences = map;
+    }
+    if (mergedPresences?.guilds) {
+      for (let i = 0; i < mergedPresences.guilds.length; i++) {
+        const gid = guilds[i]?.id;
+        const list = mergedPresences.guilds[i];
+        if (!gid || !list?.length) continue;
+        const map = { ...(this.presencesByGuild[gid] ?? {}) };
+        for (const pr of list) map[pr.user.id] = pr;
+        this.presencesByGuild[gid] = map;
+      }
+    }
+    if (mergedMembers) {
+      for (let i = 0; i < mergedMembers.length; i++) {
+        const gid = guilds[i]?.id;
+        const list = mergedMembers[i];
+        if (!gid || !list?.length) continue;
+        const map = { ...(this.membersByGuild[gid] ?? {}) };
+        for (const m of list) if (m.user) map[m.user.id] = m;
+        this.membersByGuild[gid] = map;
+      }
+    }
+  }
+
   /* ================= actions ================= */
+
+  /** Прыжок к сообщению в списке (поиск/пины): MessageList расширит окно. */
+  requestReveal(id: string) {
+    this.reveal = { id, nonce: Date.now() };
+  }
 
   selectGuild(id: string | null) {
     this.activeGuildId = id;
@@ -1157,7 +1327,9 @@ export class AppStore {
         joined ? null : channelId,
         this.myVoice?.selfMute ?? false,
         this.myVoice?.selfDeaf ?? false,
+        this.myVoice?.selfVideo ?? false,
       );
+      if (joined) await this.stopLocalPreview(); // выход из войса гасит превью
     } catch (e) {
       this.toast(`Ошибка войса: ${errMsg(e)}`, 'error');
     }
@@ -1166,7 +1338,8 @@ export class AppStore {
   async leaveVoice() {
     if (!this.backend || !this.myVoice) return;
     try {
-      await this.backend.joinVoice(this.myVoice.guildId, null, false, false);
+      await this.stopLocalPreview();
+      await this.backend.joinVoice(this.myVoice.guildId, null, false, false, false);
     } catch (e) {
       this.toast(`Ошибка выхода: ${errMsg(e)}`, 'error');
     }
@@ -1175,7 +1348,7 @@ export class AppStore {
   async setSelfMute(mute: boolean) {
     if (!this.backend || !this.myVoice) return;
     try {
-      await this.backend.joinVoice(this.myVoice.guildId, this.myVoice.channelId, mute, this.myVoice.selfDeaf);
+      await this.backend.joinVoice(this.myVoice.guildId, this.myVoice.channelId, mute, this.myVoice.selfDeaf, this.myVoice.selfVideo);
     } catch {
       /* silent */
     }
@@ -1184,10 +1357,96 @@ export class AppStore {
   async setSelfDeaf(deaf: boolean) {
     if (!this.backend || !this.myVoice) return;
     try {
-      await this.backend.joinVoice(this.myVoice.guildId, this.myVoice.channelId, this.myVoice?.selfMute ?? false, deaf);
+      await this.backend.joinVoice(this.myVoice.guildId, this.myVoice.channelId, this.myVoice.selfMute, deaf, this.myVoice.selfVideo);
     } catch {
       /* silent */
     }
+  }
+
+  /* ---------- трансляции: экран и камера (эксперимент) ---------- */
+
+  /** Свои стримы — по владельцу ключа (guild:channel:user[:type]). */
+  get myStreams(): StreamInfo[] {
+    return Object.values(this.streams).filter(
+      (s) => s.userId === this.user?.id || s.streamKey.includes(`:${this.user?.id}:`),
+    );
+  }
+
+  /** Чужие трансляции в канале, где мы сейчас в войсе. */
+  streamsInMyChannel(): StreamInfo[] {
+    const mv = this.myVoice;
+    if (!mv) return [];
+    return Object.values(this.streams).filter(
+      (s) => s.guildId === mv.guildId && s.channelId === mv.channelId,
+    );
+  }
+
+  /** Включить/выключить показ экрана или камеры.
+   *  Локальное превью — через media-захват webview (getDisplayMedia для
+   *  экрана, getUserMedia для камеры); сигналинг — op 18/20 на gateway.
+   *  Передача видео-потока другим участникам — в разработке (RTP-стек
+   *  следующего релиза), пока это превью + стрим-индикатор для остальных. */
+  async toggleStream(kind: 'screen' | 'camera') {
+    if (!this.backend || !this.myVoice) {
+      this.toast('Сначала войди в голосовой канал', 'error');
+      return;
+    }
+    const own = this.myStreams.find((s) => (s.type ?? 'screen') === kind);
+    try {
+      if (own) {
+        // Стоп: гасим стрим на сервере и локальный захват.
+        await this.backend.stopStream(own.streamKey);
+        await this.stopLocalPreview();
+        this.toast(kind === 'screen' ? 'Показ экрана остановлен' : 'Камера выключена', 'info');
+        return;
+      }
+      // Сначала локальный захват (юзер выбирает окно/экран или разрешает камеру)…
+      const stream =
+        kind === 'screen'
+          ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+          : await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });
+      // …затем заявляем стрим на сервер (op 18).
+      await this.backend.startStream(kind, this.myVoice.guildId, this.myVoice.channelId);
+      this.localPreview = stream;
+      this.localPreviewKind = kind;
+      // Юзер нажал «Стоп» в нативной полосе браузера — гасим и стрим.
+      stream.getVideoTracks()[0]?.addEventListener('ended', () => {
+        void this.stopStreamByKind(kind);
+      });
+      this.toast(
+        kind === 'screen'
+          ? 'Показ экрана включён (превью локальное; передача — в следующем обновлении)'
+          : 'Камера включена (превью локальное; передача — в следующем обновлении)',
+        'info',
+      );
+    } catch (e) {
+      this.toast(
+        `Не удалось включить ${kind === 'screen' ? 'показ экрана' : 'камеру'}: ${errMsg(e)}`,
+        'error',
+      );
+    }
+  }
+
+  private async stopStreamByKind(kind: 'screen' | 'camera') {
+    const own = this.myStreams.find((s) => (s.type ?? 'screen') === kind);
+    if (own) {
+      try {
+        await this.backend?.stopStream(own.streamKey);
+      } catch {
+        /* silent */
+      }
+    }
+    await this.stopLocalPreview();
+  }
+
+  /** Остановить локальный захват превью (треки обязаны быть остановлены,
+   *  иначе индикатор камеры/захвата висит в системе). */
+  async stopLocalPreview() {
+    if (this.localPreview) {
+      for (const t of this.localPreview.getTracks()) t.stop();
+    }
+    this.localPreview = null;
+    this.localPreviewKind = null;
   }
 
   async kickMember(guildId: string, userId: string) {

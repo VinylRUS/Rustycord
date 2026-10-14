@@ -7,6 +7,18 @@
   const channel = $derived(app.activeChannel);
   const channelId = $derived(channel?.id ?? '');
   const participants = $derived(guild ? app.voiceUsers(guild.id, channelId) : []);
+  const streams = $derived(app.streamsInMyChannel());
+
+  // Локальное превью своего захвата (экран/камера) — биндим MediaStream
+  // к <video> и обновляем при смене источника.
+  let previewEl = $state<HTMLVideoElement | null>(null);
+  $effect(() => {
+    const stream = app.localPreview;
+    if (previewEl && stream) {
+      previewEl.srcObject = stream;
+      void previewEl.play().catch(() => undefined);
+    }
+  });
 </script>
 
 <section class="voice-view">
@@ -47,6 +59,41 @@
     {/each}
   </div>
 
+  {#if app.localPreview}
+    <div class="preview">
+      <div class="preview-head">
+        <Icon name={app.localPreviewKind === 'camera' ? 'camera' : 'screen'} size={16} color="#23a55a" />
+        <span>{app.localPreviewKind === 'camera' ? 'Камера (превью)' : 'Экран (превью)'}</span>
+        <span class="muted experimental">эксперимент · передача в след. обновлении</span>
+        <button class="preview-stop" title="Остановить" onclick={() => void app.stopLocalPreview()}>
+          <Icon name="close" size={14} color="#f23f43" />
+        </button>
+      </div>
+      <!-- svelte-ignore a11y_media_has_caption -->
+      <video bind:this={previewEl} muted playsinline></video>
+    </div>
+  {/if}
+
+  {#if streams.length}
+    <div class="streams">
+      {#each streams as s (s.streamKey)}
+        <div class="stream-chip" class:paused={s.paused}>
+          <Icon name={s.type === 'camera' ? 'camera' : 'screen'} size={14} color={s.paused ? '#f0b232' : '#23a55a'} />
+          <span class="truncate">
+            {s.userId === app.user?.id
+              ? 'Вы в эфире'
+              : guild
+                ? (app.memberById(guild.id, s.userId)?.nick ??
+                  app.memberById(guild.id, s.userId)?.user?.global_name ??
+                  app.memberById(guild.id, s.userId)?.user?.username ?? 'Участник')
+                : 'Участник'}
+          </span>
+          <span class="muted">{s.type === 'camera' ? 'камера' : 'экран'}{s.paused ? ' · пауза' : ''}</span>
+        </div>
+      {/each}
+    </div>
+  {/if}
+
   {#if app.myVoice?.mode}
     <footer class="proto-info mono">
       protocol v4 · mode {app.myVoice.mode} · ssrc {app.myVoice.ssrc} · {app.myVoice.endpoint}
@@ -62,6 +109,56 @@
     background: var(--bg-primary);
     min-width: 0;
   }
+  .preview {
+    margin: 8px 16px 0;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #000;
+  }
+  .preview-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    color: var(--header-primary);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .experimental { font-weight: 400; font-size: 11px; }
+  .preview-stop {
+    margin-left: auto;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .preview-stop:hover { background: #f23f4322; }
+  .preview video {
+    width: 100%;
+    max-height: 320px;
+    display: block;
+    background: #000;
+  }
+  .streams {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 16px 0;
+  }
+  .stream-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 12px;
+    color: var(--header-primary);
+    max-width: 260px;
+  }
+  .stream-chip.paused { opacity: 0.7; }
   header {
     height: 48px;
     display: flex;

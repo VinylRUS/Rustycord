@@ -91,6 +91,9 @@ pub fn run() {
             commands::kick_member,
             commands::ban_member,
             commands::join_voice,
+            commands::start_stream,
+            commands::stop_stream,
+            commands::pause_stream,
             commands::parse_snowflake,
             // пользовательская сессия: друзья и личные беседы (v0.4.0)
             commands::create_dm,

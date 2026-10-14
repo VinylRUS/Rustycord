@@ -62,7 +62,22 @@ pub enum GatewayCommand {
         channel_id: Option<String>,
         self_mute: bool,
         self_deaf: bool,
+        /// self_video — «камера включена» (как в официальном клиенте).
+        self_video: bool,
     },
+    /// op 18 STREAM_CREATE — начать трансляцию (screen/camera) в голосовом
+    /// канале. Точный формат из discord-client-rs (create_op_18).
+    StreamCreate {
+        /// "screen" | "camera" — тип трансляции.
+        stream_type: String,
+        guild_id: String,
+        channel_id: String,
+    },
+    /// op 20 STREAM_DELETE — прекратить трансляцию по ключу
+    /// (stream_key прилетает в dispatch STREAM_CREATE).
+    StreamDelete { stream_key: String },
+    /// op 22 STREAM_SET_PAUSED — пауза/снятие трансляции.
+    StreamSetPaused { stream_key: String, paused: bool },
 }
 
 /// Per-guild cached state, kept fresh from gateway dispatches.

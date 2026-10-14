@@ -64,9 +64,9 @@
   function jumpTo(m: Message) {
     const list = app.messagesByChannel[m.channel_id];
     if (list?.some((x) => x.id === m.id)) {
-      app.toast('Сообщение в списке выше ↑', 'info');
-      const el = document.querySelector(`[data-mid="${m.id}"]`);
-      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // Сначала просим MessageList расширить окно рендера до сообщения
+      // (вне окна элемента с data-mid просто нет в DOM), затем скроллим.
+      app.requestReveal(m.id);
     } else {
       app.toast('Сообщение вне загруженной истории — прокрути вверх', 'info');
     }

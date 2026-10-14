@@ -56,6 +56,14 @@ export interface Backend {
   gatewaySendRaw(frame: string): Promise<void>;
   kickMember(guildId: string, userId: string): Promise<void>;
   banMember(guildId: string, userId: string): Promise<void>;
+  /** op 4 — войти/выйти из войс-канала; selfVideo — флаг камеры. */
+  joinVoice(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean, selfVideo?: boolean): Promise<void>;
+  /** op 18 — начать трансляцию экрана/камеры (экспериментально). */
+  startStream(streamType: 'screen' | 'camera', guildId: string, channelId: string): Promise<void>;
+  /** op 20 — прекратить трансляцию. */
+  stopStream(streamKey: string): Promise<void>;
+  /** op 22 — пауза трансляции. */
+  pauseStream(streamKey: string, paused: boolean): Promise<void>;
 
   // v0.6.0: подписки, обновления, файлы
   /** Юзер-сессии: op 37 + op 14 на гильдию (вызывается при её открытии). */
@@ -218,8 +226,20 @@ class TauriBackend implements Backend {
     return this.invoke<string>('plugin_read', { name });
   }
 
-  async joinVoice(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean): Promise<void> {
-    await this.invoke('join_voice', { guildId, channelId, selfMute, selfDeaf });
+  async joinVoice(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean, selfVideo?: boolean): Promise<void> {
+    await this.invoke('join_voice', { guildId, channelId, selfMute, selfDeaf, selfVideo });
+  }
+
+  async startStream(streamType: 'screen' | 'camera', guildId: string, channelId: string): Promise<void> {
+    await this.invoke('start_stream', { streamType, guildId, channelId });
+  }
+
+  async stopStream(streamKey: string): Promise<void> {
+    await this.invoke('stop_stream', { streamKey });
+  }
+
+  async pauseStream(streamKey: string, paused: boolean): Promise<void> {
+    await this.invoke('pause_stream', { streamKey, paused });
   }
 
   async parseSnowflake(id: string): Promise<SnowflakeInfo> {

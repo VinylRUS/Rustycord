@@ -577,11 +577,11 @@ export class MockBackend implements Backend {
     this.emit({ type: 'dispatch', t: 'GUILD_MEMBER_REMOVE', d: { guild_id: guildId, user: { id: userId } } });
   }
 
-  async joinVoice(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean): Promise<void> {
+  async joinVoice(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean, selfVideo?: boolean): Promise<void> {
     this.emit({
       type: 'dispatch',
       t: 'VOICE_STATE_UPDATE',
-      d: { guild_id: guildId, channel_id: channelId, user_id: ME.id, self_mute: selfMute, self_deaf: selfDeaf, session_id: 'demo-voice-1' },
+      d: { guild_id: guildId, channel_id: channelId, user_id: ME.id, self_mute: selfMute, self_deaf: selfDeaf, self_video: !!selfVideo, session_id: 'demo-voice-1' },
     });
     if (channelId) {
       await delay(500);
@@ -592,7 +592,34 @@ export class MockBackend implements Backend {
       });
     } else {
       this.emit({ type: 'voice', kind: 'disconnected', data: { guild_id: guildId } });
+      // Выход из войса гасит и трансляцию.
+      for (const s of this.demoStreams) {
+        this.emit({ type: 'dispatch', t: 'STREAM_DELETE', d: { stream_key: s } });
+      }
+      this.demoStreams = [];
     }
+  }
+
+  /** Демо-ключи активных трансляций (для экспериментального UI стримов). */
+  private demoStreams: string[] = [];
+
+  async startStream(streamType: 'screen' | 'camera', guildId: string, channelId: string): Promise<void> {
+    const key = `guild:${guildId}:${ME.id}:${channelId}:${streamType}`;
+    this.demoStreams.push(key);
+    this.emit({
+      type: 'dispatch',
+      t: 'STREAM_CREATE',
+      d: { stream_key: key, guild_id: guildId, channel_id: channelId, user_id: ME.id, type: streamType, viewer_count: 0, paused: false },
+    });
+  }
+
+  async stopStream(streamKey: string): Promise<void> {
+    this.demoStreams = this.demoStreams.filter((k) => k !== streamKey);
+    this.emit({ type: 'dispatch', t: 'STREAM_DELETE', d: { stream_key: streamKey } });
+  }
+
+  async pauseStream(streamKey: string, paused: boolean): Promise<void> {
+    this.emit({ type: 'dispatch', t: 'STREAM_UPDATE', d: { stream_key: streamKey, paused } });
   }
 
   async parseSnowflake(id: string): Promise<SnowflakeInfo> {

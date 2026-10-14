@@ -57,9 +57,10 @@
     }
   });
   $effect(() => {
-    // channel switch → jump to bottom, enable stickiness
+    // channel switch → jump to bottom, enable stickiness, reset window
     void channelId;
     stick = true;
+    windowSize = 400;
     requestAnimationFrame(() => listEl?.scrollTo({ top: listEl.scrollHeight }));
   });
 
@@ -68,16 +69,63 @@
     const nearBottom = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 120;
     stick = nearBottom;
     if (listEl.scrollTop < 80 && channelId && app.messagesLoaded[channelId]) {
-      void app.loadOlder(channelId);
+      // Сначала расширяем окно уже загруженного, потом — грузим по API.
+      if (rows.length > windowSize) expandWindow();
+      else void app.loadOlder(channelId);
     }
   }
 
   const typing = $derived(app.typingNames(channelId ?? ''));
+
+  /* Оконный рендер: в DOM держим только хвост истории (последние строки),
+   * иначе глубокая прокрутка канала раздувает список до тысяч узлов и
+   * интерфейс начинает лагать. Прокрутка к верху расширяет окно на 400
+   * строк; когда загруженное кончилось — подтягиваем историю по API. */
+  let windowSize = $state(400);
+  const visibleRows = $derived(
+    rows.length > windowSize ? rows.slice(rows.length - windowSize) : rows,
+  );
+  let pendingHeight = 0;
+
+  function expandWindow() {
+    if (!listEl) return;
+    pendingHeight = listEl.scrollHeight;
+    windowSize += 400;
+  }
+
+  $effect(() => {
+    void windowSize;
+    if (pendingHeight && listEl) {
+      const delta = listEl.scrollHeight - pendingHeight;
+      if (delta > 0) listEl.scrollTop += delta;
+      pendingHeight = 0;
+    }
+  });
+
+  /* Прыжок к сообщению (поиск): расширяем окно рендера до него — иначе
+   * элемента с data-mid нет в DOM — и скроллим к нему. */
+  $effect(() => {
+    const req = app.reveal;
+    if (!req || !channelId) return;
+    const idx = messages.findIndex((m) => m.id === req.id);
+    if (idx < 0) return;
+    const need = messages.length - idx + 10;
+    if (need > windowSize) windowSize = need;
+    requestAnimationFrame(() => {
+      document
+        .querySelector(`[data-mid="${req.id}"]`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  });
 </script>
 
 <div class="messages" bind:this={listEl} onscroll={onScroll}>
   {#if app.loadingOlder[channelId ?? '']}
     <div class="older-loading muted">Загружаем историю…</div>
+  {:else if rows.length > windowSize}
+    <div class="older-loading muted">
+      ↑ Показаны последние {windowSize} записей — прокрутите вверх, чтобы открыть более старые
+    </div>
   {/if}
 
   {#if messages.length === 0 && app.messagesLoaded[channelId ?? '']}
@@ -98,7 +146,7 @@
     </div>
   {/if}
 
-  {#each rows as row (row.key)}
+  {#each visibleRows as row (row.key)}
     {#if row.kind === 'divider'}
       <div class="divider">
         <span class="line"></span>

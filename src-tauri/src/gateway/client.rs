@@ -273,15 +273,45 @@ async fn run_session(
                         })).await?;
                         tracing::debug!("gateway: op 14 member list для {guild_id} ({} каналов)", channels.len());
                     }
-                    Some(GatewayCommand::VoiceStateUpdate { guild_id, channel_id, self_mute, self_deaf }) => {
+                    Some(GatewayCommand::VoiceStateUpdate { guild_id, channel_id, self_mute, self_deaf, self_video }) => {
                         wsutil::send_json(&mut writer, &json!({
                             "op": 4,
                             "d": {
                                 "guild_id": guild_id,
                                 "channel_id": channel_id,   // null → покинуть канал
                                 "self_mute": self_mute,
-                                "self_deaf": self_deaf
+                                "self_deaf": self_deaf,
+                                "self_video": self_video
                             }
+                        })).await?;
+                    }
+                    Some(GatewayCommand::StreamCreate { stream_type, guild_id, channel_id }) => {
+                        // op 18 STREAM_CREATE — «показать экран»/«включить
+                        // камеру». Сервер разошлёт dispatch STREAM_CREATE с
+                        // stream_key — по нему останавливаем (op 20) и ставим
+                        // на паузу (op 22).
+                        wsutil::send_json(&mut writer, &json!({
+                            "op": 18,
+                            "d": {
+                                "type": stream_type,
+                                "guild_id": guild_id,
+                                "channel_id": channel_id,
+                                "preferred_region": null
+                            }
+                        })).await?;
+                        tracing::info!("gateway: op 18 STREAM_CREATE отправлен");
+                    }
+                    Some(GatewayCommand::StreamDelete { stream_key }) => {
+                        wsutil::send_json(&mut writer, &json!({
+                            "op": 20,
+                            "d": { "stream_key": stream_key }
+                        })).await?;
+                        tracing::info!("gateway: op 20 STREAM_DELETE {stream_key}");
+                    }
+                    Some(GatewayCommand::StreamSetPaused { stream_key, paused }) => {
+                        wsutil::send_json(&mut writer, &json!({
+                            "op": 22,
+                            "d": { "stream_key": stream_key, "paused": paused }
                         })).await?;
                     }
                     Some(GatewayCommand::SendText(text)) => {

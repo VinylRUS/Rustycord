@@ -3,6 +3,8 @@
 
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 use tauri::Emitter;
 
 use crate::rest::models::{Channel, Guild, Member, Presence, Relationship, VoiceState};
@@ -41,6 +43,7 @@ pub async fn handle_dispatch(
                     state.cache.write().unwrap().user = Some(u);
                 }
             }
+            let mut stub_ids: Vec<String> = Vec::new();
             {
                 let mut cache = state.cache.write().unwrap();
                 // Пользовательский READY (в отличие от бот-READY) несёт DM-каналы
@@ -81,7 +84,51 @@ pub async fn handle_dispatch(
                         }
                     }
                 }
+                // Гильдии-стабы из READY: юзер-READY несёт их с id/name/icon —
+                // этого хватает, чтобы нарисовать рейл серверов СРАЗУ,
+                // не дожидаясь GUILD_CREATE (которые приезжают только после
+                // подписки op 37). Полные данные подтянутся GUILD_CREATE'ом.
+                if let Some(guilds) = d.get("guilds").and_then(|v| v.as_array()) {
+                    for g in guilds {
+                        let Some(id) = g.get("id").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        stub_ids.push(id.to_string());
+                        if cache.guilds.contains_key(id) {
+                            continue; // RESUME: полная гильдия уже в кэше
+                        }
+                        cache.guilds.insert(
+                            id.to_string(),
+                            GuildState {
+                                id: id.to_string(),
+                                name: g
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("…")
+                                    .to_string(),
+                                icon: g.get("icon").and_then(|v| v.as_str()).map(String::from),
+                                banner: None,
+                                owner_id: g
+                                    .get("owner_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                roles: Vec::new(),
+                                emojis: Vec::new(),
+                                channels: Vec::new(),
+                                members: Default::default(),
+                                presences: Default::default(),
+                                voice_states: Vec::new(),
+                                member_count: 0,
+                            },
+                        );
+                    }
+                }
+                // merged_members[i] / merged_presences параллельны d.guilds:
+                // собственная карточка участника и статусы друзей по гильдиям.
+                // ВАЖНО: вне зоны cache.write() — apply_merged берёт лок сам.
             }
+            apply_merged(state, &d);
             let rel_count = d
                 .get("relationships")
                 .and_then(|v| v.as_array())
@@ -99,15 +146,72 @@ pub async fn handle_dispatch(
                 "discord://ready",
                 json!({ "user": d["user"], "session_id": session_id }),
             );
-            // ПОДПИСКИ (op 37 / op 14) больше не летат автоматом после READY:
-            // шторм пакетов по всем гильдиям сразу подозревался в обвале
-            // сессии (close без видимой причины). Теперь фронтенд подписывается
-            // точечно — при открытии гильдии (см. commands::subscribe_guild).
+            // ГЛАВНЫЙ ФИКС видимости серверов: юзер-сессии получают
+            // GUILD_CREATE только на подписанные гильдии (op 37). Шторм
+            // одним пакетом подозревался в обрывах — поэтому батчами по 50
+            // с паузой 350 мс (мягче, чем один мегапакет и чем залп op 14
+            // по всем гильдиям сразу, который валил сессию в v0.5.0).
+            if !state.is_bot.load(Ordering::SeqCst) && !stub_ids.is_empty() {
+                let tx = state.gateway_tx.read().unwrap().clone();
+                if let Some(tx) = tx {
+                    let st = Arc::clone(state);
+                    let batches: Vec<Vec<String>> =
+                        stub_ids.chunks(50).map(|c| c.to_vec()).collect();
+                    tauri::async_runtime::spawn(async move {
+                        for batch in batches {
+                            if st.shutdown.read().unwrap().is_cancelled() {
+                                break;
+                            }
+                            if tx
+                                .send(crate::state::GatewayCommand::BulkGuildSubscribe {
+                                    guild_ids: batch.clone(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            tracing::info!(
+                                "gateway: op 37 bulk subscribe — {} гильдий",
+                                batch.len()
+                            );
+                            tokio::time::sleep(Duration::from_millis(350)).await;
+                        }
+                    });
+                }
+            }
             // Полный READY вперёд как dispatch: фронтенду нужны
             // private_channels (recipient_ids!), users, relationships
             // и presences, которых нет в коротком ready-событии выше.
             let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
             state.emit_status("connected", None);
+        }
+
+        "READY_SUPPLEMENTAL" => {
+            // Приезжает сразу после потока GUILD_CREATE: голосовые состояния
+            // гильдий, merged_members (своя карточка) и merged_presences
+            // (статусы друзей и «видимые» участники по гильдиям).
+            {
+                let mut cache = state.cache.write().unwrap();
+                if let Some(guilds) = d.get("guilds").and_then(|v| v.as_array()) {
+                    for g in guilds {
+                        let Some(id) = g.get("id").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let Some(gs) = cache.guilds.get_mut(id) else {
+                            continue;
+                        };
+                        if let Some(vs) = g.get("voice_states") {
+                            if let Ok(list) = serde_json::from_value::<Vec<VoiceState>>(vs.clone())
+                            {
+                                gs.voice_states = list;
+                            }
+                        }
+                    }
+                }
+            }
+            apply_merged(state, &d);
+            let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "RELATIONSHIP_ADD" => {
@@ -209,6 +313,10 @@ pub async fn handle_dispatch(
                 serde_json::from_value(d["members"].clone()).unwrap_or_default();
             let chunk_index = d["chunk_index"].as_u64().unwrap_or(0);
             let chunk_count = d["chunk_count"].as_u64().unwrap_or(1);
+            // Ответ на op 14 (activities: true) несёт и пресенсы — без них
+            // список участников выглядит «все офлайн».
+            let presences: Vec<Presence> =
+                serde_json::from_value(d["presences"].clone()).unwrap_or_default();
             {
                 let mut cache = state.cache.write().unwrap();
                 if let Some(gs) = cache.guilds.get_mut(&guild_id) {
@@ -216,6 +324,9 @@ pub async fn handle_dispatch(
                         if let Some(uid) = m.user.as_ref().map(|u| u.id.clone()) {
                             gs.members.insert(uid, m);
                         }
+                    }
+                    for p in presences {
+                        gs.presences.insert(p.user.id.clone(), p);
                     }
                 }
             }
@@ -460,5 +571,82 @@ pub async fn handle_dispatch(
         _ => {
             let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
+    }
+}
+
+/// Разбор merged-массивов READY / READY_SUPPLEMENTAL: `merged_members[i]` и
+/// `merged_presences.guilds[i]` параллельны `d.guilds[i]`, а
+/// `merged_presences.friends` — статусы друзей (лечит «все не в сети»).
+/// Вызывается ВНЕ любых блокировок кэша.
+fn apply_merged(state: &SharedState, d: &Value) {
+    let Some(guilds) = d.get("guilds").and_then(|v| v.as_array()) else {
+        return;
+    };
+    let guild_id_at = |i: usize| -> Option<String> {
+        guilds
+            .get(i)
+            .and_then(|g| g.get("id"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    };
+    let mut friend_n = 0usize;
+    let mut member_n = 0usize;
+    let mut guild_pres_n = 0usize;
+    {
+        let mut cache = state.cache.write().unwrap();
+        // merged_presences.friends → статусы друзей.
+        if let Some(friends) = d
+            .get("merged_presences")
+            .and_then(|mp| mp.get("friends"))
+            .and_then(|v| v.as_array())
+        {
+            for p in friends {
+                if let Ok(pr) = serde_json::from_value::<Presence>(p.clone()) {
+                    cache.friend_presences.insert(pr.user.id.clone(), pr);
+                    friend_n += 1;
+                }
+            }
+        }
+        // merged_presences.guilds[i] ↔ guilds[i] — статусы по гильдиям.
+        if let Some(gp) = d
+            .get("merged_presences")
+            .and_then(|mp| mp.get("guilds"))
+            .and_then(|v| v.as_array())
+        {
+            for (i, arr) in gp.iter().enumerate() {
+                let Some(gid) = guild_id_at(i) else { continue };
+                let Some(gs) = cache.guilds.get_mut(&gid) else {
+                    continue;
+                };
+                for p in arr.as_array().into_iter().flatten() {
+                    if let Ok(pr) = serde_json::from_value::<Presence>(p.clone()) {
+                        gs.presences.insert(pr.user.id.clone(), pr);
+                        guild_pres_n += 1;
+                    }
+                }
+            }
+        }
+        // merged_members[i] ↔ guilds[i] — своя карточка участника (роли, ник).
+        if let Some(mm) = d.get("merged_members").and_then(|v| v.as_array()) {
+            for (i, arr) in mm.iter().enumerate() {
+                let Some(gid) = guild_id_at(i) else { continue };
+                let Some(gs) = cache.guilds.get_mut(&gid) else {
+                    continue;
+                };
+                for m in arr.as_array().into_iter().flatten() {
+                    if let Ok(mem) = serde_json::from_value::<Member>(m.clone()) {
+                        if let Some(uid) = mem.user.as_ref().map(|u| u.id.clone()) {
+                            gs.members.insert(uid, mem);
+                            member_n += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if friend_n + member_n + guild_pres_n > 0 {
+        tracing::info!(
+            "gateway: merged-данные: {friend_n} статусов друзей, {guild_pres_n} гильдейских, {member_n} карточек участников"
+        );
     }
 }

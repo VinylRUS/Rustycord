@@ -176,6 +176,23 @@
           <div class="voice-endpoint truncate">{app.myVoice.endpoint}{#if app.myVoice.ssrc} · ssrc {app.myVoice.ssrc}{/if}</div>
         {/if}
       </div>
+      <!-- Трансляции: экран и камера (эксперимент) -->
+      <button
+        class="voice-btn"
+        class:active={app.myStreams.some((s) => s.type === 'screen')}
+        title="Показать экран"
+        onclick={() => void app.toggleStream('screen')}
+      >
+        <Icon name="screen" size={18} color={app.myStreams.some((s) => s.type === 'screen') ? '#23a55a' : '#b5bac1'} />
+      </button>
+      <button
+        class="voice-btn"
+        class:active={app.myStreams.some((s) => s.type === 'camera')}
+        title="Веб-камера"
+        onclick={() => void app.toggleStream('camera')}
+      >
+        <Icon name="camera" size={18} color={app.myStreams.some((s) => s.type === 'camera') ? '#23a55a' : '#b5bac1'} />
+      </button>
       <button class="voice-leave" title="Отключиться" onclick={() => void app.leaveVoice()}>
         <Icon name="phone-off" size={20} color="#f23f43" />
       </button>
@@ -428,6 +445,17 @@
   }
   .voice-target { color: var(--text-muted); font-size: 12px; margin-top: 1px; }
   .voice-endpoint { color: var(--text-muted); font-size: 10px; font-family: var(--font-code); opacity: 0.7; }
+  .voice-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .voice-btn:hover { background: #ffffff14; }
+  .voice-btn.active { background: #23a55a22; }
   .voice-leave {
     width: 32px;
     height: 32px;

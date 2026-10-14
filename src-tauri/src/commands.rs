@@ -709,7 +709,7 @@ pub async fn ban_member(
 }
 
 /// op 4 — join/leave a voice channel (channel_id = None → leave),
-/// self mute/deafen flags ride along the same frame.
+/// self mute/deafen/video flags ride along the same frame.
 #[tauri::command]
 pub async fn join_voice(
     state: State<'_, Arc<AppState>>,
@@ -717,6 +717,7 @@ pub async fn join_voice(
     channel_id: Option<String>,
     self_mute: bool,
     self_deaf: bool,
+    self_video: Option<bool>,
 ) -> Result<(), String> {
     let tx = state
         .gateway_tx
@@ -724,6 +725,7 @@ pub async fn join_voice(
         .unwrap()
         .clone()
         .ok_or("Gateway не подключён")?;
+    let self_video = self_video.unwrap_or(false);
     // Желаемое состояние мьюта на случай, если сессия стартует раньше,
     // чем придёт первое эхо VOICE_STATE_UPDATE (events.rs обновляет её дальше).
     {
@@ -743,9 +745,76 @@ pub async fn join_voice(
         channel_id,
         self_mute,
         self_deaf,
+        self_video,
     })
     .await
     .map_err(es)?;
+    Ok(())
+}
+
+/// op 18 — начать трансляцию экрана/камеры в голосовом канале.
+/// Экспериментально: сервер создаст стрим (dispatch STREAM_CREATE с ключом),
+/// передача видео-потока появится в следующем релизе.
+#[tauri::command]
+pub async fn start_stream(
+    state: State<'_, Arc<AppState>>,
+    stream_type: String,
+    guild_id: String,
+    channel_id: String,
+) -> Result<(), String> {
+    if stream_type != "screen" && stream_type != "camera" {
+        return Err("stream_type должен быть screen или camera".into());
+    }
+    let tx = state
+        .gateway_tx
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or("Gateway не подключён")?;
+    tx.send(GatewayCommand::StreamCreate {
+        stream_type,
+        guild_id,
+        channel_id,
+    })
+    .await
+    .map_err(es)?;
+    Ok(())
+}
+
+/// op 20 — прекратить трансляцию по stream_key (формат guild:channel:user).
+#[tauri::command]
+pub async fn stop_stream(
+    state: State<'_, Arc<AppState>>,
+    stream_key: String,
+) -> Result<(), String> {
+    let tx = state
+        .gateway_tx
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or("Gateway не подключён")?;
+    tx.send(GatewayCommand::StreamDelete { stream_key })
+        .await
+        .map_err(es)?;
+    Ok(())
+}
+
+/// op 22 — пауза/снятие трансляции (картинка замирает на месте).
+#[tauri::command]
+pub async fn pause_stream(
+    state: State<'_, Arc<AppState>>,
+    stream_key: String,
+    paused: bool,
+) -> Result<(), String> {
+    let tx = state
+        .gateway_tx
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or("Gateway не подключён")?;
+    tx.send(GatewayCommand::StreamSetPaused { stream_key, paused })
+        .await
+        .map_err(es)?;
     Ok(())
 }
 
@@ -756,9 +825,14 @@ pub async fn parse_snowflake(id: String) -> Result<snowflake::SnowflakeInfo, Str
 
 /* ==================== v0.6.0: подписки / апдейты / файлы ==================== */
 
-/// Подписаться на события гильдии (юзер-сессии): op 37 на сам сервер +
-/// op 14 на ленивый список участников первых каналов. Вызывается фронтендом
-/// при открытии сервера; повторные вызовы дедуплицируются.
+/// Подписаться на события гильдии (юзер-сессии): op 37 (пресенсы/typing)
+/// на сам сервер + op 14 на ленивый список участников. Основной поток
+/// подписок уходит после READY (events.rs, батчами по 50) — сюда приходят
+/// клики по серверам и гильдии, вступленные уже после запуска.
+///
+/// Повторяемость: если каналов в кэше ещё нет (гильдия-стаб из READY,
+/// GUILD_CREATE в пути), подписка НЕ помечается выполненной — фронтенд
+/// повторит вызов по приходу GUILD_CREATE (см. store: GUILD_CREATE).
 #[tauri::command]
 pub async fn subscribe_guild(
     state: State<'_, Arc<AppState>>,
@@ -767,24 +841,12 @@ pub async fn subscribe_guild(
     if state.is_bot.load(Ordering::SeqCst) {
         return Ok(()); // ботам хватает op 8 (request_members)
     }
-    {
-        let mut subs = state.subscribed_guilds.lock().unwrap();
-        if subs.contains(&guild_id) {
-            return Ok(());
-        }
-        subs.insert(guild_id.clone());
-    }
     let tx = state
         .gateway_tx
         .read()
         .unwrap()
         .clone()
         .ok_or("Gateway не подключён")?;
-    tx.send(GatewayCommand::BulkGuildSubscribe {
-        guild_ids: vec![guild_id.clone()],
-    })
-    .await
-    .map_err(es)?;
     // op 14: текстовые/войс-каналы из кэша — первые 10, диапазон [0, 99].
     let channels: Vec<(String, Vec<u32>)> = {
         let cache = state.cache.read().unwrap();
@@ -801,11 +863,31 @@ pub async fn subscribe_guild(
             })
             .unwrap_or_default()
     };
-    if !channels.is_empty() {
-        tx.send(GatewayCommand::SubscribeMemberList { guild_id, channels })
-            .await
-            .map_err(es)?;
+    if channels.is_empty() {
+        // Гильдия ещё «стаб» — GUILD_CREATE не приезжал. Молча ждём ретрая:
+        // это нормальная гонка между кликом юзера и потоком GUILD_CREATE.
+        tracing::debug!("subscribe_guild: у {guild_id} ещё нет каналов — ждём GUILD_CREATE");
+        return Ok(());
     }
+    {
+        let mut subs = state.subscribed_guilds.lock().unwrap();
+        if subs.contains(&guild_id) {
+            return Ok(());
+        }
+        subs.insert(guild_id.clone());
+    }
+    // op 37 на одну гильдию: покрывает вступления ПОСЛЕ READY и клики,
+    // сделанные до того, как батч READY-подписок дошёл до этой гильдии.
+    // Повторная подписка безвредна — официальный клиент шлёт op 37 при
+    // каждом переключении канала.
+    tx.send(GatewayCommand::BulkGuildSubscribe {
+        guild_ids: vec![guild_id.clone()],
+    })
+    .await
+    .map_err(es)?;
+    tx.send(GatewayCommand::SubscribeMemberList { guild_id, channels })
+        .await
+        .map_err(es)?;
     Ok(())
 }
 
