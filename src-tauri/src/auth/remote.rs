@@ -16,8 +16,9 @@
 //!     heartbeat_ack; нет ACK — соединение «зомби», обрываем;
 //!  5. телефон сканирует QR → pending_ticket (зашифрованный профиль
 //!     «id:discriminator:avatar:username») → «отсканировал такой-то юзер»;
-//!  6. pending_login (ticket) — REST POST /users/@me/remote-auth/login
-//!     → encrypted_token → RSA-OAEP-SHA256 → пользовательский токен;
+//!  6. pending_login (ticket) — REST POST /api/v9/users/@me/remote-auth/login
+//!     (v9 — как официальный веб-клиент; v10 запасной) → encrypted_token
+//!     → RSA-OAEP-SHA256 → пользовательский токен;
 //!  7. cancel / close 4003 — отмена на телефоне / QR истёк.
 
 use std::time::Duration;
@@ -37,7 +38,13 @@ use crate::wsutil;
 
 const REMOTE_AUTH_URL: &str = "wss://remote-auth-gateway.discord.gg/?v=2";
 /// Обмен QR-тикетa на токен (docs.discord.food, Endpoints).
-const TICKET_EXCHANGE_URL: &str = "https://discord.com/api/v10/users/@me/remote-auth/login";
+/// Рабочая версия — **v9**: её используют официальный веб-клиент и
+/// battle-tested обёртка discord-remote-auth (npm). v10 на живом тикете
+/// отвечал 400 без тела (лог 18:33:09) — оставлен как запасной эндпоинт.
+const TICKET_EXCHANGE_URLS: [&str; 2] = [
+    "https://discord.com/api/v9/users/@me/remote-auth/login",
+    "https://discord.com/api/v10/users/@me/remote-auth/login",
+];
 
 /// Собрать компактный QR-SVG (только чёрные модули, quiet zone 4).
 fn qr_svg(data: &str) -> Result<String> {
@@ -69,32 +76,123 @@ fn qr_svg(data: &str) -> Result<String> {
 
 /// Обменять ticket на токен: POST {ticket} → encrypted_token → RSA → токен.
 /// Это финальный шаг v2: сам WebSocket токен больше не приносит.
-async fn exchange_ticket(keys: &RemoteAuthKeys, ticket: &str) -> Result<String> {
+/// `build` — client_build_number (префетч в начале QR-сессии, см.
+/// run_remote_auth): тянуть его здесь нельзя — обмен и так самый
+/// уязвимый шаг входа, лишние секунды задержки не нужны.
+///
+/// Почему попытки идут по двум URL: тикет **одноразовый**. Пока сервер не
+/// ответил 2xx — тикет не потрачен, можно пробовать следующий эндпоинт
+/// (v9 → v10). После 2xx (даже если разбор ответа упал) повтор бессмыслен.
+async fn exchange_ticket(keys: &RemoteAuthKeys, ticket: &str, build: u64) -> Result<String> {
+    if ticket.len() < 20 {
+        bail!(
+            "подозрительный ticket (длина {} — ожидаем строку вида \
+             «id.подпись.секрет»), обмен не выполняем",
+            ticket.len()
+        );
+    }
     let client = reqwest::Client::builder()
         .user_agent(BROWSER_UA)
         .timeout(Duration::from_secs(15))
         .build()
         .context("не удалось создать HTTP-клиент")?;
+
+    let mut last: Option<String> = None;
+    for url in TICKET_EXCHANGE_URLS {
+        match exchange_once(&client, keys, url, ticket, build).await {
+            Ok(token) => return Ok(token),
+            Err(ExchangeFail::Fatal(msg)) => bail!("{msg}"),
+            Err(ExchangeFail::Retryable(msg)) => {
+                tracing::warn!("remote-auth: {url} → {msg}; пробуем запасной эндпоинт");
+                last = Some(msg);
+            }
+        }
+    }
+    bail!(
+        "обмен ticket не удался (обе версии API): {}",
+        last.unwrap_or_else(|| "нет ответа".to_string())
+    )
+}
+
+/// Исход одной попытки обмена.
+enum ExchangeFail {
+    /// Сервер не принял запрос — тикет не потрачен, можно пробовать другой URL.
+    Retryable(String),
+    /// Был 2xx, но токен из ответа не извлечён — тикет уже сгорел.
+    Fatal(String),
+}
+
+/// Одна попытка обмена: полный набор браузерных заголовков (как у
+/// официального веб-клиента и discord-remote-auth: Referer, sec-fetch-*,
+/// Accept-Language, X-Super-Properties) + диагностика сырым телом ответа.
+async fn exchange_once(
+    client: &reqwest::Client,
+    keys: &RemoteAuthKeys,
+    url: &str,
+    ticket: &str,
+    build: u64,
+) -> std::result::Result<String, ExchangeFail> {
     let resp = client
-        .post(TICKET_EXCHANGE_URL)
+        .post(url)
         .header("Origin", "https://discord.com")
+        .header("Referer", "https://discord.com/login")
+        .header("Accept-Language", "ru-RU,ru;q=0.9")
+        .header("X-Discord-Locale", "ru-RU")
+        .header(
+            "X-Super-Properties",
+            crate::superprops::super_properties(build),
+        )
+        .header("sec-fetch-dest", "empty")
+        .header("sec-fetch-mode", "cors")
+        .header("sec-fetch-site", "same-origin")
         .json(&json!({ "ticket": ticket }))
         .send()
-        .await
-        .context("не удалось обменять ticket (POST remote-auth/login)")?;
+        .await;
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => return Err(ExchangeFail::Retryable(format!("сеть: {e}"))),
+    };
     let status = resp.status();
-    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    // Читаем тело как текст: раньше парсили сразу в JSON и теряли сырой
+    // ответ — «нет описания» в логе скрывал реальную причину 400.
+    let raw = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        bail!(
-            "обмен ticket: HTTP {status} — {}",
-            body["message"].as_str().unwrap_or("нет описания")
-        );
+        let snippet: String = raw.chars().take(300).collect();
+        return Err(ExchangeFail::Retryable(format!(
+            "HTTP {status} (ticket len {}) — ответ: {}",
+            ticket.len(),
+            if snippet.is_empty() {
+                "<пустое тело>".to_string()
+            } else {
+                snippet
+            }
+        )));
     }
-    let enc = body["encrypted_token"]
-        .as_str()
-        .context("в ответе нет encrypted_token")?;
-    let bytes = keys.decrypt(enc).context("не удалось расшифровать токен")?;
-    String::from_utf8(bytes).context("токен не UTF-8")
+    // 2xx: тикет потрачен. Всё, что ниже, — Fatal (повтор с тем же тикетом
+    // бессмыслен).
+    let body: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(ExchangeFail::Fatal(format!(
+                "ответ 2xx не JSON ({e}): {}",
+                raw.chars().take(200).collect::<String>()
+            )))
+        }
+    };
+    let Some(enc) = body["encrypted_token"].as_str() else {
+        return Err(ExchangeFail::Fatal(format!(
+            "в 2xx-ответе нет encrypted_token: {}",
+            raw.chars().take(200).collect::<String>()
+        )));
+    };
+    let bytes = match keys.decrypt(enc) {
+        Ok(b) => b,
+        Err(e) => return Err(ExchangeFail::Fatal(format!("RSA-расшифровка: {e}"))),
+    };
+    match String::from_utf8(bytes) {
+        Ok(token) => Ok(token),
+        Err(_) => Err(ExchangeFail::Fatal("токен не UTF-8".to_string())),
+    }
 }
 
 /// Одна QR-сессия. Отменяется через `cancel` (пользователь закрыл экран логина).
@@ -117,6 +215,11 @@ pub async fn run_remote_auth(app: tauri::AppHandle, cancel: CancellationToken) -
     );
 
     let keys = RemoteAuthKeys::generate().context("не удалось сгенерировать RSA-ключи")?;
+    // Префетч client_build_number для X-Super-Properties обмена тикета:
+    // тянем ПАРАЛЛЕЛЬНО рукопожатию WS — пока пользователь достаёт телефон
+    // (десятки секунд), номер давно готов; на обмене тикета лишних секунд
+    // уже не будет.
+    let build_handle = tokio::spawn(crate::superprops::fetch_build_number());
 
     let mut request = REMOTE_AUTH_URL.into_client_request()?;
     // Origin обязателен (docs): без него шлюз отклоняет соединение.
@@ -260,7 +363,16 @@ pub async fn run_remote_auth(app: tauri::AppHandle, cancel: CancellationToken) -
                         let ticket = v["ticket"]
                             .as_str()
                             .context("в pending_login нет ticket")?;
-                        let token = exchange_ticket(&keys, ticket).await?;
+                        tracing::info!(
+                            "remote-auth: pending_login, ticket len {}",
+                            ticket.len()
+                        );
+                        let build = build_handle
+                            .await
+                            .ok()
+                            .flatten()
+                            .unwrap_or(crate::superprops::FALLBACK_BUILD_NUMBER);
+                        let token = exchange_ticket(&keys, ticket, build).await?;
                         let _ = writer.send(Message::Close(None)).await;
                         emit("done", json!({ "token": token }));
                         return Ok(());
