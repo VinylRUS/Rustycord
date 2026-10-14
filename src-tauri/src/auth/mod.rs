@@ -6,8 +6,8 @@ pub mod login;
 pub mod remote;
 
 use base64::Engine;
-use rand::rngs::OsRng;
 use rsa::pkcs8::EncodePublicKey;
+use rsa::rand_core::OsRng;
 use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
 use sha2::{Digest, Sha256};
 

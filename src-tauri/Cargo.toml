@@ -48,12 +48,15 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 futures-util = "0.3"
 # async_trait — нужен для impl AsyncMediaSource (songbird) и EventHandler.
 async-trait = "0.1"
-# User-auth: QR remote-auth (RSA-OAEP-SHA256 + HMAC proof), /auth/login.
+# User-auth: QR remote-auth (RSA-OAEP-SHA256), /auth/login.
+# OsRng берём из реэкспорта rsa (rsa::rand_core) — прямая зависимость
+# rand не нужна и регулярно ломалась major-бампами dependabot'а.
+# sha2 держим на 0.10: 0.11 перешёл на digest 0.11-трейты, с которыми
+# rsa 0.9 несовместим (rsa ждёт digest 0.10). hmac удалён — протокол
+# remote-auth v2 proof-эхом (nonce_proof) больше HMAC не использует.
 rsa = "0.9"
 sha2 = "0.10"
-hmac = "0.12"
-base64 = "0.22"
-rand = "0.8"
+base64 = "0.23"
 # QR-матрица для remote-auth (SVG собираем сами — без тяжёлых зависимостей).
 qrcode = { version = "0.14", default-features = false }
 # Голосовой движок: songbird (драйвер Discord voice v4/v5: современное
