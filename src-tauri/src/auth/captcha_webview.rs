@@ -19,8 +19,11 @@
 //!    настоящего navigator, X-Context-Properties; на ретрае капчи решение
 //!    уходит ДВАЖДЫ — заголовками X-Captcha-* и полями JSON-тела
 //!    captcha_key/captcha_rqtoken/captcha_session_id;
-//!  * `__rcAuth.challenge(cfg)` — карточка с виджетом hCaptcha (sitekey +
-//!    rqdata из вызова, порождённого ЭТИМ ЖЕ окном);
+//!  * `__rcAuth.challenge(cfg)` — карточка с виджетом hCaptcha (sitekey из
+//!    вызова, порождённого ЭТИМ ЖЕ окном; enterprise-rqdata уходит в виджет
+//!    ОТДЕЛЬНЫМ вызовом `hcaptcha.setData` ПОСЛЕ render — опция render её
+//!    молча игнорирует, и тогда токен рождается непривязанным к сессии
+//!    капчи: siteverify Discord отвечает invalid-response);
 //!  * пока страница грузится и POST летит — «вуаль» поверх чужого логина.
 //!
 //! Окно скрыто, пока Discord не попросил капчу: если браузерный контекст
@@ -196,13 +199,24 @@ const INIT_SCRIPT: &str = r#"
         try { window.hcaptcha.reset(); } catch (e) {}
       }
     };
-    if (cfg.rqdata) opts.rqdata = cfg.rqdata;
     if (cfg.invisible) opts.size = 'invisible';
     var id;
     try { id = window.hcaptcha.render(widget, opts); }
     catch (e) {
       err.textContent = 'Не удалось показать капчу: ' + e;
       return;
+    }
+    // Enterprise-rqdata НЕ является опцией render — api.js её молча
+    // игнорирует («rqdata» в api.js читается только при старте челленджа,
+    // куда данные приходят через setData). Официальный клиент (бандл
+    // discord.com, чанк капча-модалки) рендерит виджет БЕЗ rqdata и
+    // передаёт её отдельным вызовом setData: она уходит в iframe
+    // («challenge-data») и включается в getcaptcha, привязывая решение
+    // к вызову Discord. Без привязки токен «чужой» для сессии капчи —
+    // siteverify отвечает invalid-response (живой лог v0.8.3).
+    if (cfg.rqdata) {
+      try { window.hcaptcha.setData(id, { rqdata: cfg.rqdata }); }
+      catch (e) { cb('err', 'hcaptcha-setdata: ' + e); }
     }
     if (cfg.invisible) {
       try { window.hcaptcha.execute(id); } catch (e) {}

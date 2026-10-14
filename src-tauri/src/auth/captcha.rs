@@ -7,9 +7,13 @@
 //!     `captcha_rqdata` — hCaptcha Enterprise, `captcha_session_id`,
 //!     `captcha_rqtoken`, `should_serve_invisible`).
 //!  2. Клиент показывает капчу пользователю. rqdata, если есть, ОБЯЗАНА
-//!     уйти в виджет (иначе решение не примут). Sitekey Discord привязан
-//!     к домену, а rqdata Enterprise — к контексту сессии: и виджет, и
-//!     POST, породивший вызов, живут в одном окне на discord.com
+//!     уйти в виджет — но НЕ опцией render (api.js её молча игнорирует):
+//!     только через `hcaptcha.setData(id, {rqdata})` на готовый виджет
+//!     (так делает официальный клиент) — она попадает в getcaptcha и
+//!     привязывает решение к вызову; без привязки siteverify отвечает
+//!     invalid-response. Sitekey Discord привязан к домену, а rqdata
+//!     Enterprise — к контексту сессии: и виджет, и POST, породивший
+//!     вызов, живут в одном окне на discord.com
 //!     (auth/captcha_webview.rs).
 //!  3. Просьба повторяется с решением И В ЗАГОЛОВКАХ (`X-Captcha-Key` —
 //!     решение, `X-Captcha-Session-Id`/`X-Captcha-Rqtoken` — привязка
