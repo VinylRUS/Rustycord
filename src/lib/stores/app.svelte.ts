@@ -100,6 +100,10 @@ export class AppStore {
   user = $state<User | null>(null);
   sessionId = $state('');
   guilds = $state<Guild[]>([]);
+  /** Порядок серверов в рейле — из guild_folders юзер-READY (папки и
+   *  drag-порядок пользователя, как в официальном клиенте). Guild без
+   *  записи → в конец (в порядке прибытия GUILD_CREATE). */
+  guildOrder = $state<Record<string, number>>({});
   dms = $state<Channel[]>([]);
   /** Юзер-READY несёт массив users — все упомянутые в ЛС участники.
    *  Кэш «кто есть кто» для recipient_ids-каналов и упоминаний. */
@@ -581,6 +585,7 @@ export class AppStore {
           relationships?: Relationship[];
           presences?: Presence[];
           guilds?: { id: string; name?: string; icon?: string | null }[];
+          guild_folders?: { guild_ids?: string[] }[];
           merged_presences?: { friends?: Presence[]; guilds?: Presence[][] };
           merged_members?: Member[][];
         };
@@ -637,6 +642,21 @@ export class AppStore {
             }
           }
         }
+        // Порядок серверов в рейле — как в официальном клиенте: порядок
+        // записей guild_folders из юзер-READY (папки, drag-порядок).
+        // Гильдии вне карты (бот-сессии без guild_folders) — в конце,
+        // сохраняя относительный порядок стабов.
+        if (p.guild_folders && Array.isArray(p.guild_folders)) {
+          const order: Record<string, number> = {};
+          let i = 0;
+          for (const f of p.guild_folders) {
+            for (const gid of f.guild_ids ?? []) order[gid] = i++;
+          }
+          this.guildOrder = order;
+          this.guilds = [...this.guilds].sort(
+            (a, b) => (order[a.id] ?? 1e9) - (order[b.id] ?? 1e9),
+          );
+        }
         this.applyMerged(p.guilds ?? [], p.merged_presences, p.merged_members);
         // Надёжный источник имён/иконок юзер-гильдий: REST-эндпоинт
         // всегда несёт name+icon (gateway-пейлоады юзер-сессий — нет:
@@ -672,8 +692,12 @@ export class AppStore {
           name: raw.name ?? existing?.name ?? 'Без названия',
           icon: raw.icon ?? existing?.icon ?? null,
         } as Guild;
-        this.guilds = this.guilds.filter((x) => x.id !== g.id);
-        this.guilds.push(g);
+        // Замена НА МЕСТЕ (а не в конец): порядок рейла задаётся guild_folders
+        // из READY — перенос гильдии в хвост ломал бы сортировку на каждом
+        // GUILD_CREATE. Новые гильдии (вступил после запуска) — в конец.
+        const gi = this.guilds.findIndex((x) => x.id === g.id);
+        if (gi >= 0) this.guilds[gi] = g;
+        else this.guilds.push(g);
         plugins.emit('guild:create', g);
         // seed caches
         const members: Record<string, Member> = {};

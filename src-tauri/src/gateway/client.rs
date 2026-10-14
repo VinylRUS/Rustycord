@@ -256,6 +256,12 @@ async fn run_session(
                     Some(GatewayCommand::SubscribeMemberList { guild_id, channels }) => {
                         // op 14 (юзер-сессии): ленивый список участников по
                         // диапазонам канала — приезжает GUILD_MEMBERS_CHUNK.
+                        // threads: false — сверь с discord-client-rs
+                        // (create_op_14: typing=true, threads=false,
+                        // activities=true): байт-в-байт наш payload отличался
+                        // от эталона ровно этим полем, и живой gateway отвечал
+                        // на наш вариант close 4002 «Error while decoding
+                        // payload» — цикл крашей при клике по серверу.
                         let mut chans = serde_json::Map::new();
                         for (cid, ranges) in &channels {
                             // ranges = [0, 99] → JSON [[0, 99]] на канал.
@@ -266,7 +272,7 @@ async fn run_session(
                             "d": {
                                 "guild_id": guild_id,
                                 "typing": true,
-                                "threads": true,
+                                "threads": false,
                                 "activities": true,
                                 "channels": chans
                             }
@@ -392,6 +398,19 @@ async fn run_session(
                                 let _ = app.emit(
                                     "discord://warning",
                                     json!({ "message": "Privileged Intents выключены в Developer Portal — перезапускаюсь без Presence/Members/MessageContent. Включи их для полной функциональности." }),
+                                );
+                                return Ok(End::Reconnect);
+                            }
+                            4002 | 4005 => {
+                                // Декод нашего исходящего payload сломан /
+                                // повторный IDENTIFY. Сессия недееспособна:
+                                // RESUME на неё всегда ответит INVALID_SESSION —
+                                // сразу чистим и идём на свежий IDENTIFY.
+                                session.id = None;
+                                session.resume_url = None;
+                                state.emit_status(
+                                    "reconnecting",
+                                    Some(format!("close {code}: {}", cf.reason)),
                                 );
                                 return Ok(End::Reconnect);
                             }

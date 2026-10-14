@@ -31,7 +31,15 @@ fn rest_of(state: &State<'_, Arc<AppState>>) -> Result<RestClient, String> {
         .clone()
         .ok_or_else(|| "Не подключено — войди в аккаунт".to_string())?;
     let build = state.build_number.load(Ordering::SeqCst);
-    RestClient::new(&token, build).map_err(es)
+    // Юзер-сессии — REST v9 (как официальный веб-клиент; v10 отдаёт
+    // юзер-токенам 403 на ресурсных эндпоинтах — см. rest/client.rs).
+    // Ботам оставляем v10.
+    let version = if state.is_bot.load(std::sync::atomic::Ordering::SeqCst) {
+        10
+    } else {
+        9
+    };
+    RestClient::new(&token, build, version).map_err(es)
 }
 
 /// Stop gateway + voice tasks (if running).
@@ -143,7 +151,10 @@ pub async fn connect(
 
     // Fail fast on invalid token / network before spawning anything.
     let build = state.build_number.load(Ordering::SeqCst);
-    let rest = RestClient::new(&token, build).map_err(es)?;
+    // v10 на /users/@me работает и юзеру, и боту (проверено живыми логами) —
+    // поэтому первичный зонд логина остаётся на v10; все последующие вызовы
+    // идут через rest_of (юзер → v9, бот → v10).
+    let rest = RestClient::new(&token, build, 10).map_err(es)?;
     let me: CurrentUser = rest.get_json("/users/@me").await.map_err(|e| {
         let msg = e.to_string();
         if msg.contains("401") {

@@ -17,7 +17,14 @@ use reqwest::{Client, Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+/// Default API base — bots. User sessions must run on v9: the official
+/// web client and every self-hosted user client (discord-client-rs:
+/// DEFAULT_API_VERSION = 9) talk to /api/v9, and user tokens on v10
+/// resource endpoints (e.g. GET /channels/{id}/messages) get 403
+/// «Missing Permissions» even where the account has the rights —
+/// confirmed by live logs (v0.7.2: «везде 403»).
 pub const BASE_URL: &str = "https://discord.com/api/v10";
+pub const USER_BASE_URL: &str = "https://discord.com/api/v9";
 
 #[derive(Clone, Copy, Debug)]
 struct Bucket {
@@ -27,6 +34,8 @@ struct Bucket {
 
 pub struct RestClient {
     http: Client,
+    /// https://discord.com/api/v{9|10} — юзеры v9, боты v10.
+    base: String,
     /// bucket id → state
     buckets: Mutex<HashMap<String, Bucket>>,
     /// route key → bucket id (learned from response headers)
@@ -103,7 +112,9 @@ impl RestClient {
     /// Клиент для **пользовательской** сессии: Authorization без префикса
     /// `Bot`, плюс «паспорт браузера» — X-Super-Properties и браузерный UA.
     /// Без них юзер-токены получают 401 на большинстве write-эндпоинтов.
-    pub fn new(token: &str, build_number: u64) -> Result<Self> {
+    /// `api_version`: юзер-сессии — 9 (как официальный веб-клиент; v10
+    /// отдаёт юзер-токенам 403 на ресурсных эндпоинтах), боты — 10.
+    pub fn new(token: &str, build_number: u64, api_version: u8) -> Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
         let auth = reqwest::header::HeaderValue::from_str(token)
             .map_err(|_| anyhow::anyhow!("Токен содержит недопустимые символы"))?;
@@ -128,8 +139,14 @@ impl RestClient {
             .user_agent(crate::superprops::BROWSER_UA)
             .timeout(Duration::from_secs(25))
             .build()?;
+        let base = match api_version {
+            9 => USER_BASE_URL.to_string(),
+            10 => BASE_URL.to_string(),
+            other => format!("https://discord.com/api/v{other}"),
+        };
         Ok(Self {
             http,
+            base,
             buckets: Mutex::new(HashMap::new()),
             routes: Mutex::new(HashMap::new()),
         })
@@ -183,7 +200,7 @@ impl RestClient {
         content: Option<&str>,
         files: &[(String, String, Vec<u8>)],
     ) -> Result<T> {
-        let url = format!("{}{}", BASE_URL, path);
+        let url = format!("{}{}", self.base, path);
         let mut retries = 0u8;
         loop {
             // Form не Clone — собираем заново на каждый повтор (429-ретраи).
@@ -216,6 +233,9 @@ impl RestClient {
                     .ok()
                     .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
                     .unwrap_or_else(|| text.chars().take(200).collect());
+                // Каждая ошибка REST — в лог: статус + тело. Это главный
+                // диагностический след («везде 403» разбирается по нему).
+                tracing::warn!("REST POST {path} → {}: {msg}", status.as_u16());
                 bail!("Discord API {} {}: {}", status.as_u16(), path, msg);
             }
             return Ok(serde_json::from_str(&text)?);
@@ -236,7 +256,7 @@ impl RestClient {
                 tokio::time::sleep(wait).await;
             }
 
-            let url = format!("{}{}", BASE_URL, path);
+            let url = format!("{}{}", self.base, path);
             let mut req = self.http.request(method.clone(), &url);
             if !query.is_empty() {
                 req = req.query(query);
@@ -303,6 +323,9 @@ impl RestClient {
                     .ok()
                     .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
                     .unwrap_or_else(|| text.chars().take(200).collect());
+                // Каждая ошибка REST — в лог: статус + тело. Это главный
+                // диагностический след («везде 403» разбирается по нему).
+                tracing::warn!("REST {method} {path} → {}: {msg}", status.as_u16());
                 bail!("Discord API {} {}: {}", status.as_u16(), path, msg);
             }
             return Ok(serde_json::from_str(&text)?);
