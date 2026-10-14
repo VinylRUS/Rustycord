@@ -52,7 +52,7 @@ async-trait = "0.1"
 rsa = "0.9"
 sha2 = "0.10"
 hmac = "0.12"
-base64 = "0.22"
+base64 = "0.23"
 rand = "0.8"
 # QR-матрица для remote-auth (SVG собираем сами — без тяжёлых зависимостей).
 qrcode = { version = "0.14", default-features = false }
