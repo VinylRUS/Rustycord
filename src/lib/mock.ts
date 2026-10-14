@@ -662,15 +662,6 @@ export class MockBackend implements Backend {
     /* no-op */
   }
 
-  async submitCaptchaKey(): Promise<boolean> {
-    // Демо никогда не требует капчи, но паритет интерфейса обязателен.
-    return true;
-  }
-
-  async cancelCaptcha(): Promise<boolean> {
-    return true;
-  }
-
   /* ---------- generic REST (мини-эмуляция для настроек сервера) ---------- */
 
   async apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {

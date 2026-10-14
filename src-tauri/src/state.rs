@@ -12,8 +12,6 @@ use tokio_util::sync::CancellationToken;
 use crate::rest::models::{Channel, Member, Presence, Relationship, Role, User, VoiceState};
 use crate::voice::VoiceControls;
 
-pub use crate::auth::captcha::CaptchaBroker;
-
 /// Интенты для БОТ-сессии (юзер-аккаунты их не шлют — см. `is_bot`).
 ///   0..14 — GUILDS … DIRECT_MESSAGE_TYPING
 ///   15    — MESSAGE_CONTENT (privileged для ботов)
@@ -192,9 +190,6 @@ pub struct AppState {
     /// Гильдии, на которые уже отправлены op 37 + op 14 (юзер-сессии).
     /// Дедуп: повторное открытие сервера не спамит gateway подписками.
     pub subscribed_guilds: Mutex<HashSet<String>>,
-    /// Мост «запрос ↔ модалка капчи»: вход/QR-обмен, упёршиеся в hCaptcha,
-    /// ждут здесь решения от UI (commands::submit_captcha_key).
-    pub captcha: CaptchaBroker,
 }
 
 impl AppState {
@@ -218,7 +213,6 @@ impl AppState {
             voice_desired: Mutex::new(HashMap::new()),
             voice_notify: tokio::sync::Notify::new(),
             subscribed_guilds: Mutex::new(HashSet::new()),
-            captcha: CaptchaBroker::default(),
         }
     }
 

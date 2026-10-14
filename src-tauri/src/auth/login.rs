@@ -4,14 +4,16 @@
 //!  * `{token}` — готово;
 //!  * `{mfa: true, ticket}` — нужен код 2FA (TOTP), добивается вторым запросом
 //!    POST /auth/mfa/totp;
-//!  * 400 с полем `captcha_key` — Discord требует hCaptcha: показываем
-//!    пользователю модалку (auth/captcha.rs) и повторяем запрос с
+//!  * 400 с полем `captcha_key` — Discord требует hCaptcha: sitekey
+//!    привязан к домену, поэтому капча решается в отдельном окне
+//!    discord.com (auth/captcha_webview.rs), и запрос повторяется с
 //!    заголовками X-Captcha-Key/-Session-Id/-Rqtoken
 //!    (docs.discord.food/topics/captcha-handling).
 
 use serde_json::{json, Value};
 
-use crate::auth::captcha::{self, CaptchaBroker, SolvedCaptcha};
+use crate::auth::captcha::{self, SolvedCaptcha};
+use crate::auth::captcha_webview;
 use crate::superprops::{self, BROWSER_UA};
 
 fn auth_http() -> reqwest::Client {
@@ -38,12 +40,11 @@ enum AuthPost {
 }
 
 /// Общая обёртка «auth-POST с капча-ретраем»: login и mfa могут упереться в
-/// hCaptcha — решение прилетает из UI-модалки (broker) и запрос повторяется
-/// заголовками X-Captcha-* (до CAPTCHA_MAX_ATTEMPTS раз). `build_body`
-/// пересобирает тело на каждую попытку (значения не Copy).
+/// hCaptcha — решение прилетает из окна discord.com (captcha_webview) и
+/// запрос повторяется заголовками X-Captcha-* (до CAPTCHA_MAX_ATTEMPTS раз).
+/// `build_body` пересобирает тело на каждую попытку (значения не Copy).
 async fn post_with_captcha(
     app: &tauri::AppHandle,
-    broker: &CaptchaBroker,
     url: &str,
     context: &str,
     build_body: &(dyn Fn() -> Value + Send + Sync),
@@ -94,8 +95,8 @@ async fn post_with_captcha(
                     "auth: {url} требует капчу (попытка {}) — показываем пользователю",
                     attempt + 1
                 );
-                let solution = broker.present(app, context, &challenge).await?;
-                solved = Some(SolvedCaptcha::from_solution(solution, &challenge)?);
+                let key = captcha_webview::solve_captcha(app, context, &challenge).await?;
+                solved = Some(SolvedCaptcha::new(key, &challenge));
                 continue;
             }
         }
@@ -124,10 +125,9 @@ fn reject_message(raw: &str) -> String {
     truncate(raw)
 }
 
-/// POST /auth/login (email+пароль; капча решается модалкой при требовании).
+/// POST /auth/login (email+пароль; капча решается в окне discord.com).
 pub async fn login(
     app: &tauri::AppHandle,
-    broker: &CaptchaBroker,
     email: &str,
     password: &str,
 ) -> anyhow::Result<LoginOutcome> {
@@ -142,7 +142,6 @@ pub async fn login(
     };
     match post_with_captcha(
         app,
-        broker,
         "https://discord.com/api/v10/auth/login",
         "login",
         &body,
@@ -160,14 +159,12 @@ pub async fn login(
 /// Второй шаг 2FA: POST /auth/mfa/totp {code, ticket} → {token}.
 pub async fn submit_mfa(
     app: &tauri::AppHandle,
-    broker: &CaptchaBroker,
     code: &str,
     ticket: &str,
 ) -> anyhow::Result<LoginOutcome> {
     let body = || json!({ "code": code, "ticket": ticket });
     match post_with_captcha(
         app,
-        broker,
         "https://discord.com/api/v10/auth/mfa/totp",
         "mfa",
         &body,

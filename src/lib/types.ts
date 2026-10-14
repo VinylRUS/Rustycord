@@ -251,20 +251,6 @@ export interface QrEvent {
   message?: string;
 }
 
-/* ---------- CAPTCHA (v0.8.0) ---------- */
-
-/** Вызов hCaptcha от Discord (docs.discord.food/topics/captcha-handling):
- * rqdata ОБЯЗАН уйти в виджет — иначе решение не примут. */
-export interface CaptchaChallenge {
-  stage: 'challenge';
-  /** Откуда вызов: 'qr' | 'login' | 'mfa' — для заголовка модалки. */
-  context: string;
-  sitekey: string;
-  rqdata?: string;
-  rqtoken?: string;
-  sessionId?: string;
-  invisible?: boolean;
-}
 
 /* ---------- Guild management ---------- */
 
@@ -328,7 +314,6 @@ export type BackendEvent =
   | { type: 'ready'; user: User; session_id: string }
   | { type: 'dispatch'; t: string; d: unknown }
   | { type: 'qr'; stage: QrStage; svg?: string; fingerprint?: string; token?: string; username?: string; userId?: string; message?: string }
-  | { type: 'captcha'; stage: 'challenge'; context: string; sitekey: string; rqdata?: string; rqtoken?: string; sessionId?: string; invisible?: boolean }
   | {
       type: 'voice';
       kind: 'connected' | 'disconnected' | 'speaking';

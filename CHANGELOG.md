@@ -13,6 +13,38 @@
 - Сетка карточек форума (сейчас — список), теги постов.
 - Отображение чужих аватаров-статусов в поповере реакций.
 
+## [0.8.1] — 2026-10-15
+
+Хотфикс капчи по живым логам v0.8.0: «Капчу не видно. Пишет "Загружаем
+капчу…"». Диагноз оказался двойным.
+
+### Fixed
+- **Вечное «Загружаем капчу…»**: дедлок в модалке — контейнер виджета
+  рендерился только после снятия `loading`, а `loading` снимался только
+  после `hcaptcha.render(container)`, который не вызывался, потому что
+  контейнера ещё не было. Виджет не отрисовывался ни разу.
+- **Капча переехала в окно discord.com**: sitekey Discord привязан к
+  домену — hCaptcha Enterprise проверяет `host` страницы с виджетом.
+  В окне приложения (origin `tauri://localhost`) getcaptcha молча
+  отклонял вызов: виджет рисовался с красным «Incorrect domain!», клик
+  по чекбоксу давал `error-callback: network-error` (проверено на
+  тестовой странице). Теперь капча открывается в отдельном окне
+  WebView на `https://discord.com/login` — настоящий origin, куки
+  браузера и fingerprint: риск-скоринг видит подлинный веб-клиент.
+  В страницу инжектируется оверлей (карточка с виджетом hCaptcha,
+  rqdata Enterprise, тёмная тема) и обмен QR-тикета повторяется
+  fetch'ем **из той же страницы** (`/api/v9`, `credentials: include`,
+  заголовки `X-Captcha-*`) — ≤ 3 вызовов подряд, тикет не тратится
+  до 2xx. CSP discord.com это разрешает: `*.hcaptcha.com` уже есть
+  в его `script-src`/`frame-src`/`style-src`.
+- **email-вход и 2FA** с капчей идут через то же окно discord.com.
+
+### Removed
+- Модалка капчи в приложении и её проводка (команды
+  `submit_captcha_key`/`cancel_captcha`, событие `discord://captcha`,
+  `CaptchaBroker`) — на origin приложения виджет принципиально не
+  решается, мёртвый путь вычищен.
+
 ## [0.8.0] — 2026-10-15
 
 Фича-релиз по запросу «Клиент должен быть по функционалу максимально
@@ -537,7 +569,17 @@ IDENTIFY для пользовательских сессий), голос пе�
   (`.github/workflows/release.yml`).
 - Dependabot (npm + cargo + actions), шаблоны issue/PR, .editorconfig, CHANGELOG.
 
-[Unreleased]: https://github.com/VinylRUS/Rustycord/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/VinylRUS/Rustycord/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/VinylRUS/Rustycord/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/VinylRUS/Rustycord/compare/v0.7.4...v0.8.0
+[0.7.4]: https://github.com/VinylRUS/Rustycord/compare/v0.7.3...v0.7.4
+[0.7.3]: https://github.com/VinylRUS/Rustycord/compare/v0.7.2...v0.7.3
+[0.7.2]: https://github.com/VinylRUS/Rustycord/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/VinylRUS/Rustycord/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/VinylRUS/Rustycord/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/VinylRUS/Rustycord/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/VinylRUS/Rustycord/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/VinylRUS/Rustycord/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/VinylRUS/Rustycord/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/VinylRUS/Rustycord/releases/tag/v0.2.0
 [0.1.0]: https://github.com/VinylRUS/Rustycord/releases/tag/v0.1.0

@@ -32,7 +32,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
-use super::captcha::{self, CaptchaBroker};
+use super::captcha;
+use super::captcha_webview;
 use super::{nonce_echo, RemoteAuthKeys};
 use crate::superprops::BROWSER_UA;
 use crate::wsutil;
@@ -83,16 +84,17 @@ fn qr_svg(data: &str) -> Result<String> {
 ///
 /// Тикет **одноразовый**: пока не было 2xx, его можно переотправлять
 /// (в т.ч. с решённой капчей). Потому:
-///  * попытки идут по двум URL (v9 → v10), если отказ не связан с капчей;
-///  * капча (400 + captcha_key) решается через модалку в UI
-///    (broker.present) и запрос повторяется с заголовками
-///    X-Captcha-Key / -Session-Id / -Rqtoken — до CAPTCHA_MAX_ATTEMPTS.
+///  * быстрый путь — прямой POST по двум URL (v9 → v10): у «чистых»
+///    IP/контекстов капчи не будет вовсе;
+///  * капча (400 + captcha_key) — sitekey Discord привязан к домену, из
+///    окна приложения виджет не решается — уходим в captcha_webview:
+///    окно на discord.com решает капчу и повторяет обмен фетчем оттуда же
+///    (≤ CAPTCHA_MAX_ATTEMPTS), тикет при не-2xx не тратится.
 async fn exchange_ticket(
     keys: &RemoteAuthKeys,
     ticket: &str,
     build: u64,
     app: &tauri::AppHandle,
-    broker: &CaptchaBroker,
 ) -> Result<String> {
     if ticket.len() < 20 {
         bail!(
@@ -115,47 +117,32 @@ async fn exchange_ticket(
 
     let mut last: Option<String> = None;
     'urls: for url in TICKET_EXCHANGE_URLS {
-        // Последнее решённая капча этого URL: при повторном вызове её
-        // токен идёт заголовками X-Captcha-*.
-        let mut solved: Option<captcha::SolvedCaptcha> = None;
-        for attempt in 0..captcha::CAPTCHA_MAX_ATTEMPTS {
-            match exchange_once(&client, keys, url, ticket, build, solved.as_ref()).await {
-                ExchangeOutcome::Token(token) => return Ok(token),
-                ExchangeOutcome::Fatal(msg) => {
-                    bail!("{msg}");
-                }
-                ExchangeOutcome::Rejected(msg) => {
-                    tracing::warn!("remote-auth: {url} → {msg}; пробуем запасной эндпоинт");
-                    last = Some(msg);
-                    continue 'urls;
-                }
-                ExchangeOutcome::Captcha(challenge) => {
-                    if attempt + 1 >= captcha::CAPTCHA_MAX_ATTEMPTS {
-                        last = Some(format!(
-                            "капча: Discord отклонил решение {} раз подряд",
-                            captcha::CAPTCHA_MAX_ATTEMPTS
-                        ));
-                        continue 'urls;
-                    }
-                    tracing::warn!(
-                        "remote-auth: {url} требует капчу ({}попытка {}) — показываем пользователю",
-                        if challenge.invisible {
-                            "invisible, "
-                        } else {
-                            ""
-                        },
-                        attempt + 1
-                    );
-                    match broker.present(app, "qr", &challenge).await {
-                        Ok(solution) => {
-                            match captcha::SolvedCaptcha::from_solution(solution, &challenge) {
-                                Ok(s) => solved = Some(s),
-                                Err(e) => bail!("{e}"),
-                            }
-                        }
-                        Err(e) => bail!("{e:#}"),
-                    }
-                }
+        match exchange_once(&client, keys, url, ticket, build).await {
+            ExchangeOutcome::Token(token) => return Ok(token),
+            ExchangeOutcome::Fatal(msg) => {
+                bail!("{msg}");
+            }
+            ExchangeOutcome::Rejected(msg) => {
+                tracing::warn!("remote-auth: {url} → {msg}; пробуем запасной эндпоинт");
+                last = Some(msg);
+                continue 'urls;
+            }
+            ExchangeOutcome::Captcha(challenge) => {
+                tracing::warn!(
+                    "remote-auth: {url} требует капчу (invisible={}) — \
+                     открываем окно подтверждения discord.com",
+                    challenge.invisible
+                );
+                // Обмен уходит в окно discord.com: правильный origin для
+                // sitekey + браузерные куки/fingerprint для риск-скоринга.
+                // Ответ (encrypted_token) расшифровываем своим ключом.
+                let enc = captcha_webview::exchange_ticket(app, ticket, build, &challenge)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("капча-обмен: {e:#}"))?;
+                let bytes = keys
+                    .decrypt(&enc)
+                    .context("RSA-расшифровка токена после капчи")?;
+                return String::from_utf8(bytes).context("токен после капчи — не UTF-8");
             }
         }
     }
@@ -186,9 +173,8 @@ async fn exchange_once(
     url: &str,
     ticket: &str,
     build: u64,
-    solved: Option<&captcha::SolvedCaptcha>,
 ) -> ExchangeOutcome {
-    let mut req = client
+    let req = client
         .post(url)
         .header("Origin", "https://discord.com")
         .header("Referer", "https://discord.com/login")
@@ -202,10 +188,6 @@ async fn exchange_once(
         .header("sec-fetch-mode", "cors")
         .header("sec-fetch-site", "same-origin")
         .json(&json!({ "ticket": ticket }));
-    // Ретрай после капчи: решение + метаданные вызова — заголовками.
-    if let Some(s) = solved {
-        req = s.apply(req);
-    }
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => return ExchangeOutcome::Rejected(format!("сеть: {e}")),
@@ -261,13 +243,9 @@ async fn exchange_once(
 }
 
 /// Одна QR-сессия. Отменяется через `cancel` (пользователь закрыл экран логина).
-/// `broker` — капча-мост: обмен тикета может упереться в hCaptcha,
-/// решение приходит из UI-модалки (см. auth/captcha.rs).
-pub async fn run_remote_auth(
-    app: tauri::AppHandle,
-    broker: CaptchaBroker,
-    cancel: CancellationToken,
-) -> Result<()> {
+/// Капча (если риск-скоринг потребует) решается в отдельном окне discord.com
+/// (см. auth/captcha_webview.rs).
+pub async fn run_remote_auth(app: tauri::AppHandle, cancel: CancellationToken) -> Result<()> {
     let emit = |stage: &str, extra: Value| {
         // json! не поддерживает spread — мерджим объекты вручную.
         let mut payload = extra;
@@ -443,7 +421,7 @@ pub async fn run_remote_auth(
                             .ok()
                             .flatten()
                             .unwrap_or(crate::superprops::FALLBACK_BUILD_NUMBER);
-                        let token = exchange_ticket(&keys, ticket, build, &app, &broker).await?;
+                        let token = exchange_ticket(&keys, ticket, build, &app).await?;
                         let _ = writer.send(Message::Close(None)).await;
                         emit("done", json!({ "token": token }));
                         return Ok(());

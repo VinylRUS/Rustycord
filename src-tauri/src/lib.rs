@@ -102,8 +102,6 @@ pub fn run() {
             commands::auth_login_email,
             commands::auth_submit_mfa,
             commands::auth_start_qr,
-            commands::submit_captcha_key,
-            commands::cancel_captcha,
             commands::auth_cancel_qr,
             // универсальный REST-прокси + управление сервером
             commands::api_request,

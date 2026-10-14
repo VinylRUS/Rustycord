@@ -42,10 +42,6 @@ export interface Backend {
   submitMfa(code: string, ticket: string): Promise<LoginResult>;
   startQr(): Promise<void>;
   cancelQr(): Promise<void>;
-  /** Решенная в модалке капча → в ждущий auth-запрос (X-Captcha-Key). */
-  submitCaptchaKey(key: string): Promise<boolean>;
-  /** Капча закрыта без решения — запрос завершится ошибкой. */
-  cancelCaptcha(): Promise<boolean>;
 
   // REST-ish
   getMessages(channelId: string, opts?: GetMessageOptions): Promise<Message[]>;
@@ -186,14 +182,6 @@ class TauriBackend implements Backend {
     await this.invoke('gateway_send_raw', { frame });
   }
 
-  async submitCaptchaKey(key: string): Promise<boolean> {
-    return this.invoke<boolean>('submit_captcha_key', { key });
-  }
-
-  async cancelCaptcha(): Promise<boolean> {
-    return this.invoke<boolean>('cancel_captcha');
-  }
-
   async kickMember(guildId: string, userId: string): Promise<void> {
     await this.invoke('kick_member', { guildId, userId });
   }
@@ -291,7 +279,6 @@ class TauriBackend implements Backend {
         ['discord://voice', (d) => handler({ type: 'voice', ...(d as object) } as BackendEvent)],
         ['discord://warning', (d) => handler({ type: 'warning', ...(d as object) } as BackendEvent)],
         ['discord://qr', (d) => handler({ type: 'qr', ...(d as object) } as BackendEvent)],
-        ['discord://captcha', (d) => handler({ type: 'captcha', ...(d as object) } as BackendEvent)],
       ];
       for (const [event, fn] of subs) {
         const un = await listen(event, (e) => fn(e.payload));

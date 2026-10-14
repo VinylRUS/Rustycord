@@ -13,7 +13,6 @@
   import SettingsModal from './lib/components/SettingsModal.svelte';
   import GuildSettingsModal from './lib/components/GuildSettingsModal.svelte';
   import Toasts from './lib/components/Toasts.svelte';
-  import CaptchaModal from './lib/components/CaptchaModal.svelte';
 
   // Auto-login with a saved token (Tauri only).
   $effect(() => {
@@ -90,7 +89,6 @@
 <GuildSettingsModal />
 <Toasts />
 <!-- Капча — на любом экране (вход и авторизованные действия) -->
-<CaptchaModal />
 
 <style>
   .layout {

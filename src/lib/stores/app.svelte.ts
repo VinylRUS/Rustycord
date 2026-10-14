@@ -9,7 +9,6 @@ import { createBackend, type Backend } from '../ipc';
 import { plugins, onPluginToast } from '../plugins/manager';
 import type {
   BanEntry,
-  CaptchaChallenge,
   Channel,
   ConnStage,
   Guild,
@@ -93,9 +92,6 @@ export class AppStore {
   qrScannedBy = $state('');
   /** email-логин дошёл до 2FA — ждём код из приложения. */
   mfaTicket = $state<string | null>(null);
-  /** Активный вызов hCaptcha (модалка CaptchaModal): решение уходит
-   *  в ждущий Rust-запрос через submitCaptchaKey (X-Captcha-Key). */
-  captcha = $state<CaptchaChallenge | null>(null);
 
   /* ---------- модалка управления сервером ---------- */
   showGuildSettings = $state<string | null>(null);
@@ -426,26 +422,6 @@ export class AppStore {
     this.qrSvg = '';
   }
 
-  /** Пользователь решил капчу в модалке — токен уходит в ждущий запрос. */
-  async submitCaptcha(key: string) {
-    this.captcha = null;
-    try {
-      await this.backend?.submitCaptchaKey(key);
-    } catch (e) {
-      this.toast(`Капча: ${e instanceof Error ? e.message : String(e)}`, 'error');
-    }
-  }
-
-  /** Капча закрыта без решения — ждущий запрос завершится ошибкой. */
-  async cancelCaptcha() {
-    this.captcha = null;
-    try {
-      await this.backend?.cancelCaptcha();
-    } catch {
-      /* silent */
-    }
-  }
-
   async startDemo() {
     this.loginBusy = true;
     this.loginError = '';
@@ -525,7 +501,6 @@ export class AppStore {
     this.qrFingerprint = '';
     this.qrScannedBy = '';
     this.mfaTicket = null;
-    this.captcha = null;
   }
 
   /* ================= event stream ================= */
@@ -558,13 +533,6 @@ export class AppStore {
         break;
       case 'qr':
         this.handleQr(ev);
-        break;
-      case 'captcha':
-        // Discord требует hCaptcha (вход/QR-обмен): рисуем модалку,
-        // решение уйдёт в ждущий запрос через submitCaptcha().
-        if (ev.stage === 'challenge') {
-          this.captcha = { ...ev } as CaptchaChallenge;
-        }
         break;
       case 'voice':
         this.handleVoice(ev.kind, ev.data);

@@ -3,6 +3,7 @@
 //! самое, чем пользуется официальный веб-клиент.
 
 pub mod captcha;
+pub mod captcha_webview;
 pub mod login;
 pub mod remote;
 
