@@ -8,11 +8,11 @@
 //!     `captcha_rqtoken`, `should_serve_invisible`).
 //!  2. Клиент показывает капчу пользователю. rqdata, если есть, ОБЯЗАНА
 //!     уйти в виджет (иначе решение не примут). Sitekey Discord привязан
-//!     к домену — виджет живёт в отдельном окне на discord.com
+//!     к домену, а rqdata Enterprise — к контексту сессии: и виджет, и
+//!     POST, породивший вызов, живут в одном окне на discord.com
 //!     (auth/captcha_webview.rs).
-//!  3. Просьба повторяется с заголовками:
-//!     `X-Captcha-Key` — решение, `X-Captcha-Session-Id` и
-//!     `X-Captcha-Rqtoken` — если были в вызове.
+//!  3. Просьба повторяется заголовками: `X-Captcha-Key` — решение,
+//!     `X-Captcha-Session-Id` и `X-Captcha-Rqtoken` — если были в вызове.
 //!  4. Отказ (низкий trust score / повторное использование) — снова 400
 //!     с новым вызовом: показываем следующий (не более CAPTCHA_MAX_ATTEMPTS).
 //!
@@ -71,40 +71,5 @@ impl CaptchaChallenge {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
         })
-    }
-}
-
-/// Решённая капча: токен + метаданные вызова, которые Discord ждёт
-/// в заголовках ретрая (X-Captcha-Key / -Session-Id / -Rqtoken).
-#[derive(Debug, Clone)]
-pub struct SolvedCaptcha {
-    pub key: String,
-    pub session_id: Option<String>,
-    pub rqtoken: Option<String>,
-}
-
-impl SolvedCaptcha {
-    /// Собрать из токена hCaptcha (решён в окне captcha_webview) + вызова,
-    /// на который он отвечает.
-    pub fn new(key: String, challenge: &CaptchaChallenge) -> Self {
-        Self {
-            key,
-            session_id: challenge.session_id.clone(),
-            rqtoken: challenge.rqtoken.clone(),
-        }
-    }
-
-    /// Наложить заголовки ретрая на запрос (docs: решение — ТОЛЬКО
-    /// заголовками, JSON-поле captcha_key задепрекейчено).
-    pub fn apply(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let req = req.header("X-Captcha-Key", &self.key);
-        let req = match &self.session_id {
-            Some(sid) => req.header("X-Captcha-Session-Id", sid),
-            None => req,
-        };
-        match &self.rqtoken {
-            Some(rqt) => req.header("X-Captcha-Rqtoken", rqt),
-            None => req,
-        }
     }
 }

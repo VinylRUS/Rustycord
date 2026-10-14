@@ -4,17 +4,22 @@
 //!  * `{token}` — готово;
 //!  * `{mfa: true, ticket}` — нужен код 2FA (TOTP), добивается вторым запросом
 //!    POST /auth/mfa/totp;
-//!  * 400 с полем `captcha_key` — Discord требует hCaptcha: sitekey
-//!    привязан к домену, поэтому капча решается в отдельном окне
-//!    discord.com (auth/captcha_webview.rs), и запрос повторяется с
-//!    заголовками X-Captcha-Key/-Session-Id/-Rqtoken
+//!  * 400 с полем `captcha_key` — Discord требует hCaptcha: rqdata Enterprise
+//!    привязан к контексту сессии, поэтому весь запрос уезжает в окно
+//!    discord.com (auth/captcha_webview.rs) и повторяется там с нуля —
+//!    вызов капчи рождается и решается в одном браузерном контексте
 //!    (docs.discord.food/topics/captcha-handling).
 
 use serde_json::{json, Value};
 
-use crate::auth::captcha::{self, SolvedCaptcha};
+use crate::auth::captcha;
 use crate::auth::captcha_webview;
 use crate::superprops::{self, BROWSER_UA};
+
+const LOGIN_URL: &str = "https://discord.com/api/v10/auth/login";
+const LOGIN_PATH: &str = "/api/v10/auth/login";
+const MFA_URL: &str = "https://discord.com/api/v10/auth/mfa/totp";
+const MFA_PATH: &str = "/api/v10/auth/mfa/totp";
 
 fn auth_http() -> reqwest::Client {
     reqwest::Client::builder()
@@ -33,77 +38,78 @@ pub enum LoginOutcome {
 
 /// Исход auth-POST c капча-обвязкой.
 enum AuthPost {
-    /// 2xx — разбирай тело ({token} | {mfa, ticket}).
-    Ok(reqwest::Response),
+    /// 2xx — тело ответа (текст JSON).
+    Ok(String),
     /// Отказ без капчи: сырой JSON-текст для человекочитаемой ошибки.
     Rejected(String),
 }
 
-/// Общая обёртка «auth-POST с капча-ретраем»: login и mfa могут упереться в
-/// hCaptcha — решение прилетает из окна discord.com (captcha_webview) и
-/// запрос повторяется заголовками X-Captcha-* (до CAPTCHA_MAX_ATTEMPTS раз).
-/// `build_body` пересобирает тело на каждую попытку (значения не Copy).
+/// Общая обёртка «auth-POST с капча-обвязкой»: login и mfa могут упереться в
+/// hCaptcha. Быстрый путь — reqwest (чистые контексты капчи не видят вовсе);
+/// при 400+captcha весь запрос переезжает в окно discord.com
+/// (captcha_webview::browser_post): страница сама делает POST, показывает
+/// капчу с rqdata из СВОЕГО ответа и повторяет с заголовками X-Captcha-*
+/// (≤ CAPTCHA_MAX_ATTEMPTS решений). `build_body` пересобирает тело на
+/// каждую попытку (значения не Copy).
 async fn post_with_captcha(
     app: &tauri::AppHandle,
     url: &str,
+    path: &str,
     context: &str,
     build_body: &(dyn Fn() -> Value + Send + Sync),
 ) -> anyhow::Result<AuthPost> {
     let http = auth_http();
-    let mut solved: Option<SolvedCaptcha> = None;
-    for attempt in 0..captcha::CAPTCHA_MAX_ATTEMPTS {
-        let req = http
-            .post(url)
-            .header("Content-Type", "application/json")
-            .header(
-                "X-Super-Properties",
-                superprops::super_properties(superprops::FALLBACK_BUILD_NUMBER),
-            )
-            .header("X-Discord-Locale", "ru-RU")
-            .header("Accept-Language", "ru-RU,ru;q=0.9")
-            .header("Origin", "https://discord.com");
-        // Форма логина дополнительно помечает контекст (как веб-клиент).
-        let mut req = if context == "login" {
-            req.header(
-                "X-Context-Properties",
-                superprops::context_properties_login(),
-            )
-        } else {
-            req
-        }
-        .json(&build_body());
-        if let Some(s) = &solved {
-            req = s.apply(req);
-        }
-        let resp = req.send().await?;
-        let status = resp.status();
-        if status.is_success() {
-            return Ok(AuthPost::Ok(resp));
-        }
-        let raw = resp.text().await.unwrap_or_default();
-        // Капча — только на 400 с полем captcha_key: решаем и повторяем.
-        if status.as_u16() == 400 {
-            let body: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
-            if let Some(challenge) = captcha::CaptchaChallenge::from_body(&body) {
-                if attempt + 1 >= captcha::CAPTCHA_MAX_ATTEMPTS {
-                    anyhow::bail!(
-                        "капча: Discord отклонил решение {} раз подряд — попробуй позже",
-                        captcha::CAPTCHA_MAX_ATTEMPTS
-                    );
-                }
-                tracing::warn!(
-                    "auth: {url} требует капчу (попытка {}) — показываем пользователю",
-                    attempt + 1
-                );
-                let key = captcha_webview::solve_captcha(app, context, &challenge).await?;
-                solved = Some(SolvedCaptcha::new(key, &challenge));
-                continue;
-            }
-        }
-        // Обычный отказ (ошибка формы / 429 / 5xx): тело — вызывающему.
-        return Ok(AuthPost::Rejected(raw));
+    let mut req = http
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header(
+            "X-Super-Properties",
+            superprops::super_properties(superprops::FALLBACK_BUILD_NUMBER),
+        )
+        .header("X-Discord-Locale", "ru-RU")
+        .header("Accept-Language", "ru-RU,ru;q=0.9")
+        .header("Origin", "https://discord.com");
+    // Форма логина дополнительно помечает контекст (как веб-клиент).
+    if context == "login" {
+        req = req.header(
+            "X-Context-Properties",
+            superprops::context_properties_login(),
+        );
     }
-    unreachable!("капча-цикл выходит через return/bail")
+    let resp = req.json(&build_body()).send().await?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(AuthPost::Ok(resp.text().await.unwrap_or_default()));
+    }
+    let raw = resp.text().await.unwrap_or_default();
+    // Капча — только на 400 с полем captcha_key:rqdata из reqwest-контекста
+    // браузерный виджет не примет («Access Denied») — переносим запрос.
+    if status.as_u16() == 400 {
+        let body: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        if captcha::CaptchaChallenge::from_body(&body).is_some() {
+            tracing::warn!("auth: {url} требует капчу — запрос уходит в окно discord.com");
+            let ctx_props = if context == "login" {
+                Some(superprops::context_properties_login())
+            } else {
+                None
+            };
+            let outcome = captcha_webview::browser_post(
+                app,
+                context,
+                &[path],
+                &build_body(),
+                ctx_props.as_deref(),
+                superprops::FALLBACK_BUILD_NUMBER,
+            )
+            .await?;
+            return match outcome {
+                captcha_webview::BrowserPost::Ok(text) => Ok(AuthPost::Ok(text)),
+                captcha_webview::BrowserPost::Rejected(raw) => Ok(AuthPost::Rejected(raw)),
+            };
+        }
+    }
+    // Обычный отказ (ошибка формы / 429 / 5xx): тело — вызывающему.
+    Ok(AuthPost::Rejected(raw))
 }
 
 /// Человекочитаемое сообщение из тела отказа: message → ошибки полей формы →
@@ -140,16 +146,9 @@ pub async fn login(
             "gift_code_sku_id": null
         })
     };
-    match post_with_captcha(
-        app,
-        "https://discord.com/api/v10/auth/login",
-        "login",
-        &body,
-    )
-    .await?
-    {
-        AuthPost::Ok(resp) => {
-            let outcome: Value = resp.json().await.unwrap_or(Value::Null);
+    match post_with_captcha(app, LOGIN_URL, LOGIN_PATH, "login", &body).await? {
+        AuthPost::Ok(text) => {
+            let outcome: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             outcome_from_response(outcome)
         }
         AuthPost::Rejected(raw) => anyhow::bail!("{}", reject_message(&raw)),
@@ -163,16 +162,9 @@ pub async fn submit_mfa(
     ticket: &str,
 ) -> anyhow::Result<LoginOutcome> {
     let body = || json!({ "code": code, "ticket": ticket });
-    match post_with_captcha(
-        app,
-        "https://discord.com/api/v10/auth/mfa/totp",
-        "mfa",
-        &body,
-    )
-    .await?
-    {
-        AuthPost::Ok(resp) => {
-            let outcome: Value = resp.json().await.unwrap_or(Value::Null);
+    match post_with_captcha(app, MFA_URL, MFA_PATH, "mfa", &body).await? {
+        AuthPost::Ok(text) => {
+            let outcome: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             outcome_from_response(outcome)
         }
         AuthPost::Rejected(raw) => anyhow::bail!("2FA: {}", reject_message(&raw)),

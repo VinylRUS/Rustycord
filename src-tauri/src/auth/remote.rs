@@ -23,7 +23,7 @@
 
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tauri::Emitter;
@@ -86,10 +86,11 @@ fn qr_svg(data: &str) -> Result<String> {
 /// (в т.ч. с решённой капчей). Потому:
 ///  * быстрый путь — прямой POST по двум URL (v9 → v10): у «чистых»
 ///    IP/контекстов капчи не будет вовсе;
-///  * капча (400 + captcha_key) — sitekey Discord привязан к домену, из
-///    окна приложения виджет не решается — уходим в captcha_webview:
-///    окно на discord.com решает капчу и повторяет обмен фетчем оттуда же
-///    (≤ CAPTCHA_MAX_ATTEMPTS), тикет при не-2xx не тратится.
+///  * капча (400 + captcha_key) — весь обмен уезжает в окно discord.com
+///    (captcha_webview::browser_post): rqdata Enterprise привязан к
+///    контексту, поэтому POST, породивший вызов, и виджет обязаны жить
+///    в одном браузерном окне (≤ CAPTCHA_MAX_ATTEMPTS решений), тикет
+///    при не-2xx не тратится.
 async fn exchange_ticket(
     keys: &RemoteAuthKeys,
     ticket: &str,
@@ -127,20 +128,47 @@ async fn exchange_ticket(
                 last = Some(msg);
                 continue 'urls;
             }
-            ExchangeOutcome::Captcha(challenge) => {
+            ExchangeOutcome::Captcha => {
                 tracing::warn!(
-                    "remote-auth: {url} требует капчу (invisible={}) — \
-                     открываем окно подтверждения discord.com",
-                    challenge.invisible
+                    "remote-auth: {url} требует капчу — обмен уходит в окно \
+                     discord.com (rqdata рождается и решается в одном \
+                     браузерном контексте)"
                 );
-                // Обмен уходит в окно discord.com: правильный origin для
-                // sitekey + браузерные куки/fingerprint для риск-скоринга.
-                // Ответ (encrypted_token) расшифровываем своим ключом.
-                let enc = captcha_webview::exchange_ticket(app, ticket, build, &challenge)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("капча-обмен: {e:#}"))?;
+                // Полный цикл «POST → капча → ретрай» внутри окна на
+                // discord.com: браузерный контекст, правильный origin для
+                // sitekey и консистентный rqdata. Ответ расшифровываем
+                // своим ключом: только у нас приватная половина RSA.
+                let outcome = captcha_webview::browser_post(
+                    app,
+                    "qr",
+                    &[
+                        "/api/v9/users/@me/remote-auth/login",
+                        "/api/v10/users/@me/remote-auth/login",
+                    ],
+                    &json!({ "ticket": ticket }),
+                    None,
+                    build,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("капча-обмен: {e:#}"))?;
+                let raw = match outcome {
+                    captcha_webview::BrowserPost::Ok(text) => text,
+                    captcha_webview::BrowserPost::Rejected(raw) => {
+                        let snippet: String = raw.chars().take(300).collect();
+                        bail!("обмен после капчи отклонён: {snippet}");
+                    }
+                };
+                let body: Value = serde_json::from_str(&raw).with_context(|| {
+                    format!(
+                        "2xx-ответ не JSON: {}",
+                        raw.chars().take(200).collect::<String>()
+                    )
+                })?;
+                let enc = body["encrypted_token"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("в 2xx-ответе нет encrypted_token"))?;
                 let bytes = keys
-                    .decrypt(&enc)
+                    .decrypt(enc)
                     .context("RSA-расшифровка токена после капчи")?;
                 return String::from_utf8(bytes).context("токен после капчи — не UTF-8");
             }
@@ -156,8 +184,9 @@ async fn exchange_ticket(
 enum ExchangeOutcome {
     /// Токен получен и расшифрован.
     Token(String),
-    /// Сервер требует капчу — тикет не потрачен, можно повторить с решением.
-    Captcha(captcha::CaptchaChallenge),
+    /// Сервер требует капчу — тикет не потрачен: весь обмен уезжает в окно
+    /// discord.com, которое само повторит POST и решит капчу.
+    Captcha,
     /// Другой отказ — тикет не потрачен, можно пробовать другой URL.
     Rejected(String),
     /// Был 2xx, но токен из ответа не извлечён — тикет уже сгорел.
@@ -200,8 +229,8 @@ async fn exchange_once(
         // Сначала — капча (400 + captcha_key): тикет не потрачен, решаем
         // через UI и повторяем (docs.discord.food/topics/captcha-handling).
         if let Ok(body) = serde_json::from_str::<Value>(&raw) {
-            if let Some(challenge) = captcha::CaptchaChallenge::from_body(&body) {
-                return ExchangeOutcome::Captcha(challenge);
+            if captcha::CaptchaChallenge::from_body(&body).is_some() {
+                return ExchangeOutcome::Captcha;
             }
         }
         let snippet: String = raw.chars().take(300).collect();

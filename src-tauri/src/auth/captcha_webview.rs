@@ -1,64 +1,152 @@
-//! Капча hCaptcha в отдельном окне на discord.com.
+//! Капча hCaptcha и капча-обмены — в отдельном окне на discord.com.
 //!
-//! Почему не в окне приложения: sitekey Discord (`a9b5fb07-…`) привязан
-//! к домену — hCaptcha Enterprise проверяет `host` страницы, где стоит
-//! виджет. В Tauri-окне origin `tauri://localhost`, и getcaptcha молча
-//! отклоняет вызов (виджет рисуется с красным «Incorrect domain!»,
-//! клик даёт error-callback `network-error`). Проверено экспериментально
-//! на тестовой странице.
+//! Двойная причина (живые логи v0.8.0/v0.8.1):
+//!  1. Sitekey Discord привязан к домену: на origin приложения
+//!     (tauri://localhost) виджет рисуется с красным «Incorrect domain!»,
+//!     клик даёт error-callback `network-error` — проверено тест-стендом.
+//!  2. Enterprise-rqdata привязан к контексту сессии: rqdata из 400-ответа
+//!     на reqwest-запрос (свой TLS/UA/куки) браузерный виджет отклоняет
+//!     страницей «Access Denied» (rd0ah) — виджет мелькает и гаснет.
+//!     Поэтому не только виджет, но и сам POST, породивший вызов капчи,
+//!     обязан уйти из того же браузерного контекста: rqdata рождается
+//!     и решается в одном окне.
 //!
-//! Решение — окно-WebView на https://discord.com/login (настоящий origin
-//! discord.com + куки браузера + реальный fingerprint: риск-скоринг видит
-//! подлинный веб-клиент, а не reqwest). В страницу инжектируется скрипт
-//! (initialization_script, работает на любой странице discord.com):
-//!  * `__rcAuth.challenge(cfg)` — полноэкранный оверлей с виджетом hCaptcha
-//!    (sitekey + rqdata из вызова Discord);
-//!  * `__rcAuth.exchange(cfg)` — fetch POST /api/v9/users/@me/remote-auth/login
-//!    с заголовками X-Captcha-Key/-Session-Id/-Rqtoken — тот самый обмен
-//!    QR-тикета, но из браузерного контекста.
+//! Архитектура: скрытое окно-WebView на https://discord.com/login; в
+//! страницу до её скриптов инжектируется INIT_SCRIPT (исполняется в каждом
+//! документе окна — фильтруется по discord.com):
+//!  * `__rcAuth.request(cfg)` — POST на эндпоинты Discord (список с
+//!    фолбеком по 404: v9 → v10) с X-Super-Properties, собранным из
+//!    настоящего navigator, X-Context-Properties и X-Captcha-* на ретрае;
+//!  * `__rcAuth.challenge(cfg)` — карточка с виджетом hCaptcha (sitekey +
+//!    rqdata из вызова, порождённого ЭТИМ ЖЕ окном);
+//!  * пока страница грузится и POST летит — «вуаль» поверх чужого логина.
 //!
-//! Обратная связь — через перехват навигации: инжектированный JS делает
-//! `location.href = '/__rustycord_cb?s=<kind>&d=<data>'`, а on_navigation
-//! блокирует переход и отдаёт данные в Rust-канал. CSP discord.com это
-//! позволяет: js.hcaptcha.com/newassets.hcaptcha.com разрешены в
-//! script-src/frame-src/style-src (страница логина сама показывает капчу).
+//! Окно скрыто, пока Discord не попросил капчу: если браузерный контекст
+//! чист и 2xx приходит сразу, пользователь вообще не видит окна.
+//!
+//! Обратная связь — перехват навигации: инжектированный JS делает
+//! `location.href = '/__rustycord_cb?s=<kind>&d=<data>'`, on_navigation
+//! блокирует переход и отдаёт данные в Rust-канал. Виды событий:
+//! ready | http | captcha | hcaptcha-err | err | cancel | closed.
+//! CSP discord.com это позволяет: *.hcaptcha.com разрешён в
+//! script-src/frame-src/style-src/connect-src (страница логина сама
+//! показывает капчу).
 
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::sync::mpsc;
 
 use super::captcha::{CaptchaChallenge, CAPTCHA_MAX_ATTEMPTS};
-use crate::superprops;
 
 /// Метка окна авторизации (одно на приложение).
 const LABEL: &str = "rustycord-auth";
-/// Стартовая страница: origin discord.com обязателен для капчи, а куки,
-/// которые она посеет, улучшают риск-скоринг последующих запросов.
+/// Стартовая страница: origin discord.com обязателен для sitekey капчи, а
+/// куки/fingerprint настоящего браузера улучшают риск-скоринг.
 const START_URL: &str = "https://discord.com/login";
-/// Общий бюджет на весь визит окна: загрузка страницы + решение капчи.
-/// Первый `ready` внутри этого окна обязан прийти за десятки секунд,
-/// отдельного таймаута загрузки не нужно.
+/// Общий бюджет на весь визит окна: загрузка страницы + POST + решение
+/// капчи. Первый `ready` внутри этого окна обязан прийти за десятки секунд.
 const FLOW_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Инжектируется в окно авторизации до скриптов страницы (на каждый заход).
 const INIT_SCRIPT: &str = r#"
 (function () {
   'use strict';
+  // Скрипт исполняется в КАЖДОМ документе окна (до навигации это
+  // about:blank, дальше — iframe hCaptcha): рабочий контекст — только
+  // главное окно на discord.com.
+  if (window.top !== window) return;
+  var host = location.hostname;
+  if (host !== 'discord.com' && host.slice(-13) !== '.discord.com') return;
   if (window.__rcAuthInstalled) return;
   window.__rcAuthInstalled = true;
   function cb(kind, data) {
     location.href = '/__rustycord_cb?s=' + encodeURIComponent(kind) + '&d=' + encodeURIComponent(data);
   }
   function ping() { cb('ready', '1'); }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ping);
-  else ping();
+  function onReady() {
+    veil('Подключаемся к Discord…');
+    ping();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', onReady);
+  else onReady();
+
+  // Вуаль поверх чужой страницы логина: окно открывается скрытым и его
+  // содержимое до капчи/закрытия не должно выглядеть интерактивным.
+  function veil(text) {
+    var v = document.getElementById('__rc_veil');
+    if (!v) {
+      v = document.createElement('div');
+      v.id = '__rc_veil';
+      v.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:#1e1f22;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;font-family:"gg sans","Segoe UI",system-ui,sans-serif';
+      var spin = document.createElement('div');
+      spin.style.cssText = 'width:30px;height:30px;border:3px solid #5865f2;border-top-color:transparent;border-radius:50%;animation:__rc_spin .8s linear infinite';
+      var logo = document.createElement('div');
+      logo.textContent = 'RUSTYCORD';
+      logo.style.cssText = 'font-size:12px;font-weight:700;letter-spacing:.14em;color:#f2f3f5';
+      var label = document.createElement('div');
+      label.id = '__rc_veil_text';
+      label.style.cssText = 'font-size:14px;color:#b5bac1';
+      v.appendChild(spin); v.appendChild(logo); v.appendChild(label);
+      (document.body || document.documentElement).appendChild(v);
+      var st = document.createElement('style');
+      st.textContent = '@keyframes __rc_spin{to{transform:rotate(360deg)}}';
+      (document.head || document.documentElement).appendChild(st);
+    }
+    var t = document.getElementById('__rc_veil_text');
+    if (t && text) t.textContent = text;
+    return v;
+  }
+
+  // X-Super-Properties из НАСТОЯЩЕГО navigator: браузерный контекст окна
+  // консистентен сам с собой (UA страницы = UA запроса = UA в XSP).
+  function xsp(build) {
+    var ua = navigator.userAgent || '';
+    var os = 'Unknown', osv = '';
+    var mnt = ua.match(/Windows NT ([0-9.]+)/);
+    if (mnt) { os = 'Windows'; osv = mnt[1] === '10.0' ? '10' : mnt[1]; }
+    else if (/Mac OS X/.test(ua)) { os = 'Mac OS X'; }
+    else if (/Android/.test(ua)) { os = 'Android'; }
+    else if (/(iPhone|iPad)/.test(ua)) { os = 'iOS'; }
+    else if (/Linux/.test(ua)) { os = 'Linux'; }
+    var browser = 'Chrome';
+    if (/Firefox\//.test(ua)) browser = 'Firefox';
+    else if (/Edg\//.test(ua)) browser = 'Edge';
+    else if (/Chrome\//.test(ua)) browser = 'Chrome';
+    else browser = 'Safari';
+    var bv = (ua.match(new RegExp(browser + '/([0-9.]+)')) || [])[1] || '';
+    var p = {
+      os: os, browser: browser, device: '',
+      system_locale: (navigator.language || 'en-US'),
+      browser_user_agent: ua, browser_version: bv, os_version: osv,
+      referrer: '', referring_domain: '', referrer_current: '', referring_domain_current: '',
+      release_channel: 'stable',
+      client_build_number: build || 0,
+      client_event_source: null, design_id: 0
+    };
+    try { return btoa(unescape(encodeURIComponent(JSON.stringify(p)))); } catch (e) { return ''; }
+  }
+
+  function headers(cfg) {
+    var h = {
+      'Content-Type': 'application/json',
+      'X-Discord-Locale': cfg.locale || 'ru-RU',
+      'X-Super-Properties': xsp(cfg.build)
+    };
+    if (cfg.contextProperties) h['X-Context-Properties'] = cfg.contextProperties;
+    if (cfg.captchaKey) h['X-Captcha-Key'] = cfg.captchaKey;
+    if (cfg.sessionId) h['X-Captcha-Session-Id'] = cfg.sessionId;
+    if (cfg.rqtoken) h['X-Captcha-Rqtoken'] = cfg.rqtoken;
+    return h;
+  }
 
   function renderCard(cfg) {
     var old = document.getElementById('__rc_overlay');
     if (old) old.remove();
+    var v = document.getElementById('__rc_veil');
+    if (v) v.remove();
     var overlay = document.createElement('div');
     overlay.id = '__rc_overlay';
     overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.93);display:flex;align-items:center;justify-content:center;font-family:"gg sans","Segoe UI",system-ui,sans-serif';
@@ -88,12 +176,21 @@ const INIT_SCRIPT: &str = r#"
     var opts = {
       sitekey: cfg.sitekey,
       theme: 'dark',
-      callback: function (token) { cb('captcha', token); },
+      callback: function (token) {
+        var s = document.getElementById('__rc_sub');
+        if (s) s.textContent = 'Проверяем решение…';
+        var w = document.getElementById('__rc_widget');
+        if (w) w.style.display = 'none';
+        cb('captcha', token);
+      },
       'error-callback': function (code) {
         var el = document.getElementById('__rc_err');
         if (el) el.textContent = 'Ошибка капчи (' + code + ') — нажми чекбокс ещё раз';
+        cb('hcaptcha-err', String(code));
       },
       'expired-callback': function () {
+        var el = document.getElementById('__rc_err');
+        if (el) el.textContent = 'Проверка истекла — решите ещё раз';
         try { window.hcaptcha.reset(); } catch (e) {}
       }
     };
@@ -127,29 +224,31 @@ const INIT_SCRIPT: &str = r#"
       s.src = 'https://js.hcaptcha.com/1/api.js?render=explicit&onload=__rcOnload';
       s.async = true;
       s.onerror = function () { cb('err', 'hcaptcha-api-load'); };
-      document.head.appendChild(s);
+      (document.head || document.documentElement).appendChild(s);
     },
-    exchange: function (cfg) {
-      var note = document.getElementById('__rc_err');
-      if (note) note.textContent = '';
-      var sub = document.getElementById('__rc_sub');
-      if (sub) sub.textContent = 'Проверяем решение…';
-      var h = {
-        'Content-Type': 'application/json',
-        'X-Discord-Locale': 'ru-RU',
-        'X-Super-Properties': cfg.xsp
-      };
-      if (cfg.captchaKey) h['X-Captcha-Key'] = cfg.captchaKey;
-      if (cfg.sessionId) h['X-Captcha-Session-Id'] = cfg.sessionId;
-      if (cfg.rqtoken) h['X-Captcha-Rqtoken'] = cfg.rqtoken;
-      fetch('/api/v9/users/@me/remote-auth/login', {
-        method: 'POST',
-        credentials: 'include',
-        headers: h,
-        body: JSON.stringify({ ticket: cfg.ticket })
-      })
-        .then(function (r) { return r.text().then(function (t) { return { status: r.status, body: t }; }); })
-        .then(function (r) { cb('exchange', JSON.stringify(r)); })
+    request: function (cfg) {
+      // Карточка капчи уже висит (ретрай решения) — обновляем её подпись;
+      // иначе показываем/обновляем вуаль.
+      var card = document.getElementById('__rc_overlay');
+      if (card) {
+        var sub = document.getElementById('__rc_sub');
+        if (sub && cfg.veil) sub.textContent = cfg.veil;
+      } else {
+        veil(cfg.veil || 'Проверяем…');
+      }
+      var i = 0;
+      function go() {
+        return fetch(cfg.urls[i], {
+          method: 'POST',
+          credentials: 'include',
+          headers: headers(cfg),
+          body: JSON.stringify(cfg.body)
+        }).then(function (r) {
+          if (r.status === 404 && i + 1 < cfg.urls.length) { i++; return go(); }
+          return r.text().then(function (t) { return { status: r.status, body: t }; });
+        });
+      }
+      go().then(function (r) { cb('http', JSON.stringify(r)); })
         .catch(function (e) { cb('err', 'fetch: ' + e); });
     }
   };
@@ -197,27 +296,39 @@ fn challenge_js(challenge: &CaptchaChallenge, context: &str) -> String {
     format!("window.__rcAuth && window.__rcAuth.challenge({cfg})")
 }
 
-/// JS-вызов обмена тикета (fetch из браузерного контекста discord.com).
-fn exchange_js(
-    ticket: &str,
-    xsp: &str,
-    captcha_key: &str,
+/// JS-вызов POST-запроса из браузерного контекста discord.com.
+/// `captcha_key`/`session_id`/`rqtoken` — заголовки ретрая после решения.
+fn request_js(
+    urls: &[&str],
+    body: &Value,
+    context_properties: Option<&str>,
+    build: u64,
+    captcha_key: Option<&str>,
     session_id: Option<&str>,
     rqtoken: Option<&str>,
 ) -> String {
     let cfg = json!({
-        "ticket": ticket,
-        "xsp": xsp,
+        "urls": urls,
+        "body": body,
+        "build": build,
+        "locale": "ru-RU",
+        "contextProperties": context_properties,
         "captchaKey": captcha_key,
         "sessionId": session_id,
         "rqtoken": rqtoken,
+        "veil": if captcha_key.is_some() {
+            "Проверяем решение…"
+        } else {
+            "Завершаем вход…"
+        },
     });
-    format!("window.__rcAuth && window.__rcAuth.exchange({cfg})")
+    format!("window.__rcAuth && window.__rcAuth.request({cfg})")
 }
 
-/// Открыть окно авторизации на discord.com/login. Возвращает окно и канал
-/// событий инжектированного скрипта (kind, data): ready | captcha | exchange
-/// | err | cancel | closed.
+/// Открыть окно авторизации на discord.com/login (скрытое — показываем,
+/// только когда потребуется капча). Возвращает окно и канал событий
+/// инжектированного скрипта (kind, data): ready | http | captcha |
+/// hcaptcha-err | err | cancel | closed.
 async fn open_auth_window(app: &AppHandle) -> Result<(WebviewWindow, NavReceiver)> {
     // Прошлое окно (незакрытый визит) не должно мешать новому.
     if let Some(stale) = app.get_webview_window(LABEL) {
@@ -239,12 +350,17 @@ async fn open_auth_window(app: &AppHandle) -> Result<(WebviewWindow, NavReceiver
         .min_inner_size(440.0, 460.0)
         .center()
         .resizable(true)
+        .visible(false)
+        .always_on_top(true)
         .initialization_script(INIT_SCRIPT)
         .on_navigation(move |url| {
             // Единственный канал связи: блокируем «запрещённую» навигацию
             // и читаем её параметры. Всё остальное (в т.ч. первый заход и
             // редиректы discord.com) — разрешаем.
-            if url.domain() == Some("discord.com") && url.path() == "/__rustycord_cb" {
+            let host = url.domain().unwrap_or_default();
+            if (host == "discord.com" || host.ends_with(".discord.com"))
+                && url.path() == "/__rustycord_cb"
+            {
                 let mut kind = String::new();
                 let mut data = String::new();
                 for (k, v) in url.query_pairs() {
@@ -272,147 +388,160 @@ async fn open_auth_window(app: &AppHandle) -> Result<(WebviewWindow, NavReceiver
     Ok((window, rx))
 }
 
-/// Решить капчу для любого запроса (вход email/2FA): показать оверлей в окне
-/// discord.com и дождаться токена hCaptcha. Токен вызывающий повторно шлёт
-/// заголовками X-Captcha-* (см. auth::captcha::SolvedCaptcha).
-pub async fn solve_captcha(
-    app: &AppHandle,
-    context: &str,
-    challenge: &CaptchaChallenge,
-) -> Result<String> {
-    let (window, mut rx) = open_auth_window(app).await?;
-    let outcome = drive_solve(&window, &mut rx, context, challenge).await;
-    let _ = window.destroy();
-    outcome
+/// Показать окно (первая капча): карточка уже отрисована в скрытом
+/// документе — пользователь сразу видит её, а не мигающую вуаль.
+fn reveal(window: &WebviewWindow) {
+    let _ = window.show();
+    let _ = window.set_focus();
 }
 
-/// Драйвер «показать капчу → токен» без владения окном (для переиспользования
-/// в обмене тикета).
-async fn drive_solve(
-    window: &WebviewWindow,
-    rx: &mut NavReceiver,
-    context: &str,
-    challenge: &CaptchaChallenge,
-) -> Result<String> {
-    let flow = tokio::time::sleep(FLOW_TIMEOUT);
-    tokio::pin!(flow);
-    // Оверлей ставится после готовности страницы; при перезагрузке
-    // (ready приходит снова) — перевзводим, виджет честно рисуется заново.
-    let call = challenge_js(challenge, context);
-    loop {
-        tokio::select! {
-            _ = &mut flow => bail!("время на подтверждение вышло (5 минут)"),
-            nav = rx.recv() => match nav {
-                Some((kind, data)) => match kind.as_str() {
-                    "ready" => {
-                        window
-                            .eval(&call)
-                            .context("не удалось показать капчу (eval)")?;
-                    }
-                    "captcha" => return Ok(data),
-                    "err" => bail!("страница подтверждения: {data}"),
-                    "cancel" => bail!("отменено пользователем"),
-                    "closed" => bail!("окно подтверждения закрыто"),
-                    _ => {} // exchange здесь не бывает
-                },
-                None => bail!("окно подтверждения закрыто"),
-            },
-        }
-    }
+/// Исход «браузерного» запроса.
+pub enum BrowserPost {
+    /// 2xx — сырой текст тела ответа.
+    Ok(String),
+    /// Отказ без капчи (форма/429/5xx) — тело для человекочитаемой ошибки.
+    Rejected(String),
 }
 
-/// Обмен QR-тикета, когда Discord потребовал капчу: решить её в окне
-/// discord.com и тут же, из той же страницы, повторить POST обмена
-/// (origin + куки + fingerprint настоящего браузера). Ответ 2xx с новым
-/// вызовом капчи рендерит следующую попытку — не более CAPTCHA_MAX_ATTEMPTS.
+/// POST к API Discord из браузерного окна discord.com с капча-обвязкой.
 ///
-/// Возвращает `encrypted_token` (расшифровка — у вызывающего: только у него
-/// приватный RSA-ключ сессии).
-pub async fn exchange_ticket(
+/// Весь цикл живёт в одном контексте: страница сама делает первый POST,
+/// при 400+captcha показывает виджет с rqdata из ЭТОГО ЖЕ ответа (rqdata
+/// из чужого контекста — «Access Denied»), решение уходит заголовками
+/// X-Captcha-Key/-Session-Id/-Rqtoken в повторный POST
+/// (≤ CAPTCHA_MAX_ATTEMPTS решений подряд).
+///
+/// * `context` — qr | login | mfa: подпись карточки капчи;
+/// * `urls` — эндпоинты по приоритету: 404 → следующий (v9 → v10);
+/// * `body` — JSON-тело запроса;
+/// * `context_properties` — b64 X-Context-Properties, если нужен.
+pub async fn browser_post(
     app: &AppHandle,
-    ticket: &str,
+    context: &str,
+    urls: &[&str],
+    body: &Value,
+    context_properties: Option<&str>,
     build: u64,
-    first_challenge: &CaptchaChallenge,
-) -> Result<String> {
+) -> Result<BrowserPost> {
     let (window, mut rx) = open_auth_window(app).await?;
-    let outcome = drive_exchange(&window, &mut rx, ticket, build, first_challenge).await;
+    let outcome = drive(
+        &window,
+        &mut rx,
+        context,
+        urls,
+        body,
+        context_properties,
+        build,
+    )
+    .await;
     let _ = window.destroy();
     outcome
 }
 
-async fn drive_exchange(
+/// Драйвер цикла «POST → капча → ретрай» в окне discord.com.
+async fn drive(
     window: &WebviewWindow,
     rx: &mut NavReceiver,
-    ticket: &str,
+    context: &str,
+    urls: &[&str],
+    body: &Value,
+    context_properties: Option<&str>,
     build: u64,
-    first_challenge: &CaptchaChallenge,
-) -> Result<String> {
-    let xsp = superprops::super_properties(build);
+) -> Result<BrowserPost> {
     let flow = tokio::time::sleep(FLOW_TIMEOUT);
     tokio::pin!(flow);
 
-    let mut challenge = first_challenge.clone();
-    let mut attempts: u8 = 0;
+    let mut challenge: Option<CaptchaChallenge> = None;
+    // Решение отправлено, ответ ещё не пришёл: если снова 400+captcha —
+    // это отказ решения, такие попытки считаем.
+    let mut solution_pending = false;
+    let mut rejections: u8 = 0;
 
     loop {
         tokio::select! {
             _ = &mut flow => bail!("время на подтверждение вышло (5 минут)"),
             nav = rx.recv() => match nav {
                 Some((kind, data)) => match kind.as_str() {
+                    // Страница готова (в т.ч. перезагрузилась): начинаем
+                    // (или начинаем заново) с чистого POST — вызов капчи
+                    // рождается в этом же браузерном контексте.
                     "ready" => {
+                        solution_pending = false;
                         window
-                            .eval(challenge_js(&challenge, "qr"))
-                            .context("не удалось показать капчу (eval)")?;
+                            .eval(request_js(
+                                urls, body, context_properties, build, None, None, None,
+                            ))
+                            .context("не удалось отправить запрос (eval)")?;
                     }
-                    "captcha" => {
-                        // Пользователь прошёл капчу: ретрай-фетч уходит из
-                        // той же страницы — Discord видит подлинный контекст.
-                        let js = exchange_js(
-                            ticket,
-                            &xsp,
-                            &data,
-                            challenge.session_id.as_deref(),
-                            challenge.rqtoken.as_deref(),
-                        );
-                        window
-                            .eval(&js)
-                            .context("не удалось повторить обмен (eval)")?;
-                    }
-                    "exchange" => {
+                    "http" => {
                         let v: Value = serde_json::from_str(&data)
-                            .context("странный ответ страницы на обмен")?;
+                            .context("странный ответ страницы на запрос")?;
                         let status = v["status"].as_u64().unwrap_or(0);
-                        let body = v["body"].as_str().unwrap_or_default().to_string();
+                        let text = v["body"].as_str().unwrap_or_default().to_string();
                         if (200..300).contains(&status) {
-                            let parsed: Value = serde_json::from_str(&body)
-                                .with_context(|| format!("2xx-ответ не JSON: {}", &body[..body.len().min(200)]))?;
-                            let enc = parsed["encrypted_token"]
-                                .as_str()
-                                .ok_or_else(|| anyhow!("в 2xx-ответе нет encrypted_token"))?;
-                            return Ok(enc.to_string());
+                            return Ok(BrowserPost::Ok(text));
                         }
-                        // 400 + новый вызов капчи → следующая попытка.
+                        let parsed: Value =
+                            serde_json::from_str(&text).unwrap_or(Value::Null);
                         if status == 400 {
-                            if let Ok(parsed) = serde_json::from_str::<Value>(&body) {
-                                if let Some(next) = CaptchaChallenge::from_body(&parsed) {
-                                    attempts += 1;
-                                    if attempts >= CAPTCHA_MAX_ATTEMPTS {
-                                        bail!(
-                                            "капча: Discord отклонил решение \
-                                             {CAPTCHA_MAX_ATTEMPTS} раз подряд"
-                                        );
-                                    }
-                                    challenge = next;
-                                    window
-                                        .eval(challenge_js(&challenge, "qr"))
-                                        .context("не удалось показать следующую капчу")?;
-                                    continue;
+                            if solution_pending {
+                                rejections += 1;
+                            }
+                            solution_pending = false;
+                            if let Some(next) = CaptchaChallenge::from_body(&parsed) {
+                                if rejections >= CAPTCHA_MAX_ATTEMPTS {
+                                    bail!(
+                                        "капча: Discord отклонил решение \
+                                         {CAPTCHA_MAX_ATTEMPTS} раз подряд"
+                                    );
                                 }
+                                tracing::warn!(
+                                    "captcha-webview: HTTP 400, показываем капчу \
+                                     (отказов {rejections}, invisible={})",
+                                    next.invisible
+                                );
+                                let js = challenge_js(&next, context);
+                                challenge = Some(next);
+                                window
+                                    .eval(&js)
+                                    .context("не удалось показать капчу (eval)")?;
+                                reveal(window);
+                                continue;
                             }
                         }
-                        let snippet: String =
-                            body.chars().take(300).collect();
-                        bail!("обмен после капчи: HTTP {status} — {snippet}");
+                        let snippet: String = text.chars().take(300).collect();
+                        tracing::warn!("captcha-webview: HTTP {status} — {snippet}");
+                        return Ok(BrowserPost::Rejected(text));
+                    }
+                    "captcha" => {
+                        // Решение получено: повторяем POST с X-Captcha-*.
+                        let Some(ch) = challenge.as_ref() else {
+                            // Решение без живого вызова (перезагрузка?) —
+                            // начинаем цикл заново чистым POST.
+                            solution_pending = false;
+                            window
+                                .eval(request_js(
+                                    urls, body, context_properties, build, None, None, None,
+                                ))
+                                .context("не удалось повторить запрос (eval)")?;
+                            continue;
+                        };
+                        solution_pending = true;
+                        window
+                            .eval(request_js(
+                                urls,
+                                body,
+                                context_properties,
+                                build,
+                                Some(&data),
+                                ch.session_id.as_deref(),
+                                ch.rqtoken.as_deref(),
+                            ))
+                            .context("не удалось повторить запрос (eval)")?;
+                    }
+                    // Диагностика: код ошибки виджета в лог, поток жив.
+                    "hcaptcha-err" => {
+                        tracing::warn!("captcha-webview: ошибка виджета hCaptcha — {data}");
                     }
                     "err" => bail!("страница подтверждения: {data}"),
                     "cancel" => bail!("отменено пользователем"),
