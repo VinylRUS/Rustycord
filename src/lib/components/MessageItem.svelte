@@ -5,6 +5,7 @@
   import { formatStamp, formatTime, snowflakeDate } from '../time';
   import { emojiUrl } from '../avatars';
   import Avatar from './Avatar.svelte';
+  import EmojiPicker from './EmojiPicker.svelte';
   import Icon from './Icon.svelte';
   import { menu, type MenuItem } from '../stores/menu.svelte';
 
@@ -15,6 +16,8 @@
     message: Message;
     grouped: boolean; // true → compact continuation (no avatar/header)
   } = $props();
+
+  let showPicker = $state(false);
 
   const guildId = $derived(app.activeGuild?.id ?? '');
   const own = $derived(message.author.id === app.user?.id);
@@ -47,12 +50,34 @@
     menu.show(e.clientX, e.clientY, items);
   }
 
-  function react(emoji: string) {
+  function react(emoji: { id: string | null; name: string | null; animated?: boolean }) {
     void app.react(message, emoji);
   }
 
   function reactKey(r: { emoji: { id: string | null; name: string | null } }): string {
     return `${r.emoji.id ?? 'u'}:${r.emoji.name ?? ''}`;
+  }
+
+  /** Фолбэк, если CDN-картинка кастомного эмодзи недоступна: показываем :name:.
+   */
+  function emojiImgFallback(ev: Event, name: string | null) {
+    const el = ev.currentTarget as HTMLImageElement;
+    el.style.display = 'none';
+    const span = document.createElement('span');
+    span.textContent = name ? `:${name}:` : '❓';
+    el.parentElement?.appendChild(span);
+  }
+
+  let pickerStyle = $state('');
+  function openPicker(e: MouseEvent) {
+    // Пикер над сообщением, у правого края — как в оригинале.
+    const anchor = (e.currentTarget as HTMLElement).closest('.message') as HTMLElement | null;
+    if (anchor) {
+      const rect = anchor.getBoundingClientRect();
+      const top = rect.top - 410;
+      pickerStyle = `top: ${Math.max(12, top)}px; right: ${Math.max(12, window.innerWidth - rect.right)}px;`;
+    }
+    showPicker = true;
   }
 </script>
 
@@ -87,22 +112,35 @@
     {#if message.reactions && message.reactions.length}
       <div class="reactions">
         {#each message.reactions as r (reactKey(r))}
-          <button class="reaction" class:mine={r.me} onclick={() => react(r.emoji.name ?? '👍')} title={r.emoji.name ?? ''}>
+          <button
+            class="reaction"
+            class:mine={r.me}
+            onclick={() => react(r.emoji)}
+            title={`:${r.emoji.name}: — ${r.count}`}
+          >
             {#if emojiUrl(r.emoji)}
-              <img src={emojiUrl(r.emoji)} alt={r.emoji.name ?? ''} width={16} height={16} />
+              <img
+                src={emojiUrl(r.emoji) ?? ''}
+                alt={r.emoji.name ?? ''}
+                width={16}
+                height={16}
+                onerror={(ev) => emojiImgFallback(ev, r.emoji.name)}
+              />
             {:else}
               <span>{r.emoji.name}</span>
             {/if}
             <span class="count">{r.count}</span>
           </button>
         {/each}
-        <button class="reaction add" onclick={() => react('👍')} title="Добавить реакцию">+</button>
+        <button class="reaction add" onclick={openPicker} title="Добавить реакцию">+</button>
       </div>
+    {:else}
+      <div class="reactions-placeholder"></div>
     {/if}
   </div>
 
   <div class="actions">
-    <button class="act" title="Реакция 👍" onclick={() => react('👍')}>👍</button>
+    <button class="act" title="Добавить реакцию" onclick={openPicker}>😀</button>
     {#if own}
       <button class="act" title="Изменить" onclick={() => app.startEdit(message)}>
         <Icon name="pencil" size={16} color="#b5bac1" />
@@ -117,6 +155,12 @@
       <Icon name="dots" size={16} color="#b5bac1" />
     </button>
   </div>
+
+  {#if showPicker}
+    <div class="picker-anchor" style={pickerStyle}>
+      <EmojiPicker onpick={react} onclose={() => (showPicker = false)} />
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -226,6 +270,13 @@
     flex-wrap: wrap;
     gap: 4px;
     margin-top: 4px;
+  }
+  .reactions-placeholder {
+    height: 0;
+  }
+  .picker-anchor {
+    position: fixed;
+    z-index: 91;
   }
   .reaction {
     display: flex;

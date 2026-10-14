@@ -9,7 +9,7 @@
 [![Release](https://img.shields.io/github/v/release/VinylRUS/Rustycord?label=релиз&logo=github)](https://github.com/VinylRUS/Rustycord/releases)
 [![Лицензия](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-`Gateway WebSocket` · `REST v10` · `Snowflake ID` · `Rate Limits` · `Voice UDP + xsalsa20poly1305`
+`Gateway WebSocket` · `REST v10` · `Snowflake ID` · `Rate Limits` · `Voice UDP + songbird (aead_aes256_gcm)`
 
 [Установка](#-быстрый-старт) · [Автосборка CI/CD](#-автосборка-через-github-actions) · [Реверс-разбор](#-реверс-инжиниринг-discord) · [Скриншоты](#-скриншоты) · [Roadmap](#-roadmap)
 
@@ -190,54 +190,47 @@ IPC-контракт у нас один и тот же в обоих мирах 
 
 ### 6. Голосовой протокол — самое красивое
 
-Голос — единственная часть Discord, где WebSocket не главный. Это **трёхсторонний танец**: главный Gateway (сигналинг) → голосовой WebSocket (управление) → чистый UDP (аудио). Полная последовательность (реализована в [`voice/ws.rs`](src-tauri/src/voice/ws.rs)):
+Голос — единственная часть Discord, где WebSocket не главный. Это **трёхсторонний танец**: главный Gateway (сигналинг) → голосовой WebSocket (управление) → чистый UDP (аудио). С v0.5 протокольную часть ведёт **[songbird](https://github.com/serenity-rs/songbird) 0.6** — тот же движок, на котором работают музыкальные боты serenity (миллионы инстансов): рукопожатие, NAT, шифрование, jitter-буфер и кодек (координатор сессии — [`voice/coordinator.rs`](src-tauri/src/voice/coordinator.rs), микрофонный мост — [`voice/mic.rs`](src-tauri/src/voice/mic.rs)):
 
 ```mermaid
 sequenceDiagram
     participant C as RustyCord
     participant G as Главный Gateway
-    participant V as Voice WS (wss://media:443/?v=4)
+    participant S as songbird Driver
     participant U as Media UDP
 
     C->>G: op 4 VOICE_STATE_UPDATE { channel_id }
     G-->>C: VOICE_STATE_UPDATE (свой, с session_id)
     G-->>C: VOICE_SERVER_UPDATE { token, endpoint }
+    Note over C,S: координатор собирает пару событий → ConnectionInfo
 
-    C->>V: WebSocket connect
-    V-->>C: op 8 HELLO { heartbeat_interval }
-    C->>V: op 0 IDENTIFY { server_id, user_id, session_id, token }
-    V-->>C: op 2 READY { ip, port, ssrc, modes[] }
+    C->>S: driver.connect(ConnectionInfo)
+    S->>U: WebSocket + IDENTIFY + IP discovery (NAT)
+    S->>U: SELECT_PROTOCOL + SESSION_DESCRIPTION
+    S-->>C: CoreEvent::DriverConnect
 
-    C->>U: IP discovery (74 байта: тип 0x1 + ssrc)
-    U-->>C: наш внешний IP:port за NAT
-
-    C->>V: op 1 SELECT_PROTOCOL { address, port, mode: "xsalsa20_poly1305" }
-    V-->>C: op 4 SESSION_DESCRIPTION { secret_key[32] }
-
-    C->>V: op 5 SPEAKING { ssrc: "строка!" }  ← известный quirk протокола
     loop пока в канале
-        C->>V: op 3 HEARTBEAT (каждые ~5 c)
-        U-->>C: RTP-пакеты (шифрованные opus)
-        V-->>C: op 5 SPEAKING других участников (по ssrc)
-        V-->>C: op 12 CLIENT_CONNECTED { user_id, audio_ssrc }
-        V-->>C: op 13 CLIENT_DISCONNECTED { user_id }
+        S-->>C: CoreEvent::VoiceTick (PCM 48 кГц всех говорящих)
+        S-->>C: CoreEvent::SpeakingStateUpdate (ssrc↔user, индикация)
+        S-->>C: CoreEvent::ClientDisconnect (ушёл участник)
+        C->>S: driver.mute(true/false) — эхо op4 от сервера
     end
 ```
 
 Что здесь реверс-жемчужин:
 
-- **IP discovery** — домашний NAT-обход: клиент шлёт 74-байтный пакет `[0x1][len=70][ssrc][нули]`, а сервер возвращает его же снаружи — с реальным IP:port. STUN не нужен.
-- **Шифрование** — NaCl `crypto_secretbox` (XSalsa20 + Poly1305). Нонс — это **сам 12-байтный RTP-заголовок, дополненный нулями до 24 байт**: заголовок ходит открытым текстом и одновременно служит ключом шифрования тела. Раскладка на проводе: `[заголовок 12 Б][MAC 16 Б][opus]`. Реализация — [`voice/crypto.rs`](src-tauri/src/voice/crypto.rs), с юнит-тестом на roundtrip.
+- **IP discovery** — домашний NAT-обход: клиент шлёт 74-байтный пакет `[0x1][len=70][ssrc][нули]`, а сервер возвращает его же снаружи — с реальным IP:port. STUN не нужен (делает songbird).
+- **Шифрование — актуальные режимы `aead_aes256_gcm` / `xchacha20`**: устаревший `xsalsa20_poly1305` (нонс = сам RTP-заголовок) Discord отключает на новых шлюзах; songbird выбирает лучший из предложенных сервером режимов и умеет DAVE-согласование.
 - **ssrc то число, то строка** — op 2 присылает число, а op 5 ожидает строку. Классика живого протокола, о которой знают только те, кто его трогал руками.
-- **Кто говорит** — ssrc→user маппинг строится из op 12 `CLIENT_CONNECTED` (`audio_ssrc` + `user_id`), а индикация речи приходит в op 5. По ним мы рисуем зелёные кольца вокруг аватарок.
+- **Кто говорит** — songbird отдаёт `SpeakingStateUpdate` (ssrc + user_id + микрофонный бит) и `ClientDisconnect`; по ним мы рисуем зелёные кольца вокруг аватарок.
 
-В v0.2 реализован весь сигналинг **и полный аудиодуплекс**:
+Аудиодуплекс (наш код поверх движка):
 
-- **Приём**: расшифрованные opus-кадры декодируются (libopus), раскладываются по SSRC-дорожкам jitter-буфера (переупорядочивание, дедупликация, тишина вместо коротких потерь, ресинк вместо длинных), микшируются и выводятся через cpal — WASAPI / CoreAudio / ALSA. Устройства с частотой ≠ 48 кГц подключаются через линейный ресемплер.
-- **Передача**: микрофон → моно 48 кГц → opus (Voip, 20 мс) → RTP с seq/timestamp/marker → xsalsa20poly1305 → UDP. Энергетический VAD с гистерезисом ~300 мс шлёт op 5 SPEAKING только на переходах — как voice activity официального клиента.
-- **Мьют/деафиен** едут тем же op 4; ядро слушает эхо VOICE_STATE_UPDATE и останавливает/возобновляет звук на лету, без переподключения сессии.
+- **Приём**: `CoreEvent::VoiceTick` → декодированный songbird'ом PCM → собственный микшер с SSRC-дорожками ([`voice/jitter.rs`](src-tauri/src/voice/jitter.rs): прайминг 40 мс, тишина вместо коротких потерь, ресинк вместо длинных) → cpal-вывод — WASAPI / CoreAudio / ALSA. Устройства с частотой ≠ 48 кГц подключаются через линейный ресемплер.
+- **Передача**: cpal-колбек → `MicTap` (стерео-дублирование, байт-буфер с waker'ом) → `AsyncAdapterStream` + `RawAdapter` (живой поток без длины) → songbird Input → opus → RTP → UDP. op 5 SPEAKING и heartbeat берёт на себя движок.
+- **Мьют/деафиен** едут тем же op 4; ядро слушает эхо VOICE_STATE_UPDATE и переключает `driver.mute` на лету, без переподключения сессии.
 
-Сборка `--no-default-features` даёт headless-вариант: сигналинг и криптография работают, аудиоустройства не открываются.
+Сборка `--no-default-features` даёт headless-вариант: сигналинг и голосовой движок работают, аудиоустройства не открываются.
 
 ---
 
@@ -247,7 +240,7 @@ sequenceDiagram
 
 | Слой | Технологии |
 |---|---|
-| Нативное ядро | Rust 1.77+, tokio, tokio-tungstenite (rustls), reqwest, xsalsa20poly1305, audiopus (libopus), cpal |
+| Нативное ядро | Rust 1.77+, tokio, tokio-tungstenite (rustls), reqwest, songbird 0.6 (войс: шифрование aead_aes256_gcm, jitter, opus), cpal |
 | Оболочка | Tauri 2 (системный WebView, capabilities-модель безопасности) |
 | UI | Svelte 5 (runes: `$state` / `$derived` / `$effect`), TypeScript, Vite 6 |
 | Стили | Ручной CSS с дизайн-токенами Discord (`#313338`, `#5865F2`, …) |
@@ -295,13 +288,13 @@ rustycord/
 │   └── app.css                   #   дизайн-токены Discord
 ├── src-tauri/
 │   ├── src/
-│   │   ├── gateway/              #   опкоды, heartbeat, RESUME, chunking
+│   │   ├── gateway/              #   опкоды, heartbeat, RESUME, chunking, op 37/14
 │   │   ├── rest/                 #   модели v10 + rate-limit-клиент
-│   │   ├── voice/                #   сигналинг v4, UDP/RTP, crypto, codec (opus),
-│   │   │                         #   jitter-микшер, sender (микрофон), devices (cpal)
+│   │   ├── voice/                #   songbird-движок: coordinator (сессии),
+│   │   │                         #   mic (мост cpal→Input), jitter-микшер, devices (cpal)
 │   │   ├── snowflake.rs          #   декодер ID
 │   │   ├── state.rs              #   кэш + каналы задач
-│   │   └── commands.rs           #   16 Tauri-команд
+│   │   └── commands.rs           #   17 Tauri-команд
 │   ├── icons/                    #   PNG + ICO + ICNS (все платформы)
 │   └── tauri.conf.json
 ├── .github/workflows/            #   ci · dev-build · release
@@ -328,6 +321,10 @@ rustycord/
 | Друзья (v0.4.0) | ЛС первым (v0.4.0) |
 |---|---|
 | ![Друзья](docs/screenshots/16-friends-page.png) | ![Первое сообщение](docs/screenshots/17-dm-first-message.png) |
+
+| Эмодзи-пикер (v0.5.0) | Поиск эмодзи (v0.5.0) |
+|---|---|
+| ![Пикер](docs/screenshots/20-emoji-picker.png) | ![Поиск](docs/screenshots/23-emoji-search.png) |
 
 Все скриншоты сняты в демо-режиме (`npm run dev` → «Открыть демо-режим») — тот же UI, что и в бою.
 
@@ -466,10 +463,11 @@ Tauri 2 умеет подписанные дельта-обновления, н�
 | **Авторизация как в оригинале: QR (remote-auth v2: эхо-nonce + ticket → токен)** | ✅ v0.3.1 |
 | **Авторизация email+пароль + 2FA (TOTP)** | ✅ v0.3.0 |
 | **Пользовательская сессия: X-Super-Properties, браузерный UA, автосборка build number** | ✅ v0.3.0 |
+| **Юзер-IDENTIFY как у официального клиента: capabilities вместо intents, op 37/op 14 подписки — список серверов юзера приезжает полностью** | ✅ v0.5.0 |
 | Подключение к реальному Gateway (IDENTIFY, heartbeat, RESUME) | ✅ |
 | Серверы, категории, текстовые каналы | ✅ |
 | Real-time сообщения: приём/отправка/редактирование/удаление | ✅ |
-| Реакции (unicode + кастомные эмодзи с CDN) | ✅ |
+| **Реакции: тоггл (поставить/снять), эмодзи-пикер с категориями и поиском, кастомные эмодзи сервера, часто используемые** | ✅ v0.5.0 |
 | Typing-индикаторы (TYPING_START + REST trigger) | ✅ |
 | Discord-markdown: **жирный**, `код`, блоки, спойлеры, упоминания | ✅ |
 | Статусы участников (online/idle/dnd/offline) + кастомные | ✅ |
@@ -481,9 +479,9 @@ Tauri 2 умеет подписанные дельта-обновления, н�
 | **Управление сервером: имя, каналы (CRUD), роли (цвет/права), участники (ник/роли/кик/бан), бан-лист, инвайты** | ✅ v0.3.0 |
 | **Плагины (Vencord-style): JS-файлы, события, REST-мост, CSS-инъекции** | ✅ v0.3.0 |
 | Голос: вход/выход, mute/deafen, участники, «кто говорит» | ✅ |
-| Голос: полный сигналинг v4 (WS + UDP discovery + xsalsa20poly1305) | ✅ |
+| **Голосовой движок songbird: сигналинг v4/v5, современное шифрование (aead_aes256_gcm / xchacha20), jitter-буфер, opus** | ✅ v0.5.0 |
 | **Аудиодвижок: приём opus → jitter-буфер → микшер → динамики** | ✅ v0.2.0 |
-| **Аудиодвижок: микрофон → opus → RTP → UDP + VAD** | ✅ v0.2.0 |
+| **Аудиодвижок: микрофон → opus → RTP → UDP (мьют через driver.mute)** | ✅ v0.2.0 |
 | Инспектор Snowflake (дата создания любого ID) | ✅ |
 | Консоль протокола: сырые JSON-кадры прямо в Gateway | ✅ |
 | Демо-режим без входа (симуляция Gateway + плагинов) | ✅ |

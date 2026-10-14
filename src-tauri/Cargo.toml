@@ -1,6 +1,6 @@
 [package]
 name = "rustycord"
-version = "0.4.0"
+version = "0.5.0"
 description = "RustyCord — an unofficial Discord client built with Tauri, reverse-engineered architecture, native performance"
 authors = ["RustyCord contributors"]
 edition = "2021"
@@ -24,8 +24,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 # `audio` — работа с системными аудиоустройствами (cpal: WASAPI/CoreAudio/ALSA).
-# Сборка с --no-default-features даёт «headless»-вариант: весь сигналинг,
-# криптография и jitter-буфер работают, но звук не выводится и не пишется —
+# Сборка с --no-default-features даёт «headless»-вариант: сигналинг и
+# голосовой движок songbird работают, но звук не выводится и не пишется —
 # удобно для серверов и проверки логики без устройств.
 default = ["audio"]
 audio = ["dep:cpal"]
@@ -42,10 +42,8 @@ tokio-util = "0.7"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 futures-util = "0.3"
-xsalsa20poly1305 = "0.9"
-# Opus-кодек (libopus): на Linux линкуется системной библиотекой (libopus-dev),
-# на Windows/macOS audiopus_sys собирает vendored-opus через cmake.
-audiopus = "0.3.0-rc.0"
+# async_trait — нужен для impl AsyncMediaSource (songbird) и EventHandler.
+async-trait = "0.1"
 # User-auth: QR remote-auth (RSA-OAEP-SHA256 + HMAC proof), /auth/login.
 rsa = "0.9"
 sha2 = "0.10"
@@ -54,6 +52,13 @@ base64 = "0.22"
 rand = "0.8"
 # QR-матрица для remote-auth (SVG собираем сами — без тяжёлых зависимостей).
 qrcode = { version = "0.14", default-features = false }
+# Голосовой движок: songbird (драйвер Discord voice v4/v5: современное
+# шифрование aead_aes256_gcm / xchacha20, jitter-буфер, opus, микшер).
+# «driver» — сам движок, «receive» — декодирование входящего аудио
+# (CoreEvent::VoiceTick), «gateway» — зависимости менеджера (нужен
+# receive-модулю: dashmap для ssrc-трекера), «tungstenite»+«rustls» —
+# WS-бэкенд к медиасерверу.
+songbird = { version = "0.6", default-features = false, features = ["driver", "receive", "gateway", "tungstenite", "rustls"] }
 # Аудиоустройства — только с фичей `audio` (см. [features]).
 cpal = { version = "0.15", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

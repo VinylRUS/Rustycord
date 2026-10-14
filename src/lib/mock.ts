@@ -20,6 +20,15 @@ function sf(msAgo: number, seq: number): string {
   return (((ts - EPOCH) << 22n) | BigInt(seq)).toString();
 }
 const H = 3600_000;
+
+/** «name:id» → кастомный эмодзи, иначе unicode. Как реальный REST-путь. */
+function parseApiEmoji(api: string): { id: string | null; name: string } {
+  const parts = api.split(':');
+  if (parts.length === 2 && /^\d+$/.test(parts[1])) {
+    return { id: parts[1], name: parts[0] };
+  }
+  return { id: null, name: api };
+}
 const M = 60_000;
 
 function delay(ms: number): Promise<void> {
@@ -106,6 +115,14 @@ const GUILD: Guild = {
   icon: null,
   owner_id: ALEXEY.id,
   roles: ROLES,
+  // «Кастомные эмодзи сервера» — на самом деле публичные эмодзи Discord CDN
+  // (id настоящих глобальных эмодзи), чтобы пикер и реакции выглядели живьём.
+  emojis: [
+    { id: '1000116642218909690', name: 'rustycord', animated: false },
+    { id: '1162243827154350132', name: 'rustlove', animated: false },
+    { id: '1117802331364020245', name: 'rustcrab', animated: true },
+    { id: '1094242520372236378', name: 'tableflip', animated: false },
+  ],
   channels: CHANNELS,
   voice_states: VOICE_STATES,
   presences: PRESENCES,
@@ -173,7 +190,10 @@ const HISTORY: Record<string, Message[]> = {
     msg(3, 39 * H, DMITRY, 'А размер-то какой? Официальный клиент на Electron весит ~200 МБ, а тут весь бинарь на Rust укладывается в ~10 МБ.', CH_GENERAL),
     msg(4, 38 * H, OLYA, 'Tauri использует системный WebView вместо того, чтобы тащить свой Chromium, — в этом вся магия 🦀', CH_GENERAL),
     msg(5, 37 * H, ALEXEY, 'Напоминаю правила: не ддосим Gateway, heartbeat шлём каждые `41 250 мс`, как завещал протокол.', CH_GENERAL, {
-      reactions: [{ count: 3, me: false, emoji: { id: null, name: '👍' } }],
+      reactions: [
+        { count: 3, me: false, emoji: { id: null, name: '👍' } },
+        { count: 1, me: false, emoji: { id: null, name: '😭' } },
+      ],
     }),
     msg(6, 30 * H, MARINA, 'Скинула дамп опкодов в <#1301000000000000307> — гляньте, всё сходится с discord.py.', CH_GENERAL),
     msg(7, 29 * H, DMITRY, 'RESUME работает? Если соединение порвётся, сессия подхватится без потери событий?', CH_GENERAL),
@@ -184,8 +204,10 @@ const HISTORY: Record<string, Message[]> = {
     msg(10, 1 * H, MARINA, 'Я уже там, но на мьюте — сосед делает ремонт 🔨', CH_GENERAL),
     msg(11, 25 * M, ALEXEY, 'Всё, финальная сборка готова. Погнали тестировать! 🚀', CH_GENERAL, {
       reactions: [
-        { count: 4, me: false, emoji: { id: null, name: '🚀' } },
+        { count: 4, me: true, emoji: { id: null, name: '🚀' } },
         { count: 2, me: false, emoji: { id: null, name: '🦀' } },
+        { count: 1, me: false, emoji: { id: null, name: '🔥' } },
+        { count: 3, me: false, emoji: { id: '1000116642218909690', name: 'rustycord' } },
       ],
     }),
   ],
@@ -394,7 +416,7 @@ export class MockBackend implements Backend {
     if (Math.random() < 0.5) {
       this.timers.push(
         setTimeout(() => {
-          message.reactions = [{ count: 1, me: true, emoji: { id: null, name: '👍' } }];
+          message.reactions = [{ count: 1, me: true, emoji: { id: null, name: '🦀' } }];
           this.emit({
             type: 'dispatch',
             t: 'MESSAGE_REACTION_ADD',
@@ -425,7 +447,26 @@ export class MockBackend implements Backend {
     this.emit({
       type: 'dispatch',
       t: 'MESSAGE_REACTION_ADD',
-      d: { channel_id: channelId, message_id: messageId, user_id: ME.id, emoji: { id: null, name: emoji } },
+      d: {
+        channel_id: channelId,
+        message_id: messageId,
+        user_id: ME.id,
+        // Кастомный эмодзи приходит как «name:id» — разбираем обратно.
+        emoji: parseApiEmoji(emoji),
+      },
+    });
+  }
+
+  async removeReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
+    this.emit({
+      type: 'dispatch',
+      t: 'MESSAGE_REACTION_REMOVE',
+      d: {
+        channel_id: channelId,
+        message_id: messageId,
+        user_id: ME.id,
+        emoji: parseApiEmoji(emoji),
+      },
     });
   }
 
@@ -680,15 +721,17 @@ export class MockBackend implements Backend {
           message.id = this.nextId();
           (this.histories[item.channel] ??= []).push(message);
           this.emit({ type: 'dispatch', t: 'MESSAGE_CREATE', d: message });
-          // someone reacts
+          // someone reacts — каждый раз разными эмодзи, как живой чат
           this.timers.push(
             setTimeout(() => {
               if (!this.running) return;
-              message.reactions = [{ count: 1, me: false, emoji: { id: null, name: '👍' } }];
+              const pool = ['👍', '🔥', '😂', '🦀', '💯', '🎉', '👀'];
+              const emoji = { id: null, name: pool[Math.floor(Math.random() * pool.length)] };
+              message.reactions = [{ count: 1, me: false, emoji }];
               this.emit({
                 type: 'dispatch',
                 t: 'MESSAGE_REACTION_ADD',
-                d: { channel_id: item.channel, message_id: message.id, user_id: ALEXEY.id, emoji: { id: null, name: '👍' } },
+                d: { channel_id: item.channel, message_id: message.id, user_id: ALEXEY.id, emoji },
               });
             }, 2200),
           );

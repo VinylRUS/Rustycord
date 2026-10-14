@@ -1,26 +1,41 @@
-pub mod codec;
+//! Голосовой движок на songbird.
+//!
+//! Схема: gateway (op 4) → пара событий VOICE_STATE_UPDATE +
+//! VOICE_SERVER_UPDATE (events.rs собирает их в `VoiceHandshake`) →
+//! координатор поднимает сессию: `songbird::Driver` сам делает весь
+//! рукопожатие v4/v5 (IDENTIFY → UDP discovery → SELECT_PROTOCOL →
+//! SESSION_DESCRIPTION), современное шифрование (aead_aes256_gcm /
+//! xchacha20), DAVE-совместимость, jitter-буфер приёма и opus-кодек.
+//!
+//! Микрофон: cpal → `MicTap` → songbird Input (см. mic.rs).
+//! Приём: `CoreEvent::VoiceTick` → декодированный PCM → наш `Mixer`
+//! (jitter/прайминг на дорожках) → cpal-вывод (devices.rs).
+
 pub mod coordinator;
-pub mod crypto;
 // jitter и resample: в headless-сборке (без фичи `audio`) у частей вывода
 // нет потребителя — приглушаем dead_code только для этого режима; в полной
 // сборке (CI, релизы) предупреждения остаются включёнными.
 #[cfg_attr(not(feature = "audio"), allow(dead_code))]
 pub mod jitter;
+pub mod mic;
 #[cfg_attr(not(feature = "audio"), allow(dead_code))]
 pub mod resample;
-pub mod sender;
-pub mod udp;
-pub mod ws;
 
 #[cfg(feature = "audio")]
 pub mod devices;
 
 /// Текущее состояние собственного мьюта/деафиена. Обновляется по эхо
 /// VOICE_STATE_UPDATE (events.rs) — ровно как настоящий клиент узнаёт о
-/// собственных флагах, — а аудиодвижок перечитывает его каждый кадр.
+/// собственных флагах, — вывод (devices.rs) глушится по self_deaf, а
+/// микрофон — через driver.mute в events.rs.
 #[derive(Debug, Clone, Copy)]
 pub struct VoiceControls {
+    /// Пишется эхом op4; сам мьют микрофона применяется в songbird
+    /// (events.rs: driver.mute), поэтому поле только хранит состояние.
+    #[allow(dead_code)]
     pub self_mute: bool,
+    /// Читается выводом (devices.rs) только в полной сборке с `audio`.
+    #[cfg_attr(not(feature = "audio"), allow(dead_code))]
     pub self_deaf: bool,
 }
 
@@ -31,17 +46,4 @@ impl VoiceControls {
             self_deaf,
         }
     }
-
-    /// Мьют «эффективный»: деафиен в Discord всегда глушит и микрофон.
-    pub fn mic_off(&self) -> bool {
-        self.self_mute || self.self_deaf
-    }
-}
-
-/// Команды в главный цикл голосового WS (отправитель аудио → сигналинг).
-#[derive(Debug, Clone, Copy)]
-pub enum VoiceWsCmd {
-    /// op 5 SPEAKING — анонсировать/снять передачу (рисует зелёные кольца
-    /// у собеседников; ssrc в этом кадре, как известно, строка).
-    SetSpeaking(bool),
 }

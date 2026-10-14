@@ -28,6 +28,18 @@ const TOKEN_KEY = 'rustycord.token';
 const ME_KEY = 'rustycord.me';
 const TYPING_TTL = 8000;
 const SPEAKING_TTL = 2500;
+const RECENT_EMOJI_KEY = 'rustycord.recentEmoji';
+const RECENT_EMOJI_MAX = 24;
+
+/** Уникальный ключ эмодзи в списке реакций (id:name — кастомные уникальны id). */
+export function emojiKey(e: { id: string | null; name: string | null }): string {
+  return `${e.id ?? ''}:${e.name ?? ''}`;
+}
+
+/** Строка эмодзи для REST-путей реакций: unicode или name:id (кастомный). */
+export function emojiApi(e: { id: string | null; name: string | null }): string {
+  return e.id ? `${e.name}:${e.id}` : (e.name ?? '👍');
+}
 
 interface TypingEntry {
   name: string;
@@ -180,6 +192,7 @@ export class AppStore {
   async boot() {
     if (this.booted) return;
     this.booted = true;
+    this.loadRecentEmoji();
     const token = localStorage.getItem(TOKEN_KEY);
     if (token && detectTauri()) {
       await this.login(token, true);
@@ -647,13 +660,13 @@ export class AppStore {
           channel_id: string;
           message_id: string;
           user_id: string;
-          emoji: { id: string | null; name: string | null };
+          emoji: { id: string | null; name: string | null; animated?: boolean };
         };
         const list = this.messagesByChannel[p.channel_id];
         const m = list?.find((x) => x.id === p.message_id);
         if (!m) break;
         const reactions = [...(m.reactions ?? [])];
-        const key = (e: { id: string | null; name: string | null }) => `${e.id ?? ''}:${e.name ?? ''}`;
+        const key = emojiKey;
         const i = reactions.findIndex((r) => key(r.emoji) === key(p.emoji));
         const isAdd = t === 'MESSAGE_REACTION_ADD';
         const isMe = p.user_id === this.user?.id;
@@ -666,6 +679,18 @@ export class AppStore {
           else reactions[i] = { ...reactions[i], count, me: isMe ? false : reactions[i].me };
         }
         m.reactions = reactions;
+        break;
+      }
+      case 'MESSAGE_REACTION_REMOVE_ALL': {
+        const p = d as { channel_id: string; message_id: string };
+        const m = this.messagesByChannel[p.channel_id]?.find((x) => x.id === p.message_id);
+        if (m) m.reactions = [];
+        break;
+      }
+      case 'MESSAGE_REACTION_REMOVE_EMOJI': {
+        const p = d as { channel_id: string; message_id: string; emoji: { id: string | null; name: string | null } };
+        const m = this.messagesByChannel[p.channel_id]?.find((x) => x.id === p.message_id);
+        if (m) m.reactions = (m.reactions ?? []).filter((r) => emojiKey(r.emoji) !== emojiKey(p.emoji));
         break;
       }
       case 'TYPING_START': {
@@ -867,10 +892,44 @@ export class AppStore {
     }
   }
 
-  async react(message: Message, emoji: string) {
-    if (!this.backend) return;
+  /** Недавние эмодзи для быстрого доступа в пикере (localStorage). */
+  recentEmoji = $state<{ id: string | null; name: string; animated?: boolean }[]>([]);
+
+  loadRecentEmoji() {
     try {
-      await this.backend.addReaction(message.channel_id, message.id, emoji);
+      const raw = localStorage.getItem(RECENT_EMOJI_KEY);
+      if (raw) this.recentEmoji = JSON.parse(raw);
+    } catch {
+      /* пусто — ну и ладно */
+    }
+  }
+
+  private pushRecentEmoji(e: { id: string | null; name: string; animated?: boolean }) {
+    const list = [e, ...this.recentEmoji.filter((x) => emojiKey(x) !== emojiKey(e))].slice(
+      0,
+      RECENT_EMOJI_MAX,
+    );
+    this.recentEmoji = list;
+    try {
+      localStorage.setItem(RECENT_EMOJI_KEY, JSON.stringify(list));
+    } catch {
+      /* приватный режим — ну и ладно */
+    }
+  }
+
+  /** Тогл реакции: стоит у нас — снимаем, не стоит — ставим. */
+  async react(message: Message, emoji: { id: string | null; name: string | null; animated?: boolean }) {
+    if (!this.backend || !emoji.name) return;
+    const existing = (message.reactions ?? []).find(
+      (r) => r.me && emojiKey(r.emoji) === emojiKey(emoji),
+    );
+    const api = emojiApi(emoji);
+    try {
+      if (existing) await this.backend.removeReaction(message.channel_id, message.id, api);
+      else {
+        await this.backend.addReaction(message.channel_id, message.id, api);
+        this.pushRecentEmoji(emoji as { id: string | null; name: string; animated?: boolean });
+      }
     } catch (e) {
       this.toast(`Реакция не удалась: ${errMsg(e)}`, 'error');
     }

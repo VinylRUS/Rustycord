@@ -14,7 +14,7 @@ use crate::gateway::client::run_gateway;
 use crate::rest::client::{urlencode, RestClient};
 use crate::rest::models::{Channel, CurrentUser, Message, Relationship};
 use crate::snowflake;
-use crate::state::{AppState, GatewayCommand, INTENTS_USER};
+use crate::state::{AppState, GatewayCommand, INTENTS_BOT};
 use crate::superprops;
 use crate::voice::coordinator;
 
@@ -169,11 +169,29 @@ pub async fn connect(
     state.cache.write().unwrap().reset();
     state.cache.write().unwrap().user = Some(me.clone());
     *state.token.write().unwrap() = Some(token);
-    state.intents.store(INTENTS_USER, Ordering::SeqCst);
+    // Бот или юзер? От этого зависит формат IDENTIFY: юзеры шлют
+    // capabilities без intents (как официальный клиент) — иначе гильдии
+    // и события могут не приехать. Интенты — только ботам.
+    state
+        .is_bot
+        .store(me.bot, std::sync::atomic::Ordering::SeqCst);
+    state.intents.store(INTENTS_BOT, Ordering::SeqCst);
     // Пользовательская сессия ходит на общий gateway (без /gateway/bot,
     // это бот-эндпоинт — юзеру он вернёт 401).
     *state.gateway_url.write().unwrap() = "wss://gateway.discord.gg".to_string();
-    tracing::info!("connect: пользователь @{} (id {})", me.username, me.id);
+    if me.bot {
+        tracing::info!(
+            "connect: бот @{} (id {}) — gateway с intents",
+            me.username,
+            me.id
+        );
+    } else {
+        tracing::info!(
+            "connect: пользователь @{} (id {}) — gateway с capabilities",
+            me.username,
+            me.id
+        );
+    }
 
     // Gateway task.
     let (tx, rx) = tokio::sync::mpsc::channel(64);
@@ -426,6 +444,7 @@ pub async fn get_state(state: State<'_, Arc<AppState>>) -> Result<Value, String>
                 "banner": g.banner,
                 "owner_id": g.owner_id,
                 "roles": g.roles,
+                "emojis": g.emojis,
                 "channels": g.channels,
                 "members": g.members.values().collect::<Vec<_>>(),
                 "presences": g.presences.values().collect::<Vec<_>>(),
@@ -589,6 +608,24 @@ pub async fn add_reaction(
         urlencode(&emoji)
     );
     rest.put_empty(&path).await.map_err(es)?;
+    Ok(())
+}
+
+/// Снять СВОЮ реакцию (DELETE /@me). Для чужих реакций нужно право
+/// MANAGE_MESSAGES — не тянем, пока не попросат.
+#[tauri::command]
+pub async fn remove_reaction(
+    state: State<'_, Arc<AppState>>,
+    channel_id: String,
+    message_id: String,
+    emoji: String,
+) -> Result<(), String> {
+    let rest = rest_of(&state)?;
+    let path = format!(
+        "/channels/{channel_id}/messages/{message_id}/reactions/{}/@me",
+        urlencode(&emoji)
+    );
+    rest.delete::<()>(&path).await.map_err(es)?;
     Ok(())
 }
 

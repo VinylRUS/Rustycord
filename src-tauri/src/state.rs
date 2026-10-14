@@ -10,15 +10,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::rest::models::{Channel, Member, Presence, Relationship, Role, User, VoiceState};
-use crate::voice::{VoiceControls, VoiceWsCmd};
+use crate::voice::VoiceControls;
 
-/// Интенты пользовательской сессии: юзер-аккаунту доступны все биты без
-/// аппрува в Developer Portal (в отличие от ботов). Включаем всё вплоть до
-/// GUILD_SCHEDULED_EVENTS — как это делает официальный клиент.
+/// Интенты для БОТ-сессии (юзер-аккаунты их не шлют — см. `is_bot`).
 ///   0..14 — GUILDS … DIRECT_MESSAGE_TYPING
-///   15    — MESSAGE_CONTENT (для ботов privileged, для юзера — обычный)
+///   15    — MESSAGE_CONTENT (privileged для ботов)
 ///   16    — GUILD_SCHEDULED_EVENTS
-pub const INTENTS_USER: u32 = (1 << 0)
+pub const INTENTS_BOT: u32 = (1 << 0)
     | (1 << 1)
     | (1 << 2)
     | (1 << 3)
@@ -46,8 +44,18 @@ pub const INTENTS_FALLBACK: u32 =
 pub enum GatewayCommand {
     /// Raw JSON frame (escape hatch / protocol experiments).
     SendText(String),
-    /// op 8 — request the full member list of a guild (chunked reply).
+    /// op 8 — request the full member list of a guild (chunked reply) — bots.
     RequestMembers { guild_id: String },
+    /// op 37 — bulk guild subscribe (user sessions: presences/typing/threads
+    /// для всех гильдий сразу — так делает официальный клиент после READY).
+    BulkGuildSubscribe { guild_ids: Vec<String> },
+    /// op 14 — lazy member list (user sessions): список участников канала
+    /// диапазонами, ответ приезжает теми же GUILD_MEMBERS_CHUNK.
+    SubscribeMemberList {
+        guild_id: String,
+        /// (channel_id, ranges) — обычно [[0, 99]] на каждый канал.
+        channels: Vec<(String, Vec<u32>)>,
+    },
     /// op 4 — join/leave a voice channel or change self mute/deaf.
     VoiceStateUpdate {
         guild_id: String,
@@ -66,6 +74,8 @@ pub struct GuildState {
     pub banner: Option<String>,
     pub owner_id: String,
     pub roles: Vec<Role>,
+    /// Кастомные эмодзи сервера (для эмодзи-пикера реакций).
+    pub emojis: Vec<crate::rest::models::Emoji>,
     pub channels: Vec<Channel>,
     pub members: HashMap<String, Member>,
     pub presences: HashMap<String, Presence>,
@@ -98,7 +108,7 @@ impl Cache {
 }
 
 /// Voice handshake pieces assembled from two independent gateway events:
-/// VOICE_STATE_UPDATE (session_id, for our own user) and
+/// VOICE_STATE_UPDATE (session_id, channel_id, for our own user) and
 /// VOICE_SERVER_UPDATE (token + endpoint). Once both arrive for a guild,
 /// the voice coordinator can dial the media server.
 #[derive(Debug, Clone, Default)]
@@ -108,6 +118,9 @@ pub struct VoiceHandshake {
     pub session_id: Option<String>,
     pub token: Option<String>,
     pub endpoint: Option<String>,
+    /// Канал, в который ведём рукопожатие (из эха op4) — нужен songbird'у
+    /// для ConnectionInfo, VOICE_SERVER_UPDATE его не несёт.
+    pub channel_id: Option<String>,
 }
 
 impl VoiceHandshake {
@@ -116,24 +129,25 @@ impl VoiceHandshake {
     }
 }
 
-/// Живая голосовая сессия: события эхо op4 (events.rs) обновляют мьют-флаги
-/// через `controls`, а аудиоотправитель говорит сигналингу op 5 SPEAKING
-/// через `ws_cmd`.
-#[derive(Debug)]
+/// Живая голосовая сессия на songbird: `controls` обновляется эхом op4
+/// (events.rs), `driver` — клон канала управления движком (mute/leave).
+#[derive(Clone)]
 pub struct VoiceSessionHandle {
     pub controls: Arc<Mutex<VoiceControls>>,
-    /// Не читается намеренно: этот клон держит канал открытым всё время
-    /// жизни сессии — иначе ранний выход отправителя (нет микрофона) закрыл
-    /// бы WS-цикл через recv() → None. Читает ws.rs, дропает run_voice.
+    pub driver: Option<songbird::Driver>,
+    /// Роль песни «микрофон»: держим, чтобы трек не завершался сам.
     #[allow(dead_code)]
-    pub ws_cmd: mpsc::UnboundedSender<VoiceWsCmd>,
+    pub mic_track: Option<songbird::tracks::TrackHandle>,
 }
 
 pub struct AppState {
     pub app: tauri::AppHandle,
     pub cache: RwLock<Cache>,
     pub token: RwLock<Option<String>>,
-    /// Active intents bitfield (may degrade after close code 4014).
+    /// Бот-аккаунт? Юзер-сессии шлют capabilities вместо intents и получают
+    /// все события без фильтрации (как официальный клиент).
+    pub is_bot: std::sync::atomic::AtomicBool,
+    /// Active intents bitfield (бот-сессии; may degrade after close 4014).
     pub intents: AtomicU32,
     /// client_build_number для X-Super-Properties (тянем с discord.com).
     pub build_number: AtomicU64,
@@ -163,7 +177,8 @@ impl AppState {
             app,
             cache: RwLock::new(Cache::default()),
             token: RwLock::new(None),
-            intents: AtomicU32::new(INTENTS_USER),
+            is_bot: std::sync::atomic::AtomicBool::new(false),
+            intents: AtomicU32::new(INTENTS_BOT),
             build_number: AtomicU64::new(crate::superprops::FALLBACK_BUILD_NUMBER),
             gateway_url: RwLock::new("wss://gateway.discord.gg".to_string()),
             gateway_tx: RwLock::new(None),

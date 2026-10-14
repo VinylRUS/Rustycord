@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
 use tauri::Emitter;
 
 use crate::rest::models::{Channel, Guild, Member, Presence, Relationship, VoiceState};
@@ -20,6 +21,24 @@ pub struct SessionData {
     /// Last `s` (sequence number) seen on a DISPATCH; sent with every
     /// heartbeat and replayed in RESUME so Discord can fill the gap.
     pub seq: Option<u64>,
+}
+
+/// Идентификаторы каналов из GUILD_CREATE — только текст/войс/анонсы
+/// (категории и форумы в ленивом списке участников не участвуют).
+fn gs_channel_ids(channels: Option<&Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(arr) = channels.and_then(|v| v.as_array()) {
+        for ch in arr {
+            let kind = ch["type"].as_i64().unwrap_or(-1);
+            // 0 — текст, 2 — войс, 5 — анонсы, 13 — стейдж
+            if matches!(kind, 0 | 2 | 5 | 13) {
+                if let Some(id) = ch["id"].as_str() {
+                    out.push(id.to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 pub async fn handle_dispatch(
@@ -99,6 +118,26 @@ pub async fn handle_dispatch(
                 "discord://ready",
                 json!({ "user": d["user"], "session_id": session_id }),
             );
+            // Юзер-сессия: сразу подписываемся на события всех гильдий (op 37)
+            // — как официальный клиент. Без этого пресенсы/участники гильдий
+            // могут не поехать (intents юзеры не шлют).
+            if !state.is_bot.load(Ordering::SeqCst) {
+                let guild_ids: Vec<String> = d["guilds"]
+                    .as_array()
+                    .map(|gs| {
+                        gs.iter()
+                            .filter_map(|g| g["id"].as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !guild_ids.is_empty() {
+                    if let Some(tx) = state.gateway_tx.read().unwrap().as_ref() {
+                        let _ = tx.try_send(crate::state::GatewayCommand::BulkGuildSubscribe {
+                            guild_ids,
+                        });
+                    }
+                }
+            }
             // Полный READY вперёд как dispatch: фронтенду нужны
             // private_channels, relationships и presences, которых нет в
             // коротком ready-событии выше. Без этого список ЛС и друзья
@@ -146,6 +185,7 @@ pub async fn handle_dispatch(
                     banner: g.banner.clone(),
                     owner_id: g.owner_id.clone(),
                     roles: g.roles.clone(),
+                    emojis: g.emojis.clone().unwrap_or_default(),
                     channels: Vec::new(),
                     members: Default::default(),
                     presences: Default::default(),
@@ -177,12 +217,29 @@ pub async fn handle_dispatch(
                 g.name,
                 g.channels.as_ref().map(Vec::len).unwrap_or(0)
             );
-            // Большие гильдии присылают участников пачками по запросу (op 8).
+            // Участники: боты просят полный список (op 8); юзеры — ленивые
+            // диапазоны (op 14) — так делает официальный клиент.
             if needs_chunk {
                 if let Some(tx) = state.gateway_tx.read().unwrap().as_ref() {
-                    let _ = tx.try_send(crate::state::GatewayCommand::RequestMembers {
-                        guild_id: g.id.clone(),
-                    });
+                    if state.is_bot.load(Ordering::SeqCst) {
+                        let _ = tx.try_send(crate::state::GatewayCommand::RequestMembers {
+                            guild_id: g.id.clone(),
+                        });
+                    } else {
+                        // Текстовые/войс-каналы — первые 10, диапазон [0, 99].
+                        let channels: Vec<(String, Vec<u32>)> = gs_channel_ids(d.get("channels"))
+                            .into_iter()
+                            .take(10)
+                            .map(|cid| (cid, vec![0, 99]))
+                            .collect();
+                        if !channels.is_empty() {
+                            let _ =
+                                tx.try_send(crate::state::GatewayCommand::SubscribeMemberList {
+                                    guild_id: g.id.clone(),
+                                    channels,
+                                });
+                        }
+                    }
                 }
             }
             let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
@@ -262,6 +319,7 @@ pub async fn handle_dispatch(
                     gs.banner = g.banner;
                     gs.owner_id = g.owner_id;
                     gs.roles = g.roles;
+                    gs.emojis = g.emojis.unwrap_or_default();
                 }
             }
             let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
@@ -387,12 +445,19 @@ pub async fn handle_dispatch(
                         entry.guild_id = gid.clone();
                         entry.user_id = vs.user_id.clone();
                         entry.session_id = Some(sid);
+                        entry.channel_id = vs.channel_id.clone();
                         drop(hs);
                         // Эхо op4: подтягиваем живую сессию к актуальным флагам.
                         let sessions = state.voice_sessions.lock().unwrap();
                         if let Some(handle) = sessions.get(&gid) {
                             *handle.controls.lock().unwrap() =
                                 VoiceControls::new(vs.self_mute, vs.self_deaf);
+                            // Мьют в songbird: движок шлёт тишину вместо микрофона
+                            // (деафиен тоже глушит передачу — как в оригинале).
+                            // Driver — клон канала управления, mute уходит в задачи.
+                            if let Some(mut driver) = handle.driver.clone() {
+                                driver.mute(vs.self_mute || vs.self_deaf);
+                            }
                         }
                     } else if vs.channel_id.is_none() {
                         // Выход из войса: гасим голосовую сессию.

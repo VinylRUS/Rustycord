@@ -17,7 +17,11 @@ pub const FALLBACK_BUILD_NUMBER: u64 = 4173;
 /// Браузерная личина: Chrome на Windows — самый распространённый профиль
 /// пользователя Discord, наименьшие шансы попасть под эвристики.
 pub const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-     (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+     (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
+
+/// Версия браузера из BROWSER_UA — должна совпадать и в X-Super-Properties,
+/// и в gateway properties, иначе сессия выглядит подозрительной.
+pub const BROWSER_VERSION: &str = "149.0.0.0";
 
 fn b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
@@ -31,7 +35,7 @@ pub fn super_properties(build_number: u64) -> String {
         "device": "",
         "system_locale": "ru-RU",
         "browser_user_agent": BROWSER_UA,
-        "browser_version": "131.0.0.0",
+        "browser_version": BROWSER_VERSION,
         "os_version": "10",
         "referrer": "",
         "referring_domain": "",

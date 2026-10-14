@@ -144,6 +144,9 @@ pub struct Guild {
     pub large: Option<bool>,
     #[serde(default)]
     pub unavailable: Option<bool>,
+    /// Кастомные эмодзи сервера (GUILD_CREATE/GUILD_UPDATE для юзер-сессий).
+    #[serde(default)]
+    pub emojis: Option<Vec<Emoji>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

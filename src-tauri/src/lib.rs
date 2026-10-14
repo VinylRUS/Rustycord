@@ -39,6 +39,7 @@ pub fn run() {
             commands::edit_message,
             commands::delete_message,
             commands::add_reaction,
+            commands::remove_reaction,
             commands::trigger_typing,
             commands::request_members,
             commands::gateway_send_raw,

@@ -21,6 +21,33 @@ use crate::gateway::events::{handle_dispatch, SessionData};
 use crate::state::{GatewayCommand, SharedState, INTENTS_FALLBACK};
 use crate::wsutil;
 
+/// capabilities для юзер-сессии — битовая маска клиентских возможностей,
+/// которую шлёт официальный веб-клиент (без интентов). Значение из
+/// discord-client-rs: «лучшее, если нужны все события».
+const USER_CAPABILITIES: u32 = 53_607_934;
+
+/// Properties-набор как у браузерного клиента discord.com/app — совпадает
+/// с нашим X-Super-Properties, чтобы сессия выглядела консистентно.
+fn client_properties(build: u64) -> serde_json::Value {
+    json!({
+        "os": "Windows",
+        "browser": "Chrome",
+        "device": "",
+        "system_locale": "ru-RU",
+        "browser_user_agent": crate::superprops::BROWSER_UA,
+        "browser_version": crate::superprops::BROWSER_VERSION,
+        "os_version": "10",
+        "referrer": "",
+        "referring_domain": "",
+        "referrer_current": "",
+        "referring_domain_current": "",
+        "release_channel": "stable",
+        "client_build_number": build,
+        "client_event_source": null,
+        "design_id": 0
+    })
+}
+
 /// How the current session ended.
 enum End {
     /// Clean shutdown requested by the UI.
@@ -136,46 +163,48 @@ async fn run_session(
         )
         .await?;
     } else {
-        let intents = state.intents.load(Ordering::SeqCst);
+        let is_bot = state.is_bot.load(Ordering::SeqCst);
         let build = state.build_number.load(Ordering::SeqCst);
-        tracing::info!("gateway: IDENTIFY (user session) с intents={intents}");
-        // Properties-набор как у браузерного клиента discord.com/app —
-        // то, что официальный веб шлёт в identify; совпадает с нашим
-        // X-Super-Properties, чтобы сессия выглядела консистентно.
-        wsutil::send_json(
-            &mut writer,
-            &json!({
-                "op": 2,
-                "d": {
-                    "token": token,
-                    "intents": intents,
-                    "properties": {
-                        "os": "Windows",
-                        "browser": "Chrome",
-                        "device": "",
-                        "system_locale": "ru-RU",
-                        "browser_user_agent": crate::superprops::BROWSER_UA,
-                        "browser_version": "131.0.0.0",
-                        "os_version": "10",
-                        "referrer": "",
-                        "referring_domain": "",
-                        "referrer_current": "",
-                        "referring_domain_current": "",
-                        "release_channel": "stable",
-                        "client_build_number": build,
-                        "client_event_source": null
-                    },
-                    "presence": {
-                        "status": "online",
-                        "since": null,
-                        "activities": [],
-                        "afk": false
-                    },
-                    "compress": false
-                }
-            }),
-        )
-        .await?;
+        // Юзер-сессия: официальный клиент НЕ шлёт intents — вместо них
+        // capabilities + client_state. С intents юзер-токен получает
+        // урезанный поток событий (гильдии могут не приехать вовсе).
+        // Бот-сессия: как раньше, интенты обязательны (v10).
+        let d = if is_bot {
+            tracing::info!(
+                "gateway: IDENTIFY (бот) с intents={}",
+                state.intents.load(Ordering::SeqCst)
+            );
+            json!({
+                "token": token,
+                "intents": state.intents.load(Ordering::SeqCst),
+                "properties": client_properties(build),
+                "presence": {
+                    "status": "online",
+                    "since": null,
+                    "activities": [],
+                    "afk": false
+                },
+                "compress": false
+            })
+        } else {
+            tracing::info!(
+                "gateway: IDENTIFY (юзер) capabilities={USER_CAPABILITIES} без интентов"
+            );
+            json!({
+                "token": token,
+                "capabilities": USER_CAPABILITIES,
+                "properties": client_properties(build),
+                "presence": {
+                    "status": "online",
+                    "since": null,
+                    "activities": [],
+                    "afk": false
+                },
+                "compress": false,
+                "client_state": { "guild_versions": {} }
+            })
+        };
+        wsutil::send_json(&mut writer, &json!({ "op": 2, "d": d })).await?;
     }
 
     let mut heartbeat = tokio::time::interval(Duration::from_millis(hb_interval));
@@ -199,6 +228,42 @@ async fn run_session(
                             "op": 8,
                             "d": { "guild_id": guild_id, "query": "", "limit": 0 }
                         })).await?;
+                    }
+                    Some(GatewayCommand::BulkGuildSubscribe { guild_ids }) => {
+                        // op 37 (юзер-сессии): подписка на события всех гильдий
+                        // сразу — presences/typing/threads/member_updates.
+                        let mut subs = serde_json::Map::new();
+                        for gid in &guild_ids {
+                            subs.insert(gid.clone(), json!({
+                                "typing": true, "threads": true,
+                                "activities": true, "member_updates": true
+                            }));
+                        }
+                        wsutil::send_json(&mut writer, &json!({
+                            "op": 37,
+                            "d": { "subscriptions": subs }
+                        })).await?;
+                        tracing::info!("gateway: op 37 bulk subscribe на {} гильдий", guild_ids.len());
+                    }
+                    Some(GatewayCommand::SubscribeMemberList { guild_id, channels }) => {
+                        // op 14 (юзер-сессии): ленивый список участников по
+                        // диапазонам канала — приезжает GUILD_MEMBERS_CHUNK.
+                        let mut chans = serde_json::Map::new();
+                        for (cid, ranges) in &channels {
+                            // ranges = [0, 99] → JSON [[0, 99]] на канал.
+                            chans.insert(cid.clone(), json!([ranges]));
+                        }
+                        wsutil::send_json(&mut writer, &json!({
+                            "op": 14,
+                            "d": {
+                                "guild_id": guild_id,
+                                "typing": true,
+                                "threads": true,
+                                "activities": true,
+                                "channels": chans
+                            }
+                        })).await?;
+                        tracing::debug!("gateway: op 14 member list для {guild_id} ({} каналов)", channels.len());
                     }
                     Some(GatewayCommand::VoiceStateUpdate { guild_id, channel_id, self_mute, self_deaf }) => {
                         wsutil::send_json(&mut writer, &json!({

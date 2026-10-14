@@ -48,6 +48,7 @@ export interface Backend {
   editMessage(channelId: string, messageId: string, content: string): Promise<Message>;
   deleteMessage(channelId: string, messageId: string): Promise<void>;
   addReaction(channelId: string, messageId: string, emoji: string): Promise<void>;
+  removeReaction(channelId: string, messageId: string, emoji: string): Promise<void>;
   triggerTyping(channelId: string): Promise<void>;
   requestMembers(guildId: string): Promise<void>;
   /** Escape hatch: отправить сырой JSON-кадр в gateway (протокольные эксперименты). */
@@ -144,6 +145,10 @@ export class TauriBackend implements Backend {
 
   async addReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
     await this.invoke('add_reaction', { channelId, messageId, emoji });
+  }
+
+  async removeReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
+    await this.invoke('remove_reaction', { channelId, messageId, emoji });
   }
 
   async triggerTyping(channelId: string): Promise<void> {

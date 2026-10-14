@@ -15,6 +15,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 
 use crate::voice::jitter::Mixer;
+use crate::voice::mic::MicTap;
 use crate::voice::resample::LinearResampler;
 use crate::voice::VoiceControls;
 
@@ -52,10 +53,13 @@ impl Drop for DeviceGuard {
 /// Открытие происходит ВНУТРИ парковочного потока: `cpal::Stream` на ряде
 /// платформ (ALSA) не `Send` — его нельзя ни переносить между потоками,
 /// ни держать в асинхронной сессии. Создание, жизнь и дроп — один поток.
+///
+/// Микрофон пишет в `MicTap` (мост в songbird Input), динамики читают
+/// из `Mixer` (заполняется VoiceTick'ами songbird).
 pub fn open(
     mixer: &Arc<Mutex<Mixer>>,
     controls: &Arc<Mutex<VoiceControls>>,
-    mic: &Arc<Mutex<Vec<i16>>>,
+    mic: &Arc<MicTap>,
 ) -> DeviceGuard {
     // Парковка: просыпается при дропе Guard'а (закрытие канала).
     let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -73,6 +77,7 @@ pub fn open(
         // Stream'ы созданы, живут и будут дропнуты в этом же потоке.
         let _hold = (output, input);
         let _ = rx.recv(); // блок до закрытия канала (дроп Guard'а)
+        mic.close(); // EOF в songbird-трек — источник завершается чисто
     });
     let has_input = irx.recv().unwrap_or(false);
 
@@ -282,9 +287,10 @@ fn pick_input(device: &cpal::Device) -> Option<(StreamConfig, SampleFormat)> {
     Some((cfg.into(), fmt))
 }
 
-/// Состояние колбэка ввода: устройство → моно 48k → аккумулятор для кодера.
+/// Состояние колбэка ввода: устройство → моно 48k f32 → MicTap
+/// (мост в songbird: стерео-дублирование делает сам MicTap).
 struct InTap {
-    mic: Arc<Mutex<Vec<i16>>>,
+    mic: Arc<MicTap>,
     dev_ch: usize,
     /// device-rate-моно → 48k-моно (None при 48k).
     res: Option<LinearResampler>,
@@ -309,20 +315,11 @@ impl InTap {
         if at48k.is_empty() {
             return;
         }
-        let mut mic = self.mic.lock().unwrap();
-        for s in at48k {
-            mic.push((s.clamp(-1.0, 1.0) * 32767.0) as i16);
-        }
-        // Страховка от разбухания, если кодер застрял: держим ≤ 80 мс.
-        const CAP: usize = 3840;
-        if mic.len() > CAP {
-            let excess = mic.len() - CAP;
-            mic.drain(..excess);
-        }
+        self.mic.push_mono(&at48k);
     }
 }
 
-fn open_input(mic: &Arc<Mutex<Vec<i16>>>) -> Option<Stream> {
+fn open_input(mic: &Arc<MicTap>) -> Option<Stream> {
     let host = cpal::default_host();
     let device = match host.default_input_device() {
         Some(d) => d,

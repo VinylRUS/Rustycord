@@ -45,9 +45,14 @@ export function dmColor(channel: Channel): string {
   return DEFAULT_COLORS[ids[0] ?? 0];
 }
 
-export function emojiUrl(emoji: { id: string | null; name: string | null }): string | null {
+export function emojiUrl(emoji: {
+  id: string | null;
+  name: string | null;
+  animated?: boolean;
+}): string | null {
   if (!emoji.id) return null;
-  return `${CDN}/emojis/${emoji.id}.png`;
+  // Анимированные кастомные эмодзи живут в .gif, статичные — в .png.
+  return `${CDN}/emojis/${emoji.id}.${emoji.animated ? 'gif' : 'png'}`;
 }
 
 /** Display name: global_name → nick handled by caller → username */

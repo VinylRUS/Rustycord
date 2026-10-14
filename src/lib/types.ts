@@ -106,6 +106,8 @@ export interface Guild {
   banner?: string | null;
   owner_id: string;
   roles: Role[];
+  /** Кастомные эмодзи сервера (для пикера реакций). */
+  emojis?: Emoji[];
   channels?: Channel[];
   members?: Member[];
   presences?: Presence[];
