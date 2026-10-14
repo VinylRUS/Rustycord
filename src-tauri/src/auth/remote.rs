@@ -32,6 +32,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
+use super::captcha::{self, CaptchaBroker};
 use super::{nonce_echo, RemoteAuthKeys};
 use crate::superprops::BROWSER_UA;
 use crate::wsutil;
@@ -80,10 +81,19 @@ fn qr_svg(data: &str) -> Result<String> {
 /// run_remote_auth): тянуть его здесь нельзя — обмен и так самый
 /// уязвимый шаг входа, лишние секунды задержки не нужны.
 ///
-/// Почему попытки идут по двум URL: тикет **одноразовый**. Пока сервер не
-/// ответил 2xx — тикет не потрачен, можно пробовать следующий эндпоинт
-/// (v9 → v10). После 2xx (даже если разбор ответа упал) повтор бессмыслен.
-async fn exchange_ticket(keys: &RemoteAuthKeys, ticket: &str, build: u64) -> Result<String> {
+/// Тикет **одноразовый**: пока не было 2xx, его можно переотправлять
+/// (в т.ч. с решённой капчей). Потому:
+///  * попытки идут по двум URL (v9 → v10), если отказ не связан с капчей;
+///  * капча (400 + captcha_key) решается через модалку в UI
+///    (broker.present) и запрос повторяется с заголовками
+///    X-Captcha-Key / -Session-Id / -Rqtoken — до CAPTCHA_MAX_ATTEMPTS.
+async fn exchange_ticket(
+    keys: &RemoteAuthKeys,
+    ticket: &str,
+    build: u64,
+    app: &tauri::AppHandle,
+    broker: &CaptchaBroker,
+) -> Result<String> {
     if ticket.len() < 20 {
         bail!(
             "подозрительный ticket (длина {} — ожидаем строку вида \
@@ -91,20 +101,61 @@ async fn exchange_ticket(keys: &RemoteAuthKeys, ticket: &str, build: u64) -> Res
             ticket.len()
         );
     }
+    // Cookie-store включён сознательно: официальный веб-клиент шлёт этот
+    // POST с куками discord.com (__dcfduid/__sdcfid) — они участвуют в
+    // риск-скоринге, без них шанс упереться в капчу заметно выше.
     let client = reqwest::Client::builder()
         .user_agent(BROWSER_UA)
         .timeout(Duration::from_secs(15))
+        .cookie_store(true)
         .build()
         .context("не удалось создать HTTP-клиент")?;
+    // Сеем куки: лёгкий GET страницы логина (результат не важен).
+    let _ = client.get("https://discord.com/login").send().await;
 
     let mut last: Option<String> = None;
-    for url in TICKET_EXCHANGE_URLS {
-        match exchange_once(&client, keys, url, ticket, build).await {
-            Ok(token) => return Ok(token),
-            Err(ExchangeFail::Fatal(msg)) => bail!("{msg}"),
-            Err(ExchangeFail::Retryable(msg)) => {
-                tracing::warn!("remote-auth: {url} → {msg}; пробуем запасной эндпоинт");
-                last = Some(msg);
+    'urls: for url in TICKET_EXCHANGE_URLS {
+        // Последнее решённая капча этого URL: при повторном вызове её
+        // токен идёт заголовками X-Captcha-*.
+        let mut solved: Option<captcha::SolvedCaptcha> = None;
+        for attempt in 0..captcha::CAPTCHA_MAX_ATTEMPTS {
+            match exchange_once(&client, keys, url, ticket, build, solved.as_ref()).await {
+                ExchangeOutcome::Token(token) => return Ok(token),
+                ExchangeOutcome::Fatal(msg) => {
+                    bail!("{msg}");
+                }
+                ExchangeOutcome::Rejected(msg) => {
+                    tracing::warn!("remote-auth: {url} → {msg}; пробуем запасной эндпоинт");
+                    last = Some(msg);
+                    continue 'urls;
+                }
+                ExchangeOutcome::Captcha(challenge) => {
+                    if attempt + 1 >= captcha::CAPTCHA_MAX_ATTEMPTS {
+                        last = Some(format!(
+                            "капча: Discord отклонил решение {} раз подряд",
+                            captcha::CAPTCHA_MAX_ATTEMPTS
+                        ));
+                        continue 'urls;
+                    }
+                    tracing::warn!(
+                        "remote-auth: {url} требует капчу ({}попытка {}) — показываем пользователю",
+                        if challenge.invisible {
+                            "invisible, "
+                        } else {
+                            ""
+                        },
+                        attempt + 1
+                    );
+                    match broker.present(app, "qr", &challenge).await {
+                        Ok(solution) => {
+                            match captcha::SolvedCaptcha::from_solution(solution, &challenge) {
+                                Ok(s) => solved = Some(s),
+                                Err(e) => bail!("{e}"),
+                            }
+                        }
+                        Err(e) => bail!("{e:#}"),
+                    }
+                }
             }
         }
     }
@@ -115,9 +166,13 @@ async fn exchange_ticket(keys: &RemoteAuthKeys, ticket: &str, build: u64) -> Res
 }
 
 /// Исход одной попытки обмена.
-enum ExchangeFail {
-    /// Сервер не принял запрос — тикет не потрачен, можно пробовать другой URL.
-    Retryable(String),
+enum ExchangeOutcome {
+    /// Токен получен и расшифрован.
+    Token(String),
+    /// Сервер требует капчу — тикет не потрачен, можно повторить с решением.
+    Captcha(captcha::CaptchaChallenge),
+    /// Другой отказ — тикет не потрачен, можно пробовать другой URL.
+    Rejected(String),
     /// Был 2xx, но токен из ответа не извлечён — тикет уже сгорел.
     Fatal(String),
 }
@@ -131,8 +186,9 @@ async fn exchange_once(
     url: &str,
     ticket: &str,
     build: u64,
-) -> std::result::Result<String, ExchangeFail> {
-    let resp = client
+    solved: Option<&captcha::SolvedCaptcha>,
+) -> ExchangeOutcome {
+    let mut req = client
         .post(url)
         .header("Origin", "https://discord.com")
         .header("Referer", "https://discord.com/login")
@@ -145,20 +201,29 @@ async fn exchange_once(
         .header("sec-fetch-dest", "empty")
         .header("sec-fetch-mode", "cors")
         .header("sec-fetch-site", "same-origin")
-        .json(&json!({ "ticket": ticket }))
-        .send()
-        .await;
-    let resp = match resp {
+        .json(&json!({ "ticket": ticket }));
+    // Ретрай после капчи: решение + метаданные вызова — заголовками.
+    if let Some(s) = solved {
+        req = s.apply(req);
+    }
+    let resp = match req.send().await {
         Ok(r) => r,
-        Err(e) => return Err(ExchangeFail::Retryable(format!("сеть: {e}"))),
+        Err(e) => return ExchangeOutcome::Rejected(format!("сеть: {e}")),
     };
     let status = resp.status();
     // Читаем тело как текст: раньше парсили сразу в JSON и теряли сырой
     // ответ — «нет описания» в логе скрывал реальную причину 400.
     let raw = resp.text().await.unwrap_or_default();
     if !status.is_success() {
+        // Сначала — капча (400 + captcha_key): тикет не потрачен, решаем
+        // через UI и повторяем (docs.discord.food/topics/captcha-handling).
+        if let Ok(body) = serde_json::from_str::<Value>(&raw) {
+            if let Some(challenge) = captcha::CaptchaChallenge::from_body(&body) {
+                return ExchangeOutcome::Captcha(challenge);
+            }
+        }
         let snippet: String = raw.chars().take(300).collect();
-        return Err(ExchangeFail::Retryable(format!(
+        return ExchangeOutcome::Rejected(format!(
             "HTTP {status} (ticket len {}) — ответ: {}",
             ticket.len(),
             if snippet.is_empty() {
@@ -166,37 +231,43 @@ async fn exchange_once(
             } else {
                 snippet
             }
-        )));
+        ));
     }
     // 2xx: тикет потрачен. Всё, что ниже, — Fatal (повтор с тем же тикетом
     // бессмыслен).
     let body: Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
         Err(e) => {
-            return Err(ExchangeFail::Fatal(format!(
+            return ExchangeOutcome::Fatal(format!(
                 "ответ 2xx не JSON ({e}): {}",
                 raw.chars().take(200).collect::<String>()
-            )))
+            ))
         }
     };
     let Some(enc) = body["encrypted_token"].as_str() else {
-        return Err(ExchangeFail::Fatal(format!(
+        return ExchangeOutcome::Fatal(format!(
             "в 2xx-ответе нет encrypted_token: {}",
             raw.chars().take(200).collect::<String>()
-        )));
+        ));
     };
     let bytes = match keys.decrypt(enc) {
         Ok(b) => b,
-        Err(e) => return Err(ExchangeFail::Fatal(format!("RSA-расшифровка: {e}"))),
+        Err(e) => return ExchangeOutcome::Fatal(format!("RSA-расшифровка: {e}")),
     };
     match String::from_utf8(bytes) {
-        Ok(token) => Ok(token),
-        Err(_) => Err(ExchangeFail::Fatal("токен не UTF-8".to_string())),
+        Ok(token) => ExchangeOutcome::Token(token),
+        Err(_) => ExchangeOutcome::Fatal("токен не UTF-8".to_string()),
     }
 }
 
 /// Одна QR-сессия. Отменяется через `cancel` (пользователь закрыл экран логина).
-pub async fn run_remote_auth(app: tauri::AppHandle, cancel: CancellationToken) -> Result<()> {
+/// `broker` — капча-мост: обмен тикета может упереться в hCaptcha,
+/// решение приходит из UI-модалки (см. auth/captcha.rs).
+pub async fn run_remote_auth(
+    app: tauri::AppHandle,
+    broker: CaptchaBroker,
+    cancel: CancellationToken,
+) -> Result<()> {
     let emit = |stage: &str, extra: Value| {
         // json! не поддерживает spread — мерджим объекты вручную.
         let mut payload = extra;
@@ -372,7 +443,7 @@ pub async fn run_remote_auth(app: tauri::AppHandle, cancel: CancellationToken) -
                             .ok()
                             .flatten()
                             .unwrap_or(crate::superprops::FALLBACK_BUILD_NUMBER);
-                        let token = exchange_ticket(&keys, ticket, build).await?;
+                        let token = exchange_ticket(&keys, ticket, build, &app, &broker).await?;
                         let _ = writer.send(Message::Close(None)).await;
                         emit("done", json!({ "token": token }));
                         return Ok(());

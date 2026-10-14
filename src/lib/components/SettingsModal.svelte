@@ -6,13 +6,68 @@
   import Avatar from './Avatar.svelte';
   import Icon from './Icon.svelte';
 
-  let tab = $state<'connection' | 'plugins' | 'snowflake' | 'protocol' | 'about'>('connection');
+  let tab = $state<'profile' | 'connection' | 'plugins' | 'snowflake' | 'protocol' | 'about'>('profile');
   let snowflakeInput = $state('');
   let snowflakeResult = $state<SnowflakeInfo | null>(null);
   let snowflakeError = $state('');
   let rawFrame = $state('{\n  "op": 8,\n  "d": { "guild_id": "...", "query": "", "limit": 0 }\n}');
   let rawStatus = $state<{ kind: 'ok' | 'err'; text: string } | null>(null);
   let logPath = $state('');
+
+  /* ---------- профиль (v0.8.0) ---------- */
+  let bioDraft = $state('');
+  let nameDraft = $state('');
+  let profileBusy = $state(false);
+
+  // Черновики — при каждом открытии вкладки из живого профиля.
+  $effect(() => {
+    if (tab === 'profile' && app.user) {
+      bioDraft = app.user.bio ?? '';
+      nameDraft = app.user.global_name ?? '';
+    }
+  });
+
+  /** Аватар: файл → data URI (PNG/JPEG ≤ 1 МБ — как лимит загрузки Discord). */
+  async function pickAvatar(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    if (!/^image\/(png|jpeg)$/.test(file.type)) {
+      app.toast('Аватар: нужен PNG или JPEG', 'error');
+      return;
+    }
+    if (file.size > 1024 * 1024) {
+      app.toast('Аватар: файл больше 1 МБ — сожми картинку', 'error');
+      return;
+    }
+    const dataUri = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(new Error('read error'));
+      reader.readAsDataURL(file);
+    }).catch(() => '');
+    if (!dataUri) return;
+    profileBusy = true;
+    await app.updateProfile({ avatar: dataUri });
+    profileBusy = false;
+  }
+
+  async function clearAvatar() {
+    profileBusy = true;
+    await app.updateProfile({ avatar: null });
+    profileBusy = false;
+  }
+
+  async function saveProfile() {
+    profileBusy = true;
+    const ok = await app.updateProfile({
+      bio: bioDraft,
+      global_name: nameDraft,
+    });
+    profileBusy = false;
+    if (ok) bioDraft = bioDraft;
+  }
 
   // Путь к файлу логов — тянем при открытии окна (для баг-репортов).
   $effect(() => {
@@ -136,6 +191,7 @@
     </header>
 
     <nav class="tabs">
+      <button class:active={tab === 'profile'} onclick={() => (tab = 'profile')}>Профиль</button>
       <button class:active={tab === 'connection'} onclick={() => (tab = 'connection')}>Подключение</button>
       <button class:active={tab === 'plugins'} onclick={() => (tab = 'plugins')}>Плагины</button>
       <button class:active={tab === 'snowflake'} onclick={() => (tab = 'snowflake')}>Инспектор Snowflake</button>
@@ -144,7 +200,39 @@
     </nav>
 
     <div class="content scroller">
-      {#if tab === 'connection'}
+      {#if tab === 'profile'}
+        <section class="pane">
+          <h3>Мой аккаунт</h3>
+          <div class="profile-card">
+            <Avatar user={app.user} size={72} ringColor="var(--bg-secondary)" />
+            <div class="profile-fields">
+              <div class="profile-name">{app.user?.global_name || app.user?.username}</div>
+              <div class="profile-handle">@{app.user?.username}</div>
+            </div>
+            <div class="avatar-actions">
+              <label class="btn-ghost file-btn">
+                {profileBusy ? '…' : 'Сменить аватар'}
+                <input type="file" accept="image/png,image/jpeg" onchange={(e) => void pickAvatar(e)} hidden />
+              </label>
+              {#if app.user?.avatar}
+                <button class="btn-ghost" disabled={profileBusy} onclick={() => void clearAvatar()}>Убрать аватар</button>
+              {/if}
+            </div>
+          </div>
+
+          <h3>О себе</h3>
+          <p class="hint">Био видно в профиле всем. Display name — отображаемое имя (не @username).</p>
+          <div class="profile-form">
+            <label class="field-label" for="global-name">DISPLAY NAME</label>
+            <input id="global-name" bind:value={nameDraft} maxlength={32} placeholder={app.user?.username ?? ''} />
+            <label class="field-label" for="bio">БИО</label>
+            <textarea id="bio" rows={4} maxlength={190} bind:value={bioDraft} placeholder="Пара слов о себе…"></textarea>
+            <button class="btn-blurple" onclick={() => void saveProfile()} disabled={profileBusy}>
+              {profileBusy ? 'Сохраняем…' : 'Сохранить профиль'}
+            </button>
+          </div>
+        </section>
+      {:else if tab === 'connection'}
         <div class="user-line">
           <Avatar user={app.user} size={48} ringColor="#313338" />
           <div>
@@ -501,4 +589,45 @@
   }
   .switch input:checked + span { background: #23a55a; }
   .switch input:checked + span::before { transform: translateX(18px); }
+
+  /* ---- профиль (v0.8.0) ---- */
+  .profile-card {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius-md);
+    padding: 16px;
+  }
+  .profile-name { color: var(--header-primary); font-size: 17px; font-weight: 700; }
+  .profile-handle { color: var(--text-muted); font-size: 13px; }
+  .avatar-actions { margin-left: auto; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+  .file-btn { cursor: pointer; }
+  .profile-form { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+  .profile-form textarea {
+    background: #1e1f22;
+    border-radius: var(--radius-sm);
+    padding: 10px;
+    font-size: 14px;
+    color: var(--text-normal);
+    resize: vertical;
+    font-family: inherit;
+  }
+  .profile-form .btn-blurple { margin-top: 10px; align-self: flex-start; }
+  .field-label {
+    display: block;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    margin: 10px 0 6px;
+  }
+  .profile-form input {
+    background: #1e1f22;
+    border-radius: var(--radius-sm);
+    padding: 10px;
+    font-size: 14px;
+    color: var(--text-normal);
+  }
+
 </style>

@@ -15,6 +15,8 @@ export interface User {
   banner?: string | null;
   accent_color?: number | null;
   bot?: boolean;
+  /** BIO из профиля (USER_UPDATE / PATCH /users/@me). */
+  bio?: string;
 }
 
 export interface Emoji {
@@ -67,7 +69,16 @@ export interface Role {
   mentionable?: boolean;
 }
 
-export type ChannelType = 0 | 1 | 2 | 3 | 4 | 5 | 13;
+export type ChannelType = 0 | 1 | 2 | 3 | 4 | 5 | 11 | 12 | 13 | 15;
+
+/** Метаданные треда (type 11/12): архив, авто-архив, блокировка. */
+export interface ThreadMetadata {
+  archived: boolean;
+  auto_archive_duration: number;
+  archive_timestamp: string;
+  locked?: boolean;
+  create_timestamp?: string | null;
+}
 
 export interface Channel {
   id: string;
@@ -86,6 +97,8 @@ export interface Channel {
   recipient_ids?: string[];
   owner_id?: string;
   icon?: string | null;
+  /** Треды (type 11/12): архив/авто-архив/блокировка. */
+  thread_metadata?: ThreadMetadata;
 }
 
 export interface VoiceState {
@@ -111,6 +124,8 @@ export interface Guild {
   /** Кастомные эмодзи сервера (для пикера реакций). */
   emojis?: Emoji[];
   channels?: Channel[];
+  /** Активные треды гильдии (type 11/12) — из GUILD_CREATE/THREAD_LIST_SYNC. */
+  threads?: Channel[];
   members?: Member[];
   presences?: Presence[];
   voice_states?: VoiceState[];
@@ -236,6 +251,21 @@ export interface QrEvent {
   message?: string;
 }
 
+/* ---------- CAPTCHA (v0.8.0) ---------- */
+
+/** Вызов hCaptcha от Discord (docs.discord.food/topics/captcha-handling):
+ * rqdata ОБЯЗАН уйти в виджет — иначе решение не примут. */
+export interface CaptchaChallenge {
+  stage: 'challenge';
+  /** Откуда вызов: 'qr' | 'login' | 'mfa' — для заголовка модалки. */
+  context: string;
+  sitekey: string;
+  rqdata?: string;
+  rqtoken?: string;
+  sessionId?: string;
+  invisible?: boolean;
+}
+
 /* ---------- Guild management ---------- */
 
 export interface BanEntry {
@@ -298,6 +328,7 @@ export type BackendEvent =
   | { type: 'ready'; user: User; session_id: string }
   | { type: 'dispatch'; t: string; d: unknown }
   | { type: 'qr'; stage: QrStage; svg?: string; fingerprint?: string; token?: string; username?: string; userId?: string; message?: string }
+  | { type: 'captcha'; stage: 'challenge'; context: string; sitekey: string; rqdata?: string; rqtoken?: string; sessionId?: string; invisible?: boolean }
   | {
       type: 'voice';
       kind: 'connected' | 'disconnected' | 'speaking';

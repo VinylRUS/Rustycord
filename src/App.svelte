@@ -4,6 +4,7 @@
   import ServerRail from './lib/components/ServerRail.svelte';
   import ChannelSidebar from './lib/components/ChannelSidebar.svelte';
   import ChatArea from './lib/components/ChatArea.svelte';
+  import ForumView from './lib/components/ForumView.svelte';
   import MemberList from './lib/components/MemberList.svelte';
   import VoiceView from './lib/components/VoiceView.svelte';
   import DmHome from './lib/components/DmHome.svelte';
@@ -12,6 +13,7 @@
   import SettingsModal from './lib/components/SettingsModal.svelte';
   import GuildSettingsModal from './lib/components/GuildSettingsModal.svelte';
   import Toasts from './lib/components/Toasts.svelte';
+  import CaptchaModal from './lib/components/CaptchaModal.svelte';
 
   // Auto-login with a saved token (Tauri only).
   $effect(() => {
@@ -70,6 +72,8 @@
         <DmHome />
       {:else if isVoiceChannel}
         <VoiceView />
+      {:else if app.isForumView}
+        <ForumView />
       {:else}
         <ChatArea />
       {/if}
@@ -85,6 +89,8 @@
 <SettingsModal />
 <GuildSettingsModal />
 <Toasts />
+<!-- Капча — на любом экране (вход и авторизованные действия) -->
+<CaptchaModal />
 
 <style>
   .layout {

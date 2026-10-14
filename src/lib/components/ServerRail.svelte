@@ -8,6 +8,8 @@
   let showJoin = $state(false);
   let invite = $state('');
   let joining = $state(false);
+  let newServerName = $state('');
+  let creatingServer = $state(false);
 
   function unreadOfGuild(guildId: string): boolean {
     const g = app.guilds.find((x) => x.id === guildId);
@@ -38,6 +40,15 @@
     joining = false;
     showJoin = false;
     invite = '';
+  }
+
+  /** Свой сервер (v0.8.0): POST /guilds {name} — как кнопка в оригинале. */
+  async function submitCreateServer() {
+    creatingServer = true;
+    await app.createServer(newServerName.trim());
+    creatingServer = false;
+    showJoin = false;
+    newServerName = '';
   }
 </script>
 
@@ -108,6 +119,20 @@
         <input placeholder="discord.gg/rustycord" bind:value={invite} spellcheck="false" />
         <button type="submit" disabled={!invite.trim() || joining}>
           {joining ? 'Входим…' : 'Войти'}
+        </button>
+      </form>
+      <!-- v0.8.0: создание своего сервера -->
+      <div class="create-sep"></div>
+      <h4>Создать свой сервер</h4>
+      <form
+        onsubmit={(e) => {
+          e.preventDefault();
+          void submitCreateServer();
+        }}
+      >
+        <input placeholder="Название сервера" bind:value={newServerName} maxlength={100} />
+        <button type="submit" disabled={!newServerName.trim() || creatingServer}>
+          {creatingServer ? 'Создаём…' : 'Создать'}
         </button>
       </form>
     {/if}
@@ -309,4 +334,10 @@
   .server:hover .tooltip {
     opacity: 1;
   }
+  .create-sep {
+    height: 1px;
+    background: #3f4147;
+    margin: 14px 0 10px;
+  }
+
 </style>

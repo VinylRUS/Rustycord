@@ -51,6 +51,15 @@
     return c.type === 2 || c.type === 13;
   }
 
+  function isForum(c: Channel): boolean {
+    return c.type === 15;
+  }
+
+  function isThreadParent(c: Channel): boolean {
+    // Под текстовыми каналами показываем их треды; форум — отдельно.
+    return isText(c) || isForum(c);
+  }
+
   function isActive(id: string): boolean {
     return app.activeChannelId === id;
   }
@@ -93,7 +102,7 @@
     <div class="scroller">
       <!-- Uncategorized channels -->
       {#each uncategorized as c (c.id)}
-        {#if isText(c) || isVoice(c)}
+        {#if isText(c) || isVoice(c) || isForum(c)}
           {@render channelRow(c)}
         {/if}
       {/each}
@@ -111,7 +120,9 @@
         </button>
         {#if !collapsed[cat.id]}
           {#each childrenOf(cat.id) as c (c.id)}
-            {@render channelRow(c)}
+            {#if isText(c) || isVoice(c) || isForum(c)}
+              {@render channelRow(c)}
+            {/if}
           {/each}
         {/if}
       {/each}
@@ -237,7 +248,7 @@
   </footer>
 </aside>
 
-<!-- one channel row: text or voice -->
+<!-- one channel row: text or voice (+ active threads under text) -->
 {#snippet channelRow(c: Channel)}
   {#if isVoice(c)}
     <div class="voice-block">
@@ -269,13 +280,37 @@
       {/if}
     </div>
   {:else}
-    <button class="channel" class:active={isActive(c.id)} onclick={() => channelClick(c)}>
-      <Icon name="hash" size={20} color={isActive(c.id) ? '#f2f3f5' : '#949ba4'} />
+    <button
+      class="channel"
+      class:active={isActive(c.id)}
+      onclick={() => channelClick(c)}
+      title={isForum(c) ? `Форум: ${c.name}` : undefined}
+    >
+      {#if isForum(c)}
+        <Icon name="members" size={20} color={isActive(c.id) ? '#f2f3f5' : '#949ba4'} />
+      {:else}
+        <Icon name="hash" size={20} color={isActive(c.id) ? '#f2f3f5' : '#949ba4'} />
+      {/if}
       <span class="channel-name truncate">{c.name}</span>
+      {#if isForum(c)}
+        <span class="thread-count">{app.forumPosts(c.id).length || ''}</span>
+      {/if}
       {#if app.unread[c.id] && !isActive(c.id)}
         <span class="unread-badge"></span>
       {/if}
     </button>
+    {#if isThreadParent(c)}
+      {#each app.threadsOf(c.id) as t (t.id)}
+        <button class="channel thread" class:active={isActive(t.id)} onclick={() => app.selectChannel(t.id)}>
+          <span class="thread-icon">#
+          </span>
+          <span class="channel-name truncate">{t.name}</span>
+          {#if t.thread_metadata?.locked}
+            <Icon name="lock" size={12} color="#949ba4" />
+          {/if}
+        </button>
+      {/each}
+    {/if}
   {/if}
 {/snippet}
 
@@ -492,4 +527,25 @@
     justify-content: center;
   }
   .icon-btn:hover { background: var(--bg-modifier-hover); }
+
+  /* треды под каналом + счётчик постов форума */
+  .channel.thread {
+    padding-left: 22px;
+    opacity: 0.85;
+  }
+  .thread-icon {
+    font-size: 13px;
+    color: #949ba4;
+    font-weight: 700;
+    width: 14px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .thread-count {
+    margin-left: auto;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+  }
+
 </style>

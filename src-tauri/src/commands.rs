@@ -60,14 +60,21 @@ async fn stop_tasks(state: &State<'_, Arc<AppState>>) {
 /* ============================ AUTH ============================ */
 
 /// Шаг 1 входа по email+паролю. Возможен второй шаг (2FA) — тогда
-/// возвращаем {status:"mfa", ticket} и UI просит код.
+/// возвращаем {status:"mfa", ticket} и UI просит код. Если Discord требует
+/// капчу — событие `discord://captcha` открывает модалку, решение уходит
+/// обратно в запрос (см. auth/captcha.rs).
 #[tauri::command]
-pub async fn auth_login_email(email: String, password: String) -> Result<Value, String> {
+pub async fn auth_login_email(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    email: String,
+    password: String,
+) -> Result<Value, String> {
     let email = email.trim().to_string();
     if email.is_empty() || password.is_empty() {
         return Err("Заполни email и пароль".into());
     }
-    match auth::login::login(&email, &password).await {
+    match auth::login::login(&app, &state.captcha, &email, &password).await {
         Ok(auth::login::LoginOutcome::Token(token)) => {
             Ok(json!({ "status": "ok", "token": token }))
         }
@@ -80,14 +87,31 @@ pub async fn auth_login_email(email: String, password: String) -> Result<Value, 
 
 /// Шаг 2: код из приложения-аутентификатора (TOTP).
 #[tauri::command]
-pub async fn auth_submit_mfa(code: String, ticket: String) -> Result<Value, String> {
-    match auth::login::submit_mfa(code.trim(), &ticket).await {
+pub async fn auth_submit_mfa(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    code: String,
+    ticket: String,
+) -> Result<Value, String> {
+    match auth::login::submit_mfa(&app, &state.captcha, code.trim(), &ticket).await {
         Ok(auth::login::LoginOutcome::Token(token)) => {
             Ok(json!({ "status": "ok", "token": token }))
         }
         Ok(_) => Err("Неожиданный ответ 2FA".into()),
         Err(e) => Err(format!("{e:#}")),
     }
+}
+
+/// UI решил капчу — решение уходит в ждущий auth-запрос.
+#[tauri::command]
+pub fn submit_captcha_key(state: State<'_, Arc<AppState>>, key: String) -> Result<bool, String> {
+    Ok(state.captcha.submit(key))
+}
+
+/// UI закрыл капчу без решения — ждущий запрос завершится ошибкой.
+#[tauri::command]
+pub fn cancel_captcha(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
+    Ok(state.captcha.cancel())
 }
 
 /// QR-логин: стартуем remote-auth сессию. Дальше UI слушает события
@@ -101,8 +125,10 @@ pub async fn auth_start_qr(
     let cancel = CancellationToken::new();
     *state.qr_cancel.write().unwrap() = Some(cancel.clone());
     let app_for_task = app.clone();
+    // Капча-мост в задачу: обмен тикета может потребовать hCaptcha.
+    let broker = state.captcha.clone();
     let task = tauri::async_runtime::spawn(async move {
-        if let Err(e) = auth::remote::run_remote_auth(app_for_task.clone(), cancel).await {
+        if let Err(e) = auth::remote::run_remote_auth(app_for_task.clone(), broker, cancel).await {
             tracing::warn!("remote-auth: {e:#}");
             // Ошибка обязана попасть в UI — иначе QR просто «не появится».
             let _ = app_for_task.emit(
@@ -460,6 +486,7 @@ pub async fn get_state(state: State<'_, Arc<AppState>>) -> Result<Value, String>
                 "roles": g.roles,
                 "emojis": g.emojis,
                 "channels": g.channels,
+                "threads": g.threads,
                 "members": g.members.values().collect::<Vec<_>>(),
                 "presences": g.presences.values().collect::<Vec<_>>(),
                 "voice_states": g.voice_states,

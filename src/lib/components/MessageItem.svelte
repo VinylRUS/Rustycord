@@ -19,6 +19,43 @@
 
   let showPicker = $state(false);
   let lightbox = $state<Attachment | null>(null);
+  /** Поповер «кто поставил реакцию» — на hover чипа, как в оригинале. */
+  let reactionUsers = $state<{
+    anchor: { x: number; y: number };
+    emoji: { id: string | null; name: string | null };
+    users: import('../types').User[] | null;
+  } | null>(null);
+  let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+  let closeTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function hoverReaction(e: MouseEvent, emoji: { id: string | null; name: string | null }) {
+    clearTimeout(closeTimer);
+    clearTimeout(hoverTimer);
+    // Небольшая задержка — чтобы список не мигал при проводе мыши по чипам.
+    const anchor = { x: e.clientX, y: e.clientY };
+    hoverTimer = setTimeout(() => void openReactionUsers(anchor, emoji), 300);
+  }
+
+  function leaveReaction() {
+    clearTimeout(hoverTimer);
+    // Закрываем не сразу — пользователь может перевести мышь на поповер.
+    closeTimer = setTimeout(() => (reactionUsers = null), 500);
+  }
+
+  async function openReactionUsers(
+    anchor: { x: number; y: number },
+    emoji: { id: string | null; name: string | null },
+  ) {
+    reactionUsers = { anchor, emoji, users: null };
+    const users = await app.listReactionUsers(message.channel_id, message.id, emoji);
+    // Пока грузили, поповер могли закрыть/сменить эмодзи. ВАЖНО: $state
+    // глубоко проксирует объекты — сравнение по ссылке (===) здесь НЕ
+    // работает, сверяем координаты точки ховера.
+    const current = reactionUsers;
+    if (current && current.anchor.x === anchor.x && current.anchor.y === anchor.y) {
+      reactionUsers = { anchor, emoji, users };
+    }
+  }
 
   const guildId = $derived(app.activeGuild?.id ?? '');
   const own = $derived(message.author.id === app.user?.id);
@@ -57,6 +94,15 @@
       { label: 'Копировать текст', action: () => void navigator.clipboard?.writeText(message.content) },
       { label: 'Копировать ID сообщения', action: () => void navigator.clipboard?.writeText(message.id) },
       { label: message.pinned ? 'Открепить' : 'Закрепить', action: () => void app.togglePin(message) },
+      // Ветка из сообщения (v0.8.0): имя — по началу текста, как в оригинале.
+      {
+        label: 'Обсудить в ветке',
+        action: () =>
+          void app.createThreadFromMessage(
+            message,
+            (message.content.trim().slice(0, 40) || 'Новая ветка').replace(/\s+\S*$/, '') || 'Новая ветка',
+          ),
+      },
     ];
     if (own) {
       items.push({ label: 'Изменить', action: () => app.startEdit(message) });
@@ -265,6 +311,8 @@
             class="reaction"
             class:mine={r.me}
             onclick={() => react(r.emoji)}
+            onmouseenter={(e) => hoverReaction(e, r.emoji)}
+            onmouseleave={leaveReaction}
             title={`:${r.emoji.name}: — ${r.count}`}
           >
             {#if emojiUrl(r.emoji)}
@@ -327,6 +375,44 @@
     <img src={lightbox.url} alt={lightbox.filename} />
     <a class="lightbox-dl" href={lightbox.url} target="_blank" rel="noreferrer">Открыть оригинал</a>
     <button class="lightbox-close" onclick={() => (lightbox = null)}>✕</button>
+  </div>
+{/if}
+
+{#if reactionUsers}
+  <!-- Кто поставил реакцию: фиксированный поповер у точки ховера. -->
+  <!-- svelte-ignore a11y_no_static_element_interactions, a11y_mouse_events_have_key_events -->
+  <div
+    class="reaction-users"
+    style={`left:${Math.min(reactionUsers.anchor.x, (typeof window !== 'undefined' ? window.innerWidth : 9999) - 270)}px; top:${Math.max(reactionUsers.anchor.y - 8, 8)}px;`}
+    onmouseenter={() => clearTimeout(closeTimer)}
+    onmouseleave={() => (reactionUsers = null)}
+  >
+    <div class="ru-title">
+      {#if emojiUrl(reactionUsers.emoji)}
+        <img src={emojiUrl(reactionUsers.emoji) ?? ''} alt="" width={16} height={16} />
+      {:else}
+        <span>{reactionUsers.emoji.name}</span>
+      {/if}
+      <span>{reactionUsers.users === null ? 'Загружаем…' : `Поставили: ${reactionUsers.users.length}`}</span>
+    </div>
+    {#if reactionUsers.users === null}
+      <div class="ru-loading">…</div>
+    {:else if reactionUsers.users.length === 0}
+      <div class="ru-empty">Никого (реакция могла быть снята)</div>
+    {:else}
+      <div class="ru-list">
+        {#each reactionUsers.users.slice(0, 12) as u (u.id)}
+          <div class="ru-row">
+            <Avatar user={u} size={20} ringColor="var(--bg-secondary)" />
+            <span class="ru-name truncate">{u.global_name || u.username}</span>
+            {#if u.id === app.user?.id}<span class="ru-me">вы</span>{/if}
+          </div>
+        {/each}
+        {#if reactionUsers.users.length > 12}
+          <div class="ru-more">и ещё {reactionUsers.users.length - 12}</div>
+        {/if}
+      </div>
+    {/if}
   </div>
 {/if}
 
@@ -627,4 +713,50 @@
     font-size: 14px;
   }
   .act:hover { background: var(--bg-modifier-hover); }
+
+  /* ---- поповер «кто поставил реакцию» ---- */
+  .reaction-users {
+    position: fixed;
+    z-index: 90;
+    width: 250px;
+    background: #111214;
+    border: 1px solid #2b2d31;
+    border-radius: var(--radius-sm);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    padding: 8px;
+    font-size: 13px;
+  }
+  .ru-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 12px;
+    padding: 2px 4px 6px;
+    border-bottom: 1px solid #2b2d31;
+    margin-bottom: 6px;
+  }
+  .ru-loading, .ru-empty, .ru-more {
+    color: var(--text-muted);
+    padding: 4px;
+  }
+  .ru-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 4px;
+    border-radius: 4px;
+  }
+  .ru-row:hover { background: #2b2d31; }
+  .ru-name { color: var(--text-normal); }
+  .ru-me {
+    margin-left: auto;
+    color: var(--text-muted);
+    font-size: 11px;
+    background: #2b2d31;
+    border-radius: 3px;
+    padding: 1px 5px;
+  }
+
 </style>

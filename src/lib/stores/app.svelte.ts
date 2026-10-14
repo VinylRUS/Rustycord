@@ -9,6 +9,7 @@ import { createBackend, type Backend } from '../ipc';
 import { plugins, onPluginToast } from '../plugins/manager';
 import type {
   BanEntry,
+  CaptchaChallenge,
   Channel,
   ConnStage,
   Guild,
@@ -92,6 +93,9 @@ export class AppStore {
   qrScannedBy = $state('');
   /** email-логин дошёл до 2FA — ждём код из приложения. */
   mfaTicket = $state<string | null>(null);
+  /** Активный вызов hCaptcha (модалка CaptchaModal): решение уходит
+   *  в ждущий Rust-запрос через submitCaptchaKey (X-Captcha-Key). */
+  captcha = $state<CaptchaChallenge | null>(null);
 
   /* ---------- модалка управления сервером ---------- */
   showGuildSettings = $state<string | null>(null);
@@ -210,6 +214,9 @@ export class AppStore {
     if (!this.activeChannelId) return null;
     const fromGuild = this.activeGuild?.channels?.find((c) => c.id === this.activeChannelId);
     if (fromGuild) return fromGuild;
+    // Треды живут отдельно от каналов — выбираемая «ветка» тоже канал.
+    const fromThreads = this.activeGuild?.threads?.find((c) => c.id === this.activeChannelId);
+    if (fromThreads) return fromThreads;
     return this.dms.find((c) => c.id === this.activeChannelId) ?? null;
   }
 
@@ -221,6 +228,29 @@ export class AppStore {
   get activeGuildChannels(): Channel[] {
     const chans = this.activeGuild?.channels ?? [];
     return [...chans].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  }
+
+  /** Активные (не в архиве) треды активной гильдии — под родительскими
+   *  каналами и в списке постов форума. */
+  get activeGuildThreads(): Channel[] {
+    return (this.activeGuild?.threads ?? []).filter(
+      (t) => (t.type === 11 || t.type === 12) && !t.thread_metadata?.archived,
+    );
+  }
+
+  /** Открыт форум (type 15) — вместо ленты сообщений рисуем список постов. */
+  get isForumView(): boolean {
+    return this.activeChannel?.type === 15;
+  }
+
+  /** Треды канала (для сайдбара) — не форумные посты. */
+  threadsOf(channelId: string): Channel[] {
+    return this.activeGuildThreads.filter((t) => t.parent_id === channelId);
+  }
+
+  /** Посты форума (type 15). */
+  forumPosts(forumId: string): Channel[] {
+    return this.activeGuildThreads.filter((t) => t.parent_id === forumId);
   }
 
   get channelTitle(): string {
@@ -396,6 +426,26 @@ export class AppStore {
     this.qrSvg = '';
   }
 
+  /** Пользователь решил капчу в модалке — токен уходит в ждущий запрос. */
+  async submitCaptcha(key: string) {
+    this.captcha = null;
+    try {
+      await this.backend?.submitCaptchaKey(key);
+    } catch (e) {
+      this.toast(`Капча: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    }
+  }
+
+  /** Капча закрыта без решения — ждущий запрос завершится ошибкой. */
+  async cancelCaptcha() {
+    this.captcha = null;
+    try {
+      await this.backend?.cancelCaptcha();
+    } catch {
+      /* silent */
+    }
+  }
+
   async startDemo() {
     this.loginBusy = true;
     this.loginError = '';
@@ -475,6 +525,7 @@ export class AppStore {
     this.qrFingerprint = '';
     this.qrScannedBy = '';
     this.mfaTicket = null;
+    this.captcha = null;
   }
 
   /* ================= event stream ================= */
@@ -507,6 +558,13 @@ export class AppStore {
         break;
       case 'qr':
         this.handleQr(ev);
+        break;
+      case 'captcha':
+        // Discord требует hCaptcha (вход/QR-обмен): рисуем модалку,
+        // решение уйдёт в ждущий запрос через submitCaptcha().
+        if (ev.stage === 'challenge') {
+          this.captcha = { ...ev } as CaptchaChallenge;
+        }
         break;
       case 'voice':
         this.handleVoice(ev.kind, ev.data);
@@ -821,6 +879,41 @@ export class AppStore {
         const g = this.guilds.find((x) => x.id === c.guild_id);
         if (g?.channels) g.channels = g.channels.filter((x) => x.id !== c.id);
         if (this.activeChannelId === c.id) this.selectChannel(null);
+        break;
+      }
+      /* ---------- треды и форумы (v0.8.0) ---------- */
+      case 'THREAD_CREATE': {
+        const t = d as Channel;
+        const g = this.guilds.find((x) => x.id === t.guild_id);
+        if (g) g.threads = [...(g.threads ?? []).filter((x) => x.id !== t.id), t];
+        break;
+      }
+      case 'THREAD_UPDATE': {
+        const t = d as Channel;
+        const g = this.guilds.find((x) => x.id === t.guild_id);
+        if (g) g.threads = (g.threads ?? []).map((x) => (x.id === t.id ? { ...x, ...t } : x));
+        break;
+      }
+      case 'THREAD_DELETE': {
+        const p = d as { id: string; guild_id: string };
+        const g = this.guilds.find((x) => x.id === p.guild_id);
+        if (g) g.threads = (g.threads ?? []).filter((x) => x.id !== p.id);
+        if (this.activeChannelId === p.id) this.selectChannel(null);
+        break;
+      }
+      case 'THREAD_LIST_SYNC': {
+        const p = d as { guild_id: string; threads?: Channel[] };
+        const g = this.guilds.find((x) => x.id === p.guild_id);
+        if (g && p.threads?.length) {
+          const map = new Map((g.threads ?? []).map((t) => [t.id, t]));
+          for (const t of p.threads) map.set(t.id, t);
+          g.threads = [...map.values()];
+        }
+        break;
+      }
+      case 'USER_UPDATE': {
+        const u = d as User;
+        if (u.id === this.user?.id) this.user = { ...this.user, ...u };
         break;
       }
       case 'MESSAGE_CREATE': {
@@ -1383,6 +1476,109 @@ export class AppStore {
       await this.backend.triggerTyping(ch);
     } catch {
       /* silent */
+    }
+  }
+
+  /** Кто поставил реакцию: GET /channels/{cid}/messages/{mid}/reactions/{emoji}
+   *  — список юзеров для поповера над чипом реакции. */
+  async listReactionUsers(channelId: string, messageId: string, emoji: { id: string | null; name: string | null }): Promise<User[]> {
+    try {
+      const api = emojiApi(emoji);
+      const res = await this.apiCall(
+        'GET',
+        `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(api)}?limit=100`,
+      );
+      return Array.isArray(res) ? (res as User[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /* ---------- треды, форумы, группы, серверы, профиль (v0.8.0) ---------- */
+
+  /** Создать тред/форум-пост: POST /channels/{cid}/threads (+первое сообщение). */
+  async createThread(channelId: string, name: string, content?: string): Promise<Channel | null> {
+    try {
+      const t = (await this.apiCall('POST', `/channels/${channelId}/threads`, {
+        name,
+        ...(content ? { message: { content } } : {}),
+      })) as Channel;
+      if (t?.id) this.selectChannel(t.id);
+      return t;
+    } catch (e) {
+      this.toast(`Ветка не создана: ${errMsg(e)}`, 'error');
+      return null;
+    }
+  }
+
+  /** Ветка из сообщения (контекст-меню): POST …/messages/{mid}/threads. */
+  async createThreadFromMessage(message: Message, name: string): Promise<void> {
+    try {
+      const t = (await this.apiCall(
+        'POST',
+        `/channels/${message.channel_id}/messages/${message.id}/threads`,
+        { name },
+      )) as Channel;
+      if (t?.id) this.selectChannel(t.id);
+    } catch (e) {
+      this.toast(`Ветка не создана: ${errMsg(e)}`, 'error');
+    }
+  }
+
+  /** Обновить список активных тредов гильдии (гидрация постов форума). */
+  async refreshActiveThreads(guildId: string): Promise<void> {
+    try {
+      const res = (await this.apiCall('GET', `/guilds/${guildId}/threads/active`)) as {
+        threads?: Channel[];
+      };
+      const g = this.guilds.find((x) => x.id === guildId);
+      if (g && res?.threads) {
+        const map = new Map((g.threads ?? []).map((t) => [t.id, t]));
+        for (const t of res.threads) map.set(t.id, t);
+        g.threads = [...map.values()];
+      }
+    } catch {
+      /* silent — форум покажет то, что уже в кэше */
+    }
+  }
+
+  /** Групповая ЛС (type 3): POST /users/@me/channels {recipients}. */
+  async createGroupDm(recipientIds: string[]): Promise<Channel | null> {
+    try {
+      const c = (await this.apiCall('POST', '/users/@me/channels', {
+        recipients: recipientIds,
+      })) as Channel;
+      if (c?.id) {
+        this.dms = [...this.dms.filter((x) => x.id !== c.id), this.hydrateDm(c)];
+        this.selectChannel(c.id);
+      }
+      return c;
+    } catch (e) {
+      this.toast(`Группа не создана: ${errMsg(e)}`, 'error');
+      return null;
+    }
+  }
+
+  /** Свой сервер: POST /guilds {name} — GUILD_CREATE доедет по gateway. */
+  async createServer(name: string): Promise<void> {
+    try {
+      const g = (await this.apiCall('POST', '/guilds', { name })) as Guild;
+      if (g?.id) this.selectGuild(g.id);
+    } catch (e) {
+      this.toast(`Сервер не создан: ${errMsg(e)}`, 'error');
+    }
+  }
+
+  /** Профиль: аватар (data URI), био, display name — PATCH /users/@me. */
+  async updateProfile(patch: { bio?: string; global_name?: string; avatar?: string | null }): Promise<boolean> {
+    try {
+      const u = (await this.apiCall('PATCH', '/users/@me', patch)) as User;
+      if (u?.id && this.user) this.user = { ...this.user, ...u };
+      this.toast('Профиль обновлён', 'info');
+      return true;
+    } catch (e) {
+      this.toast(`Профиль не обновлён: ${errMsg(e)}`, 'error');
+      return false;
     }
   }
 

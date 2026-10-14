@@ -176,6 +176,10 @@ pub struct Guild {
     /// Кастомные эмодзи сервера (GUILD_CREATE/GUILD_UPDATE для юзер-сессий).
     #[serde(default)]
     pub emojis: Option<Vec<Emoji>>,
+    /// Активные треды гильдии (юзер-GUILD_CREATE несёт отдельный массив
+    /// `threads` — треды идут отдельным массивом, не среди каналов).
+    #[serde(default)]
+    pub threads: Option<Vec<Channel>>,
 }
 
 impl Guild {
@@ -209,8 +213,9 @@ impl Guild {
         let (presences, p_bad) = salvage_list::<Presence>(v.get("presences"));
         let (voice_states, vs_bad) = salvage_list::<VoiceState>(v.get("voice_states"));
         let (emojis, e_bad) = salvage_list::<Emoji>(v.get("emojis"));
+        let (threads, t_bad) = salvage_list::<Channel>(v.get("threads"));
 
-        let bad = ch_bad + role_bad + m_bad + p_bad + vs_bad + e_bad;
+        let bad = ch_bad + role_bad + m_bad + p_bad + vs_bad + e_bad + t_bad;
         if bad > 0 {
             let total = |k: &str| {
                 v.get(k)
@@ -220,7 +225,7 @@ impl Guild {
             };
             tracing::warn!(
                 "gateway: salvage «{}»: каналов {}/{}, пропущено битых — ролей {}/{}, \
-                 участников {}/{}, пресенсов {}/{}, войс {}/{}, эмодзи {}/{}",
+                 участников {}/{}, пресенсов {}/{}, войс {}/{}, эмодзи {}/{}, тредов {}/{}",
                 name,
                 channels.as_ref().map(Vec::len).unwrap_or(0),
                 total("channels"),
@@ -234,6 +239,8 @@ impl Guild {
                 total("voice_states"),
                 e_bad,
                 total("emojis"),
+                t_bad,
+                total("threads"),
             );
         }
 
@@ -256,6 +263,7 @@ impl Guild {
             large: v.get("large").and_then(|x| x.as_bool()),
             unavailable: v.get("unavailable").and_then(|x| x.as_bool()),
             emojis,
+            threads,
         })
     }
 }

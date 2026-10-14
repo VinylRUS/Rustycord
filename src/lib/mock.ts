@@ -99,9 +99,19 @@ const CHANNELS: Channel[] = [
   { id: '1301000000000000306', type: 0, guild_id: GUILD_ID, name: 'разработка', position: 1, parent_id: '1301000000000000304', topic: 'Rust, Tauri, Svelte 5' },
   { id: '1301000000000000307', type: 0, guild_id: GUILD_ID, name: 'реверс-discord', position: 2, parent_id: '1301000000000000304', topic: 'Разбор протоколов Discord' },
   { id: '1301000000000000308', type: 0, guild_id: GUILD_ID, name: 'флудилка', position: 3, parent_id: '1301000000000000304' },
+  // v0.8.0: форум (type 15) среди каналов; треды — отдельным массивом
+  // (как в реальном GUILD_CREATE юзер-сессии).
+  { id: '1301000000000000312', type: 15, guild_id: GUILD_ID, name: 'форум', position: 4, parent_id: '1301000000000000304', topic: 'Посты-обсуждения' },
   { id: '1301000000000000309', type: 4, guild_id: GUILD_ID, name: 'Голосовые', position: 2, parent_id: null },
   { id: '1301000000000000310', type: 2, guild_id: GUILD_ID, name: 'Общий войс', position: 0, parent_id: '1301000000000000309' },
   { id: '1301000000000000311', type: 2, guild_id: GUILD_ID, name: 'Тихая комната', position: 1, parent_id: '1301000000000000309' },
+];
+
+/** Активные треды демо-гильдии: 2 под «общим» + 1 пост форума. */
+const THREADS: Channel[] = [
+  { id: '1301000000000000313', type: 11, guild_id: GUILD_ID, name: 'почему-rust', position: 5, parent_id: '1301000000000000305', owner_id: ALEXEY.id, thread_metadata: { archived: false, auto_archive_duration: 1440, archive_timestamp: '2026-10-01T00:00:00Z', locked: false } },
+  { id: '1301000000000000314', type: 11, guild_id: GUILD_ID, name: 'таури-против-electron', position: 6, parent_id: '1301000000000000305', owner_id: MARINA.id, thread_metadata: { archived: false, auto_archive_duration: 1440, archive_timestamp: '2026-10-01T00:00:00Z', locked: false } },
+  { id: '1301000000000000315', type: 11, guild_id: GUILD_ID, name: 'пост-обсуждение-кода', position: 7, parent_id: '1301000000000000312', owner_id: ALEXEY.id, thread_metadata: { archived: false, auto_archive_duration: 1440, archive_timestamp: '2026-10-01T00:00:00Z', locked: false } },
 ];
 
 const VOICE_STATES: VoiceState[] = [
@@ -124,6 +134,7 @@ const GUILD: Guild = {
     { id: '1094242520372236378', name: 'tableflip', animated: false },
   ],
   channels: CHANNELS,
+  threads: THREADS,
   voice_states: VOICE_STATES,
   presences: PRESENCES,
   member_count: MEMBERS.length,
@@ -651,6 +662,15 @@ export class MockBackend implements Backend {
     /* no-op */
   }
 
+  async submitCaptchaKey(): Promise<boolean> {
+    // Демо никогда не требует капчи, но паритет интерфейса обязателен.
+    return true;
+  }
+
+  async cancelCaptcha(): Promise<boolean> {
+    return true;
+  }
+
   /* ---------- generic REST (мини-эмуляция для настроек сервера) ---------- */
 
   async apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
@@ -797,6 +817,104 @@ export class MockBackend implements Backend {
       const name = (body as { name?: string } | undefined)?.name;
       if (name) this.emit({ type: 'dispatch', t: 'GUILD_UPDATE', d: { ...GUILD, name } });
       return { ok: true };
+    }
+    // ---- v0.8.0: кто поставил реакцию ----
+    if (m === 'GET' && /\/reactions\//.test(path)) {
+      // /channels/{cid}/messages/{mid}/reactions/{emoji} → демо-список
+      return [ME, MARINA, ALEXEY].slice(0, 2 + Math.floor(Math.random() * 2));
+    }
+    // ---- v0.8.0: групповые ЛС (type 3) ----
+    if (m === 'POST' && path === '/users/@me/channels' && Array.isArray((body as { recipients?: string[] })?.recipients)) {
+      const ids = (body as { recipients: string[] }).recipients;
+      const recipients = ids
+        .map((id) => KNOWN_USERS.find((u) => u.id === id) ?? null)
+        .filter(Boolean) as User[];
+      const group: Channel = {
+        id: this.nextId(),
+        type: 3,
+        name: `Группа ${recipients.length + 1}`,
+        recipients,
+        recipient_ids: ids,
+        owner_id: ME.id,
+        icon: null,
+        last_message_id: null,
+      };
+      this.emit({ type: 'dispatch', t: 'CHANNEL_CREATE', d: group });
+      return group;
+    }
+    // ---- v0.8.0: создание сервера ----
+    if (m === 'POST' && path === '/guilds') {
+      const name = String((body as { name?: string } | undefined)?.name ?? 'Новый сервер');
+      const g: Guild = {
+        id: this.nextId(),
+        name,
+        icon: null,
+        owner_id: ME.id,
+        roles: [],
+        channels: [
+          { id: this.nextId(), type: 0, guild_id: '', name: 'общий', position: 0, parent_id: null, topic: 'Создан в RustyCord' },
+        ],
+        voice_states: [],
+        presences: [],
+        member_count: 1,
+        large: false,
+      };
+      (g.channels as Channel[]).forEach((c) => (c.guild_id = g.id));
+      this.emit({ type: 'dispatch', t: 'GUILD_CREATE', d: g });
+      return g;
+    }
+    // ---- v0.8.0: профиль (аватар/био/display name) ----
+    if (m === 'PATCH' && path === '/users/@me') {
+      const b = (body ?? {}) as { bio?: string; global_name?: string; avatar?: string };
+      if (b.bio !== undefined) ME.bio = b.bio;
+      if (b.global_name !== undefined) ME.global_name = b.global_name;
+      if (b.avatar !== undefined) ME.avatar = b.avatar;
+      this.emit({ type: 'dispatch', t: 'USER_UPDATE', d: { ...ME } });
+      return { ...ME };
+    }
+    // ---- v0.8.0: активные треды гильдии ----
+    if (m === 'GET' && /\/guilds\/[^/]+\/threads\/active$/.test(path)) {
+      return { threads: (GUILD.threads ?? []).map((t) => ({ ...t })), members: [] };
+    }
+    // ---- v0.8.0: создание треда/поста (в т.ч. на форуме) ----
+    if (m === 'POST' && /\/channels\/[^/]+\/threads$/.test(path)) {
+      const b = (body ?? {}) as { name?: string; message?: { content?: string } };
+      const parentId = path.split('/')[2];
+      const thread: Channel = {
+        id: this.nextId(),
+        type: 11,
+        guild_id: GUILD_ID,
+        name: b.name ?? 'новая-ветка',
+        parent_id: parentId,
+        owner_id: ME.id,
+        thread_metadata: { archived: false, auto_archive_duration: 1440, archive_timestamp: new Date().toISOString(), locked: false },
+      };
+      GUILD.threads = [...(GUILD.threads ?? []), thread];
+      this.emit({ type: 'dispatch', t: 'THREAD_CREATE', d: thread });
+      if (b.message?.content) {
+        const message = msg(this.seq++, 0, ME, b.message.content, thread.id);
+        message.id = this.nextId();
+        (this.histories[thread.id] ??= []).push(message);
+        this.emit({ type: 'dispatch', t: 'MESSAGE_CREATE', d: { ...message } });
+      }
+      return thread;
+    }
+    // ---- v0.8.0: тред из сообщения (контекст-меню) ----
+    if (m === 'POST' && /\/channels\/[^/]+\/messages\/[^/]+\/threads$/.test(path)) {
+      const b = (body ?? {}) as { name?: string };
+      const channelId = path.split('/')[2];
+      const thread: Channel = {
+        id: this.nextId(),
+        type: 11,
+        guild_id: GUILD_ID,
+        name: b.name ?? 'новая-ветка',
+        parent_id: channelId,
+        owner_id: ME.id,
+        thread_metadata: { archived: false, auto_archive_duration: 1440, archive_timestamp: new Date().toISOString(), locked: false },
+      };
+      GUILD.threads = [...(GUILD.threads ?? []), thread];
+      this.emit({ type: 'dispatch', t: 'THREAD_CREATE', d: thread });
+      return thread;
     }
     throw new Error(`Демо-режим: ${method} ${path} не поддерживается (нужен Tauri + реальный аккаунт)`);
   }

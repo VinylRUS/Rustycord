@@ -101,6 +101,8 @@
           <p class="hint">Открой приложение Discord на телефоне: <b>Настройки → Устройства → Сканировать QR-код</b></p>
         {:else if app.qrStage === 'scanned'}
           <p class="hint ok">Отсканировал{app.qrScannedBy ? ` @${app.qrScannedBy}` : 'и'} — подтвердите вход на телефоне ✅</p>
+        {:else if app.qrStage === 'connecting'}
+        <p class="hint dim">Если Discord попросит капчу — окно проверки откроется поверх</p>
         {:else if app.qrStage === 'timeout' || app.qrStage === 'cancelled' || app.qrStage === 'error'}
           <button class="btn-blurple submit" onclick={() => void app.startQr()}>Попробовать снова</button>
         {/if}
@@ -135,7 +137,7 @@
           </button>
         {/if}
       </form>
-      <p class="note">Иногда Discord требует капчу при входе с нового IP — тогда используй QR-код, он капчу не требует.</p>
+      <p class="note">Если Discord потребует капчу — откроется окно проверки, как в официальном клиенте.</p>
     {:else}
       <form onsubmit={(e) => { e.preventDefault(); void submitToken(); }}>
         <label class="field-label" for="token">ТОКЕН СЕССИИ</label>
@@ -298,6 +300,7 @@
     margin-top: 14px;
     line-height: 1.5;
   }
+  .hint.dim { color: var(--text-muted); font-size: 12.5px; }
   .hint.ok {
     color: #57f287;
     font-weight: 600;

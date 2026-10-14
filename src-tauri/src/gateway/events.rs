@@ -116,6 +116,7 @@ pub async fn handle_dispatch(
                                 roles: Vec::new(),
                                 emojis: Vec::new(),
                                 channels: Vec::new(),
+                                threads: Vec::new(),
                                 members: Default::default(),
                                 presences: Default::default(),
                                 voice_states: Vec::new(),
@@ -295,6 +296,7 @@ pub async fn handle_dispatch(
                         roles: g.roles.clone(),
                         emojis: g.emojis.clone().unwrap_or_default(),
                         channels: Vec::new(),
+                        threads: g.threads.clone().unwrap_or_default(),
                         members: Default::default(),
                         presences: Default::default(),
                         voice_states: Vec::new(),
@@ -520,6 +522,75 @@ pub async fn handle_dispatch(
                 if let Some(gid) = &c.guild_id {
                     if let Some(gs) = cache.guilds.get_mut(gid) {
                         gs.channels.retain(|x| x.id != c.id);
+                        // Треды удалённого родителя больше не показываем.
+                        if matches!(c.kind, 0 | 5 | 15) {
+                            let pid = c.id.clone();
+                            gs.threads
+                                .retain(|t| t.parent_id.as_deref() != Some(pid.as_str()));
+                        }
+                    }
+                }
+            }
+            let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
+        }
+
+        // Треды (v0.8.0): живут отдельной коллекцией гильдии.
+        "THREAD_CREATE" => {
+            if let Ok(th) = serde_json::from_value::<Channel>(d.clone()) {
+                if let Some(gid) = th.guild_id.clone() {
+                    let mut cache = state.cache.write().unwrap();
+                    if let Some(gs) = cache.guilds.get_mut(&gid) {
+                        gs.threads.retain(|x| x.id != th.id);
+                        gs.threads.push(th);
+                    }
+                }
+            }
+            let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
+        }
+
+        "THREAD_UPDATE" => {
+            if let Ok(th) = serde_json::from_value::<Channel>(d.clone()) {
+                if let Some(gid) = th.guild_id.clone() {
+                    let mut cache = state.cache.write().unwrap();
+                    if let Some(gs) = cache.guilds.get_mut(&gid) {
+                        if let Some(slot) = gs.threads.iter_mut().find(|x| x.id == th.id) {
+                            *slot = th;
+                        }
+                    }
+                }
+            }
+            let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
+        }
+
+        "THREAD_DELETE" => {
+            let gid = d["guild_id"].as_str().unwrap_or_default().to_string();
+            let tid = d["id"].as_str().unwrap_or_default().to_string();
+            if !gid.is_empty() && !tid.is_empty() {
+                let mut cache = state.cache.write().unwrap();
+                if let Some(gs) = cache.guilds.get_mut(&gid) {
+                    gs.threads.retain(|x| x.id != tid);
+                }
+            }
+            let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
+        }
+
+        "THREAD_LIST_SYNC" => {
+            // Полный снимок активных тредов гильдии: мержим в кэш.
+            let gid = d["guild_id"].as_str().unwrap_or_default().to_string();
+            if let Some(list) = d.get("threads").and_then(|v| v.as_array()) {
+                let mut fresh: Vec<Channel> = Vec::new();
+                for th in list {
+                    if let Ok(c) = serde_json::from_value::<Channel>(th.clone()) {
+                        fresh.push(c);
+                    }
+                }
+                if !gid.is_empty() {
+                    let mut cache = state.cache.write().unwrap();
+                    if let Some(gs) = cache.guilds.get_mut(&gid) {
+                        for c in fresh {
+                            gs.threads.retain(|x| x.id != c.id);
+                            gs.threads.push(c);
+                        }
                     }
                 }
             }

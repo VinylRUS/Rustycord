@@ -13,6 +13,21 @@
   let addBusy = $state(false);
   let addResult = $state<{ ok: boolean; text: string } | null>(null);
   let confirmingRemove = $state<string | null>(null);
+  /** Создание групповой ЛС (v0.8.0): выбранные друзья. */
+  let groupPick = $state<Record<string, boolean>>({});
+  let groupBusy = $state(false);
+  const picked = $derived(Object.keys(groupPick).filter((id) => groupPick[id]));
+
+  async function createGroup() {
+    if (picked.length < 2 || groupBusy) return;
+    groupBusy = true;
+    const res = await app.createGroupDm(picked);
+    groupBusy = false;
+    if (res) {
+      groupPick = {};
+      addResult = { ok: true, text: 'Группа создана — беседа открыта' };
+    }
+  }
 
   const onlineFriends = $derived(
     app.friendsList.filter((r) => app.friendStatus(r.user.id) !== 'offline'),
@@ -218,6 +233,27 @@
             <div class="add-result" class:ok={addResult.ok} class:err={!addResult.ok}>
               {addResult.ok ? '✅ ' : '⚠️ '}{addResult.text}
             </div>
+          {/if}
+
+          <!-- v0.8.0: групповая ЛС из выбранных друзей -->
+          <div class="group-sep"></div>
+          <h3>Создать групповую беседу</h3>
+          <p class="hint">Выбери двух и более друзей — получится группа (как в оригинале).</p>
+          {#if app.friendsList.length === 0}
+            <p class="hint">Пока нет друзей — сначала добавь кого-нибудь.</p>
+          {:else}
+            <div class="group-pick">
+              {#each app.friendsList as r (r.user.id)}
+                <label class="group-row">
+                  <input type="checkbox" bind:checked={groupPick[r.user.id]} />
+                  <Avatar user={r.user} size={24} ringColor="var(--bg-primary)" />
+                  <span class="name">{displayName(r.user)}</span>
+                </label>
+              {/each}
+            </div>
+            <button class="btn-blurple" onclick={() => void createGroup()} disabled={picked.length < 2 || groupBusy}>
+              {groupBusy ? 'Создаём…' : `Создать группу (${picked.length})`}
+            </button>
           {/if}
         </div>
       {:else}
@@ -610,4 +646,30 @@
     padding: 8px 14px;
     font-size: 13px;
   }
+  /* ---- групповая ЛС ---- */
+  .group-sep {
+    height: 1px;
+    background: #3f4147;
+    margin: 20px 0 14px;
+  }
+  .group-pick {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 6px;
+    margin: 10px 0 14px;
+    max-height: 240px;
+    overflow-y: auto;
+  }
+  .group-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    color: var(--text-normal);
+    font-size: 14px;
+  }
+  .group-row:hover { background: var(--bg-secondary); }
+
 </style>
