@@ -2,7 +2,7 @@
 //! keeps in IndexedDB, we keep in a plain `RwLock`-guarded HashMap) plus
 //! plumbing handles for the gateway task and voice sessions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -169,6 +169,9 @@ pub struct AppState {
     /// Last desired op4 flags (written by join_voice, read by a starting session).
     pub voice_desired: Mutex<HashMap<String, (bool, bool)>>,
     pub voice_notify: tokio::sync::Notify,
+    /// Гильдии, на которые уже отправлены op 37 + op 14 (юзер-сессии).
+    /// Дедуп: повторное открытие сервера не спамит gateway подписками.
+    pub subscribed_guilds: Mutex<HashSet<String>>,
 }
 
 impl AppState {
@@ -191,6 +194,7 @@ impl AppState {
             voice_sessions: Mutex::new(HashMap::new()),
             voice_desired: Mutex::new(HashMap::new()),
             voice_notify: tokio::sync::Notify::new(),
+            subscribed_guilds: Mutex::new(HashSet::new()),
         }
     }
 

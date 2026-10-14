@@ -1,10 +1,19 @@
 <script lang="ts">
   import { app } from '../stores/app.svelte';
+  import { displayName } from '../avatars';
 
   let textareaEl = $state<HTMLTextAreaElement | null>(null);
+  let uploading = $state(false);
 
   const placeholder = $derived(`Написать в ${app.channelTitle ? (app.activeChannel?.type === 1 ? app.channelTitle : '#' + app.channelTitle) : 'канал'}`);
   const editing = $derived(app.editing !== null && app.editing.channelId === app.activeChannelId);
+  const replying = $derived(app.replyTo !== null && app.replyTo.channel_id === app.activeChannelId);
+  const replyName = $derived(
+    app.replyTo
+      ? app.memberById(app.activeGuild?.id ?? '', app.replyTo.author.id)?.nick ||
+        displayName(app.replyTo.author)
+      : '',
+  );
 
   function onKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -14,10 +23,21 @@
       } else {
         void app.sendMessage();
       }
-    } else if (e.key === 'Escape' && editing) {
-      app.cancelEdit();
+    } else if (e.key === 'Escape') {
+      if (editing) app.cancelEdit();
+      else if (replying) app.cancelReply();
     } else {
       void app.typingPing();
+    }
+  }
+
+  async function onAttach() {
+    if (uploading) return;
+    uploading = true;
+    try {
+      await app.uploadAttachments();
+    } finally {
+      uploading = false;
     }
   }
 </script>
@@ -28,9 +48,14 @@
       <span>Изменение сообщения · <b>Esc</b> — отмена</span>
       <button class="cancel" onclick={() => app.cancelEdit()}>Отмена</button>
     </div>
+  {:else if replying}
+    <div class="edit-banner">
+      <span>Ответ <b>{replyName}</b> · <b>Esc</b> — отмена</span>
+      <button class="cancel" onclick={() => app.cancelReply()}>Отмена</button>
+    </div>
   {/if}
   <div class="input">
-    <button class="plus" title="Прикрепить файл (скоро)">+</button>
+    <button class="plus" title="Прикрепить файл" onclick={onAttach} disabled={uploading}>+</button>
     <textarea
       bind:this={textareaEl}
       placeholder={placeholder}
@@ -45,7 +70,7 @@
         }
       }}
     ></textarea>
-    <button class="send emoji-btn" title="Реакция" onclick={() => (app.draft += '👍')}>👍</button>
+    <button class="send emoji-btn" title="Эмодзи в текст" onclick={() => (app.draft += '👍')}>👍</button>
   </div>
 </div>
 
@@ -80,7 +105,8 @@
     border-radius: 50%;
     transition: background 0.1s;
   }
-  .plus:hover { background: #ffffff14; }
+  .plus:hover:not(:disabled) { background: #ffffff14; }
+  .plus:disabled { opacity: 0.5; cursor: wait; }
   textarea {
     flex: 1;
     resize: none;

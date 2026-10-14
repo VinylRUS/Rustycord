@@ -8,7 +8,7 @@
  *     is exactly what the Rust core receives from the real Gateway.
  */
 import type { Backend, GetMessageOptions } from './ipc';
-import type { BackendEvent, Channel, Guild, LoginResult, Member, Message, PluginInfo, PluginMeta, Presence, Relationship, Role, SnowflakeInfo, StateSnapshot, User, VoiceState } from './types';
+import type { BackendEvent, Channel, Guild, LoginResult, Member, Message, PluginInfo, PluginMeta, Presence, Relationship, Role, SnowflakeInfo, StateSnapshot, UpdateInfo, User, UserProfile, VoiceState } from './types';
 import { parseSnowflakeLocal } from './time';
 
 /* ---------- helpers ---------- */
@@ -196,6 +196,40 @@ const HISTORY: Record<string, Message[]> = {
       ],
     }),
     msg(6, 30 * H, MARINA, 'Скинула дамп опкодов в <#1301000000000000307> — гляньте, всё сходится с discord.py.', CH_GENERAL),
+    msg(7, 28 * H, OLYA, 'Свежий скрин архитектуры:', CH_GENERAL, {
+      attachments: [
+        {
+          id: '1301000000000000991',
+          filename: 'rustycord-arch.png',
+          size: 204800,
+          url: 'https://picsum.photos/seed/rustycord/640/360',
+          content_type: 'image/png',
+          width: 640,
+          height: 360,
+        },
+      ],
+    }),
+    msg(8, 27 * H, ALEXEY, '', CH_GENERAL, {
+      embeds: [
+        {
+          type: 'link',
+          title: 'RustyCord — лёгкий Discord-клиент на Rust',
+          description: 'Tauri + Svelte 5 вместо Electron: **~10 МБ** против ~200 МБ, память ниже на порядок.',
+          url: 'https://github.com/VinylRUS/Rustycord',
+          color: 0x5865f2,
+          footer: { text: 'github.com · звёзд приветствуются' },
+        },
+      ],
+    }),
+    msg(9, 20 * H, DMITRY, 'Голос уже проверил? Songbird тянет и микрофон, и приём — звук чистый.', CH_GENERAL, {
+      sticker_items: [{ id: '1301000000000000993', name: 'Crab Rave', format_type: 3 }],
+    }),
+    msg(10, 12 * H, MARINA, 'Кстати, ответы теперь работают — попробуй ответить на это сообщение (правый клик → Ответить).', CH_GENERAL, {
+      pinned: true,
+    }),
+    msg(11, 11.8 * H, ALEXEY, 'И закреплённые тоже — жми 📌 в шапке канала.', CH_GENERAL, {
+      message_reference: { message_id: sf(12 * H, 10), channel_id: CH_GENERAL },
+    }),
     msg(7, 29 * H, DMITRY, 'RESUME работает? Если соединение порвётся, сессия подхватится без потери событий?', CH_GENERAL),
     msg(8, 28.9 * H, ALEXEY, 'Да: `session_id` + `sequence number`, и события за простой добираются сервером. Даже `resume_gateway_url` поддерживаем.', CH_GENERAL, {
       edited_timestamp: new Date(Date.now() - 28 * H).toISOString(),
@@ -335,6 +369,8 @@ export class MockBackend implements Backend {
       d: {
         user: ME,
         session_id: 'demo-session-42',
+        // users — справочник участников ЛС (как в реальном юзер-READY).
+        users: KNOWN_USERS.map((u) => ({ ...u })),
         relationships: this.relationships.map((r) => ({ ...r })),
         private_channels: DMS.map((c) => ({ ...c })),
         presences: FRIEND_PRESENCES.map((p) => ({ ...p })),
@@ -408,9 +444,15 @@ export class MockBackend implements Backend {
     return (this.histories[channelId] ?? []).map((m) => ({ ...m }));
   }
 
-  async sendMessage(channelId: string, content: string): Promise<Message> {
+  async sendMessage(channelId: string, content: string, replyTo?: string): Promise<Message> {
     const message = msg(this.seq++, 0, ME, content, channelId);
     message.id = this.nextId();
+    // Ответ: проставляем ссылку и вложенное сообщение — как реальный gateway.
+    if (replyTo) {
+      const parent = (this.histories[channelId] ?? []).find((m) => m.id === replyTo) ?? null;
+      message.message_reference = { message_id: replyTo, channel_id: channelId };
+      message.referenced_message = parent ? { ...parent } : null;
+    }
     (this.histories[channelId] ??= []).push(message);
     // A friendly member sometimes reacts to us.
     if (Math.random() < 0.5) {
@@ -480,6 +522,33 @@ export class MockBackend implements Backend {
       t: 'GUILD_MEMBERS_CHUNK',
       d: { guild_id: guildId, members: this.members, chunk_index: 0, chunk_count: 1 },
     });
+  }
+
+  /* ---------- v0.6.0: подписки, обновления, файлы ---------- */
+
+  async subscribeGuild(_guildId: string): Promise<void> {
+    /* демо-режим: все события и так приходят из локальной симуляции */
+  }
+
+  async checkUpdate(): Promise<UpdateInfo | null> {
+    // В демо обновлений нет — как в самой свежей сборке ;)
+    return {
+      current: '0.6.0',
+      latest: '0.6.0',
+      is_newer: false,
+      url: 'https://github.com/VinylRUS/Rustycord/releases/latest',
+      notes: '',
+      published_at: '',
+      no_releases: false,
+    };
+  }
+
+  async uploadFiles(_channelId: string, _paths: string[], _content?: string): Promise<Message> {
+    throw new Error('В демо-режиме загрузка файлов недоступна — запусти приложение');
+  }
+
+  async getLogPath(): Promise<string> {
+    return 'демо-режим: логи пишутся только в приложении';
   }
 
   async gatewaySendRaw(frame: string): Promise<void> {
@@ -606,6 +675,43 @@ export class MockBackend implements Backend {
       throw new Error(`Демо-режим: ${method} ${path} не поддерживается`);
     }
     if (/\/bans$/.test(path) && m === 'GET') return [];
+    // ---- v0.6.0: пины, поиск, профили, статус ----
+    if (m === 'GET' && /\/channels\/[^/]+\/pins$/.test(path)) {
+      const id = path.split('/')[2];
+      return Object.values(this.histories)
+        .flat()
+        .filter((x) => x.channel_id === id && x.pinned)
+        .map((x) => ({ ...x }));
+    }
+    if ((m === 'PUT' || m === 'DELETE') && /\/channels\/[^/]+\/pins\/.+$/.test(path)) {
+      const id = path.split('/')[2];
+      const mid = path.split('/').pop() ?? '';
+      const target = (this.histories[id] ?? []).find((x) => x.id === mid);
+      if (target) target.pinned = m === 'PUT';
+      return null;
+    }
+    if (m === 'GET' && /\/channels\/[^/]+\/messages\/search/.test(path)) {
+      const id = path.split('/')[2];
+      const q = decodeURIComponent(path.split('query=')[1] ?? '').toLowerCase();
+      const hits = (this.histories[id] ?? []).filter((x) => x.content.toLowerCase().includes(q));
+      return { messages: hits.map((x) => [{ ...x }]), total_results: hits.length };
+    }
+    if (m === 'GET' && /^\/users\/[^/]+\/profile$/.test(path)) {
+      const uid = path.split('/')[2];
+      const u = KNOWN_USERS.find((x) => x.id === uid) ?? ME;
+      const profile: UserProfile & { user: User } = {
+        user: u,
+        bio: 'Демо-профиль: био, баннер и общие сервера приходят из /users/{id}/profile.',
+        banner: null,
+        premium_type: u.id === MARINA.id ? 2 : 0,
+        mutual_guilds: [{ id: GUILD_ID, nick: null }],
+        mutual_friends_count: 3,
+      };
+      return profile;
+    }
+    if (m === 'PATCH' && path === '/users/@me/settings') {
+      return { status: (body as { status?: string } | undefined)?.status ?? 'online' };
+    }
     if (m === 'POST' && /^\/invites\/.+/.test(path)) {
       // Демо: вступление по приглашению — GUILD_CREATE приезжает как в реальном клиенте.
       const newGuild: Guild = {

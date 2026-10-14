@@ -82,6 +82,8 @@
     <path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14" />
   {:else if name === 'pencil'}
     <path d="M4 20h4L20.5 7.5a2.1 2.1 0 0 0-3-3L5 17z" />
+  {:else if name === 'reply'}
+    <path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z" />
   {:else if name === 'emoji'}
     <circle cx="12" cy="12" r="9.5" />
     <circle cx="9" cy="10" r="1" fill="currentColor" stroke="none" />

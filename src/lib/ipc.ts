@@ -20,6 +20,7 @@ import type {
   Relationship,
   SnowflakeInfo,
   StateSnapshot,
+  UpdateInfo,
   User,
 } from './types';
 
@@ -44,7 +45,7 @@ export interface Backend {
 
   // REST-ish
   getMessages(channelId: string, opts?: GetMessageOptions): Promise<Message[]>;
-  sendMessage(channelId: string, content: string): Promise<Message>;
+  sendMessage(channelId: string, content: string, replyTo?: string): Promise<Message>;
   editMessage(channelId: string, messageId: string, content: string): Promise<Message>;
   deleteMessage(channelId: string, messageId: string): Promise<void>;
   addReaction(channelId: string, messageId: string, emoji: string): Promise<void>;
@@ -55,6 +56,16 @@ export interface Backend {
   gatewaySendRaw(frame: string): Promise<void>;
   kickMember(guildId: string, userId: string): Promise<void>;
   banMember(guildId: string, userId: string): Promise<void>;
+
+  // v0.6.0: подписки, обновления, файлы
+  /** Юзер-сессии: op 37 + op 14 на гильдию (вызывается при её открытии). */
+  subscribeGuild(guildId: string): Promise<void>;
+  /** Проверка релизов на GitHub — null, если проверить не удалось. */
+  checkUpdate(): Promise<UpdateInfo | null>;
+  /** Загрузка файлов в канал (multipart). paths — абсолютные пути из диалога. */
+  uploadFiles(channelId: string, paths: string[], content?: string): Promise<Message>;
+  /** Путь к файлу логов (для баг-репортов). */
+  getLogPath(): Promise<string>;
 
   // друзья и личные беседы (v0.4.0)
   /** Открыть (или создать) DM с пользователем — POST /users/@me/channels. */
@@ -87,7 +98,7 @@ export interface Backend {
 /* Tauri implementation                                                */
 /* ------------------------------------------------------------------ */
 
-export class TauriBackend implements Backend {
+class TauriBackend implements Backend {
   readonly mode = 'tauri' as const;
 
   private async invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -131,8 +142,8 @@ export class TauriBackend implements Backend {
     });
   }
 
-  async sendMessage(channelId: string, content: string): Promise<Message> {
-    return this.invoke<Message>('send_message', { channelId, content });
+  async sendMessage(channelId: string, content: string, replyTo?: string): Promise<Message> {
+    return this.invoke<Message>('send_message', { channelId, content, replyTo: replyTo ?? null });
   }
 
   async editMessage(channelId: string, messageId: string, content: string): Promise<Message> {
@@ -215,6 +226,26 @@ export class TauriBackend implements Backend {
     return this.invoke<SnowflakeInfo>('parse_snowflake', { id });
   }
 
+  async subscribeGuild(guildId: string): Promise<void> {
+    await this.invoke('subscribe_guild', { guildId });
+  }
+
+  async checkUpdate(): Promise<UpdateInfo | null> {
+    try {
+      return await this.invoke<UpdateInfo>('check_update');
+    } catch {
+      return null; // без сети/на дев-сборке — молча
+    }
+  }
+
+  async uploadFiles(channelId: string, paths: string[], content?: string): Promise<Message> {
+    return this.invoke<Message>('upload_files', { channelId, paths, content: content ?? null });
+  }
+
+  async getLogPath(): Promise<string> {
+    return this.invoke<string>('get_log_path');
+  }
+
   onEvent(handler: (ev: BackendEvent) => void): () => void {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
@@ -251,14 +282,8 @@ export class TauriBackend implements Backend {
 /* Factory                                                             */
 /* ------------------------------------------------------------------ */
 
-export function detectMode(): 'tauri' | 'mock' {
-  // Tauri injects this global before any user script runs.
-  return '__TAURI_INTERNALS__' in window ? 'tauri' : 'mock';
-}
-
-export async function createBackend(mode?: 'tauri' | 'mock'): Promise<Backend> {
-  const m = mode ?? detectMode();
-  if (m === 'tauri') return new TauriBackend();
+export async function createBackend(mode: 'tauri' | 'mock'): Promise<Backend> {
+  if (mode === 'tauri') return new TauriBackend();
   const { MockBackend } = await import('./mock');
   return new MockBackend();
 }

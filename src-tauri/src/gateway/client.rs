@@ -121,11 +121,19 @@ async fn run_session(
         .unwrap()
         .trim_end_matches('/')
         .to_string();
+    // Версия протокола: юзер-сессии — v9 (ровно как официальный веб-клиент
+    // и все self-hosted реализации; v10 — только бот-режим). RESUME обязан
+    // идти на той же версии, что и исходный IDENTIFY.
+    let ver = if state.is_bot.load(Ordering::SeqCst) {
+        10
+    } else {
+        9
+    };
     // READY hands us a dedicated resume_gateway_url — using it is the
     // documented (and reverse-engineered) way to resume safely.
     let url = match (&session.id, &session.resume_url) {
-        (Some(_), Some(resume)) => format!("{resume}/?v=10&encoding=json"),
-        _ => format!("{base}/?v=10&encoding=json"),
+        (Some(_), Some(resume)) => format!("{resume}/?v={ver}&encoding=json"),
+        _ => format!("{base}/?v={ver}&encoding=json"),
     };
     tracing::info!("gateway: подключение к {url}");
 
@@ -188,15 +196,15 @@ async fn run_session(
             })
         } else {
             tracing::info!(
-                "gateway: IDENTIFY (юзер) capabilities={USER_CAPABILITIES} без интентов"
+                "gateway: IDENTIFY (юзер) capabilities={USER_CAPABILITIES} без интентов, presence=unknown"
             );
             json!({
                 "token": token,
                 "capabilities": USER_CAPABILITIES,
                 "properties": client_properties(build),
                 "presence": {
-                    "status": "online",
-                    "since": null,
+                    "status": "unknown",
+                    "since": 0,
                     "activities": [],
                     "afk": false
                 },
@@ -304,13 +312,15 @@ async fn run_session(
                         let v: Value = serde_json::from_str(&text).context("битый JSON кадра")?;
                         match v["op"].as_u64().unwrap_or(u64::MAX) {
                             0 => {
-                                // DISPATCH: t = event name, s = sequence, d = payload
+                                // DISPATCH: t = event name, s = sequence, d = payload.
+                                // Разбор больше не фатален: кривое событие
+                                // логируется внутри, но сессию НЕ убивает.
                                 let t = v["t"].as_str().unwrap_or("").to_string();
                                 if let Some(s) = v["s"].as_u64() {
                                     session.seq = Some(s);
                                 }
                                 let d = v["d"].clone();
-                                handle_dispatch(app, state, &t, d, session).await?;
+                                handle_dispatch(app, state, &t, d, session).await;
                             }
                             1 => {
                                 // Сервер сам попросил пульс — отвечаем немедленно.
@@ -343,7 +353,7 @@ async fn run_session(
                         tracing::warn!("gateway: закрыто сервером, код {code} ({})", cf.reason);
                         match code {
                             4004 => return Ok(End::Fatal("Токен отклонён (close 4004). Возможно, сессия сброшена — войди заново.".into())),
-                            4010 | 4011 => return Ok(End::Fatal("Неподдерживаемая конфигурация шардирования (close {code}).".into())),
+                            4010 | 4011 => return Ok(End::Fatal(format!("Неподдерживаемая конфигурация шардирования (close {code})."))),
                             4013 | 4014 => {
                                 // Privileged intents выключены в Developer Portal.
                                 state.intents.store(INTENTS_FALLBACK, Ordering::SeqCst);
@@ -355,7 +365,15 @@ async fn run_session(
                                 );
                                 return Ok(End::Reconnect);
                             }
-                            _ => return Ok(End::Reconnect),
+                            // Причина обрыва — в detail статуса: фронтенд показывает
+                            // её в баннере, чтобы не гадать «почему отвалилось».
+                            _ => {
+                                state.emit_status(
+                                    "reconnecting",
+                                    Some(format!("close {code}: {}", cf.reason)),
+                                );
+                                return Ok(End::Reconnect);
+                            }
                         }
                     }
                     Message::Close(None) => return Ok(End::Reconnect),

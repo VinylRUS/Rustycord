@@ -16,6 +16,7 @@ use crate::rest::models::{Channel, CurrentUser, Message, Relationship};
 use crate::snowflake;
 use crate::state::{AppState, GatewayCommand, INTENTS_BOT};
 use crate::superprops;
+use crate::updater;
 use crate::voice::coordinator;
 
 fn es<E: std::fmt::Display>(e: E) -> String {
@@ -169,6 +170,8 @@ pub async fn connect(
     state.cache.write().unwrap().reset();
     state.cache.write().unwrap().user = Some(me.clone());
     *state.token.write().unwrap() = Some(token);
+    // Подписки op 37/14 — заново для новой сессии.
+    state.subscribed_guilds.lock().unwrap().clear();
     // Бот или юзер? От этого зависит формат IDENTIFY: юзеры шлют
     // capabilities без intents (как официальный клиент) — иначе гильдии
     // и события могут не приехать. Интенты — только ботам.
@@ -462,21 +465,6 @@ pub async fn get_state(state: State<'_, Arc<AppState>>) -> Result<Value, String>
     }))
 }
 
-#[tauri::command]
-pub async fn get_dm_channels(state: State<'_, Arc<AppState>>) -> Result<Vec<Channel>, String> {
-    let rest = rest_of(&state)?;
-    let dms: Vec<Channel> = rest.get_json("/users/@me/channels").await.map_err(es)?;
-    {
-        let mut cache = state.cache.write().unwrap();
-        for c in &dms {
-            if !cache.dms.iter().any(|x| x.id == c.id) {
-                cache.dms.push(c.clone());
-            }
-        }
-    }
-    Ok(dms)
-}
-
 /// Начать личную беседу с пользователем (юзер-аккаунт): POST
 /// /users/@me/channels {recipient_id}. Возвращает существующий DM-канал,
 /// если переписка уже была — Discord идемпотентен к получателю.
@@ -557,13 +545,18 @@ pub async fn send_message(
     state: State<'_, Arc<AppState>>,
     channel_id: String,
     content: String,
+    reply_to: Option<String>,
 ) -> Result<Message, String> {
     let rest = rest_of(&state)?;
     let path = format!("/channels/{channel_id}/messages");
-    let msg: Message = rest
-        .post_json(&path, json!({ "content": content, "tts": false }))
-        .await
-        .map_err(es)?;
+    // Ответ: message_reference + allowed_mentions без поля `replied_user`
+    // не работает — как в оригинале, упоминание автора подставляем сами.
+    let mut body = json!({ "content": content, "tts": false });
+    if let Some(reply_id) = reply_to {
+        body["message_reference"] = json!({ "message_id": reply_id });
+        body["allowed_mentions"] = json!({ "parse": ["users", "roles", "everyone"] });
+    }
+    let msg: Message = rest.post_json(&path, body).await.map_err(es)?;
     Ok(msg)
 }
 
@@ -759,4 +752,142 @@ pub async fn join_voice(
 #[tauri::command]
 pub async fn parse_snowflake(id: String) -> Result<snowflake::SnowflakeInfo, String> {
     snowflake::parse(&id).map_err(es)
+}
+
+/* ==================== v0.6.0: подписки / апдейты / файлы ==================== */
+
+/// Подписаться на события гильдии (юзер-сессии): op 37 на сам сервер +
+/// op 14 на ленивый список участников первых каналов. Вызывается фронтендом
+/// при открытии сервера; повторные вызовы дедуплицируются.
+#[tauri::command]
+pub async fn subscribe_guild(
+    state: State<'_, Arc<AppState>>,
+    guild_id: String,
+) -> Result<(), String> {
+    if state.is_bot.load(Ordering::SeqCst) {
+        return Ok(()); // ботам хватает op 8 (request_members)
+    }
+    {
+        let mut subs = state.subscribed_guilds.lock().unwrap();
+        if subs.contains(&guild_id) {
+            return Ok(());
+        }
+        subs.insert(guild_id.clone());
+    }
+    let tx = state
+        .gateway_tx
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or("Gateway не подключён")?;
+    tx.send(GatewayCommand::BulkGuildSubscribe {
+        guild_ids: vec![guild_id.clone()],
+    })
+    .await
+    .map_err(es)?;
+    // op 14: текстовые/войс-каналы из кэша — первые 10, диапазон [0, 99].
+    let channels: Vec<(String, Vec<u32>)> = {
+        let cache = state.cache.read().unwrap();
+        cache
+            .guilds
+            .get(&guild_id)
+            .map(|gs| {
+                gs.channels
+                    .iter()
+                    .filter(|c| matches!(c.kind, 0 | 2 | 5 | 13))
+                    .take(10)
+                    .map(|c| (c.id.clone(), vec![0, 99]))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if !channels.is_empty() {
+        tx.send(GatewayCommand::SubscribeMemberList { guild_id, channels })
+            .await
+            .map_err(es)?;
+    }
+    Ok(())
+}
+
+/// Проверить обновление на GitHub Releases. Текущая версия — из пакета
+/// Tauri (тот же источник, что и в tauri.conf.json).
+#[tauri::command]
+pub async fn check_update(app: tauri::AppHandle) -> Result<Value, String> {
+    let current = app.package_info().version.to_string();
+    let info = updater::check(&current).await?;
+    Ok(updater::to_value(&info))
+}
+
+/// Загрузить файлы в канал: multipart POST /channels/{id}/messages.
+/// `paths` — абсолютные пути (их отдаёт файловый диалог Tauri).
+#[tauri::command]
+pub async fn upload_files(
+    state: State<'_, Arc<AppState>>,
+    channel_id: String,
+    paths: Vec<String>,
+    content: Option<String>,
+) -> Result<Message, String> {
+    if paths.is_empty() {
+        return Err("Файлы не выбраны".into());
+    }
+    if paths.len() > 10 {
+        return Err("Максимум 10 файлов за раз (как в оригинале)".into());
+    }
+    let rest = rest_of(&state)?;
+    let mut files: Vec<(String, String, Vec<u8>)> = Vec::with_capacity(paths.len());
+    for p in &paths {
+        let path = std::path::Path::new(p);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string());
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| format!("Не прочитать {name}: {e}"))?;
+        if bytes.len() > 25 * 1024 * 1024 {
+            return Err(format!(
+                "{name}: больше 25 МБ (лимит загрузки Discord — 25 МБ без Nitro)"
+            ));
+        }
+        let mime = mime_for(&name);
+        files.push((name, mime, bytes));
+    }
+    let path = format!("/channels/{channel_id}/messages");
+    let msg: Message = rest
+        .post_multipart(&path, content.as_deref(), &files)
+        .await
+        .map_err(es)?;
+    Ok(msg)
+}
+
+/// Простая карта расширение → MIME (угадываем, иначе octet-stream).
+fn mime_for(name: &str) -> String {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mp3" => "audio/mpeg",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "txt" => "text/plain",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "json" => "application/json",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+/// Путь к файлу логов — показываем в настройках, чтобы баг-репорты
+/// можно было прикладывать к issue на GitHub.
+#[tauri::command]
+pub async fn get_log_path() -> Result<String, String> {
+    Ok(crate::log_file_path())
 }

@@ -4,9 +4,33 @@
   import { displayName } from '../avatars';
   import Avatar from './Avatar.svelte';
   import Icon from './Icon.svelte';
+  import { menu } from '../stores/menu.svelte';
 
   let collapsed = $state<Record<string, boolean>>({});
   let dmFilter = $state('');
+
+  const STATUSES: { id: 'online' | 'idle' | 'dnd' | 'invisible'; label: string }[] = [
+    { id: 'online', label: 'В сети' },
+    { id: 'idle', label: 'Неактивен' },
+    { id: 'dnd', label: 'Не беспокоить' },
+    { id: 'invisible', label: 'Невидимка' },
+  ];
+
+  /** Клик по своему аватару: выбор статуса (юзер-аккаунт). */
+  function statusMenu(e: MouseEvent) {
+    if (app.isBotAccount) {
+      app.showSettings = true;
+      return;
+    }
+    menu.show(
+      e.clientX,
+      e.clientY,
+      STATUSES.map((s) => ({
+        label: `${s.label}${app.myStatus === s.id ? ' ✓' : ''}`,
+        action: () => void app.setStatus(s.id),
+      })),
+    );
+  }
 
   const isGuild = $derived(app.activeGuildId !== null);
   const guild = $derived(app.activeGuild);
@@ -160,8 +184,13 @@
 
   <!-- User panel -->
   <footer class="user-panel">
-    <div class="user-id">
-      <Avatar user={app.user} size={32} status="online" ringColor="var(--bg-secondary)" />
+    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+    <div
+      class="user-id clickable"
+      title={app.isBotAccount ? 'Профиль' : 'Сменить статус'}
+      onclick={(e) => statusMenu(e)}
+    >
+      <Avatar user={app.user} size={32} status={app.isBotAccount ? 'online' : app.myStatus} ringColor="var(--bg-secondary)" />
       <div class="user-meta">
         <span class="username truncate">{app.user ? (app.user.global_name || app.user.username) : '—'}</span>
         <span class="usertag truncate">{app.user ? `@${app.user.username}` : ''}</span>
@@ -420,7 +449,8 @@
     padding: 0 8px;
     flex-shrink: 0;
   }
-  .user-id { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .user-id { display: flex; align-items: center; gap: 8px; min-width: 0; border-radius: var(--radius-sm); padding: 2px; }
+  .user-id.clickable:hover { background: var(--bg-modifier-hover); }
   .user-meta { display: flex; flex-direction: column; min-width: 0; }
   .username { color: #fff; font-size: 13px; font-weight: 600; line-height: 1.2; }
   .usertag { color: var(--text-muted); font-size: 11px; line-height: 1.2; }

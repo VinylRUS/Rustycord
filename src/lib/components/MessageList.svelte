@@ -106,7 +106,9 @@
         <span class="line"></span>
       </div>
     {:else}
-      <MessageItem message={row.message} grouped={row.grouped} />
+      <div data-mid={row.message.id}>
+        <MessageItem message={row.message} grouped={row.grouped} />
+      </div>
     {/if}
   {/each}
 </div>

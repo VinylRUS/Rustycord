@@ -80,8 +80,10 @@ export interface Channel {
   last_message_id?: string | null;
   parent_id?: string | null;
   rate_limit_per_user?: number;
-  // DM channels
+  // DM channels: полный список юзеров (REST) либо только айдишники
+  // (юзер-READY шлёт recipient_ids — полные объекты в отдельном массиве users).
   recipients?: User[];
+  recipient_ids?: string[];
   owner_id?: string;
   icon?: string | null;
 }
@@ -133,6 +135,20 @@ export interface MessageEmbed {
   description?: string;
   url?: string;
   color?: number | null;
+  author?: { name?: string; url?: string; icon_url?: string };
+  image?: { url?: string; proxy_url?: string; width?: number; height?: number } | null;
+  thumbnail?: { url?: string; proxy_url?: string; width?: number; height?: number } | null;
+  video?: { url?: string; width?: number; height?: number } | null;
+  footer?: { text?: string; icon_url?: string } | null;
+  fields?: { name: string; value: string; inline?: boolean }[];
+}
+
+/** Стикер в сообщении (Lottie рендерим как заглушку, PNG/APNG — как img). */
+export interface StickerItem {
+  id: string;
+  name: string;
+  /** 1 = PNG, 2 = APNG, 3 = LOTTIE. */
+  format_type?: number;
 }
 
 export interface Message {
@@ -150,9 +166,37 @@ export interface Message {
   mention_roles?: string[];
   attachments: Attachment[];
   embeds: MessageEmbed[];
+  sticker_items?: StickerItem[];
+  /** Ссылка на сообщение-родитель (ответ). */
+  message_reference?: { message_id?: string; channel_id?: string; guild_id?: string } | null;
+  /** Присутствует в REST-выдаче и в gateway-эхе своего ответа. */
+  referenced_message?: Message | null;
   reactions?: Reaction[] | null;
   pinned: boolean;
   type: number;
+}
+
+/** Расширенный профиль (GET /users/{id}/profile — только юзер-токены). */
+export interface UserProfile {
+  bio?: string;
+  banner?: string | null;
+  accent_color?: number | null;
+  premium_type?: number;
+  premium_since?: string | null;
+  mutual_guilds?: { id: string; nick?: string | null }[];
+  mutual_friends_count?: number;
+  user?: User;
+}
+
+/** Результат проверки обновлений (Rust check_update). */
+export interface UpdateInfo {
+  current: string;
+  latest: string;
+  is_newer: boolean;
+  url: string;
+  notes: string;
+  published_at: string;
+  no_releases: boolean;
 }
 
 /* ---------- Our own IPC payload types ---------- */

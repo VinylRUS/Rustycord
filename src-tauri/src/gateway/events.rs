@@ -1,7 +1,6 @@
 //! Gateway DISPATCH routing: update the Rust cache, forward everything to
 //! the UI, and assemble voice handshakes from the two-voice-event dance.
 
-use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use tauri::Emitter;
@@ -23,31 +22,13 @@ pub struct SessionData {
     pub seq: Option<u64>,
 }
 
-/// Идентификаторы каналов из GUILD_CREATE — только текст/войс/анонсы
-/// (категории и форумы в ленивом списке участников не участвуют).
-fn gs_channel_ids(channels: Option<&Value>) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(arr) = channels.and_then(|v| v.as_array()) {
-        for ch in arr {
-            let kind = ch["type"].as_i64().unwrap_or(-1);
-            // 0 — текст, 2 — войс, 5 — анонсы, 13 — стейдж
-            if matches!(kind, 0 | 2 | 5 | 13) {
-                if let Some(id) = ch["id"].as_str() {
-                    out.push(id.to_string());
-                }
-            }
-        }
-    }
-    out
-}
-
 pub async fn handle_dispatch(
     app: &tauri::AppHandle,
     state: &SharedState,
     t: &str,
     d: Value,
     session: &mut SessionData,
-) -> Result<()> {
+) {
     match t {
         "READY" => {
             let user_id = d["user"]["id"].as_str().unwrap_or_default().to_string();
@@ -118,30 +99,13 @@ pub async fn handle_dispatch(
                 "discord://ready",
                 json!({ "user": d["user"], "session_id": session_id }),
             );
-            // Юзер-сессия: сразу подписываемся на события всех гильдий (op 37)
-            // — как официальный клиент. Без этого пресенсы/участники гильдий
-            // могут не поехать (intents юзеры не шлют).
-            if !state.is_bot.load(Ordering::SeqCst) {
-                let guild_ids: Vec<String> = d["guilds"]
-                    .as_array()
-                    .map(|gs| {
-                        gs.iter()
-                            .filter_map(|g| g["id"].as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if !guild_ids.is_empty() {
-                    if let Some(tx) = state.gateway_tx.read().unwrap().as_ref() {
-                        let _ = tx.try_send(crate::state::GatewayCommand::BulkGuildSubscribe {
-                            guild_ids,
-                        });
-                    }
-                }
-            }
+            // ПОДПИСКИ (op 37 / op 14) больше не летат автоматом после READY:
+            // шторм пакетов по всем гильдиям сразу подозревался в обвале
+            // сессии (close без видимой причины). Теперь фронтенд подписывается
+            // точечно — при открытии гильдии (см. commands::subscribe_guild).
             // Полный READY вперёд как dispatch: фронтенду нужны
-            // private_channels, relationships и presences, которых нет в
-            // коротком ready-событии выше. Без этого список ЛС и друзья
-            // оставались бы пустыми до первого CHANNEL_CREATE.
+            // private_channels (recipient_ids!), users, relationships
+            // и presences, которых нет в коротком ready-событии выше.
             let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
             state.emit_status("connected", None);
         }
@@ -173,74 +137,68 @@ pub async fn handle_dispatch(
         }
 
         "GUILD_CREATE" => {
-            let g: Guild =
-                serde_json::from_value(d.clone()).context("не удалось разобрать GUILD_CREATE")?;
-            let needs_chunk = g.members.as_ref().map_or(true, |m| m.is_empty());
-            {
-                let mut cache = state.cache.write().unwrap();
-                let mut gs = GuildState {
-                    id: g.id.clone(),
-                    name: g.name.clone(),
-                    icon: g.icon.clone(),
-                    banner: g.banner.clone(),
-                    owner_id: g.owner_id.clone(),
-                    roles: g.roles.clone(),
-                    emojis: g.emojis.clone().unwrap_or_default(),
-                    channels: Vec::new(),
-                    members: Default::default(),
-                    presences: Default::default(),
-                    voice_states: Vec::new(),
-                    member_count: g.member_count.unwrap_or(0),
-                };
-                if let Some(chs) = &g.channels {
-                    gs.channels = chs.clone();
-                }
-                if let Some(members) = &g.members {
-                    for m in members {
-                        if let Some(uid) = m.user.as_ref().map(|u| u.id.clone()) {
-                            gs.members.insert(uid, m.clone());
+            // Мягкий разбор: одна кривая гильдия не должна ронять ВСЮ сессию
+            // (раньше `?` здесь убивал соединение → бесконечный reconnect).
+            let parsed: Option<Guild> = serde_json::from_value(d.clone()).ok();
+            let needs_chunk = parsed
+                .as_ref()
+                .map_or(true, |g| g.members.as_ref().map_or(true, |m| m.is_empty()));
+            if let Some(g) = parsed {
+                {
+                    let mut cache = state.cache.write().unwrap();
+                    let mut gs = GuildState {
+                        id: g.id.clone(),
+                        name: g.name.clone(),
+                        icon: g.icon.clone(),
+                        banner: g.banner.clone(),
+                        owner_id: g.owner_id.clone(),
+                        roles: g.roles.clone(),
+                        emojis: g.emojis.clone().unwrap_or_default(),
+                        channels: Vec::new(),
+                        members: Default::default(),
+                        presences: Default::default(),
+                        voice_states: Vec::new(),
+                        member_count: g.member_count.unwrap_or(0),
+                    };
+                    if let Some(chs) = &g.channels {
+                        gs.channels = chs.clone();
+                    }
+                    if let Some(members) = &g.members {
+                        for m in members {
+                            if let Some(uid) = m.user.as_ref().map(|u| u.id.clone()) {
+                                gs.members.insert(uid, m.clone());
+                            }
                         }
                     }
-                }
-                if let Some(presences) = &g.presences {
-                    for p in presences {
-                        gs.presences.insert(p.user.id.clone(), p.clone());
+                    if let Some(presences) = &g.presences {
+                        for p in presences {
+                            gs.presences.insert(p.user.id.clone(), p.clone());
+                        }
                     }
+                    if let Some(vs) = &g.voice_states {
+                        gs.voice_states = vs.clone();
+                    }
+                    cache.guilds.insert(g.id.clone(), gs);
                 }
-                if let Some(vs) = &g.voice_states {
-                    gs.voice_states = vs.clone();
-                }
-                cache.guilds.insert(g.id.clone(), gs);
-            }
-            tracing::info!(
-                "gateway: GUILD_CREATE «{}» ({} каналов)",
-                g.name,
-                g.channels.as_ref().map(Vec::len).unwrap_or(0)
-            );
-            // Участники: боты просят полный список (op 8); юзеры — ленивые
-            // диапазоны (op 14) — так делает официальный клиент.
-            if needs_chunk {
-                if let Some(tx) = state.gateway_tx.read().unwrap().as_ref() {
-                    if state.is_bot.load(Ordering::SeqCst) {
+                tracing::info!(
+                    "gateway: GUILD_CREATE «{}» ({} каналов)",
+                    g.name,
+                    g.channels.as_ref().map(Vec::len).unwrap_or(0)
+                );
+                // op 14-подписка на список участников — ТОЛЬКО по запросу
+                // (юзер-сессии: commands::subscribe_guild при открытии сервера).
+                // Ботам оставлен привычный op 8 на полную выгрузку участников.
+                if needs_chunk && state.is_bot.load(Ordering::SeqCst) {
+                    if let Some(tx) = state.gateway_tx.read().unwrap().as_ref() {
                         let _ = tx.try_send(crate::state::GatewayCommand::RequestMembers {
                             guild_id: g.id.clone(),
                         });
-                    } else {
-                        // Текстовые/войс-каналы — первые 10, диапазон [0, 99].
-                        let channels: Vec<(String, Vec<u32>)> = gs_channel_ids(d.get("channels"))
-                            .into_iter()
-                            .take(10)
-                            .map(|cid| (cid, vec![0, 99]))
-                            .collect();
-                        if !channels.is_empty() {
-                            let _ =
-                                tx.try_send(crate::state::GatewayCommand::SubscribeMemberList {
-                                    guild_id: g.id.clone(),
-                                    channels,
-                                });
-                        }
                     }
                 }
+            } else {
+                tracing::warn!(
+                    "gateway: GUILD_CREATE не разобран (shape) — прокидываем сырое событие в UI"
+                );
             }
             let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
@@ -425,7 +383,7 @@ pub async fn handle_dispatch(
         "VOICE_STATE_UPDATE" => {
             if let Ok(vs) = serde_json::from_value::<VoiceState>(d.clone()) {
                 let Some(gid) = vs.guild_id.clone() else {
-                    return Ok(());
+                    return;
                 };
                 {
                     let mut cache = state.cache.write().unwrap();
@@ -503,5 +461,4 @@ pub async fn handle_dispatch(
             let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
     }
-    Ok(())
 }

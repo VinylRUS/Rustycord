@@ -10,7 +10,7 @@
  * The API never sends `timestamp` in MESSAGE_CREATE — clients derive it
  * from the message id. So we do exactly what the official client does.
  */
-export const DISCORD_EPOCH = 1420070400000; // 2015-01-01T00:00:00.000Z
+const DISCORD_EPOCH = 1420070400000; // 2015-01-01T00:00:00.000Z
 
 export function snowflakeToMs(id: string): number {
   const n = BigInt(id);

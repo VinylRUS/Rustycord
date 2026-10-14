@@ -19,13 +19,14 @@ import type {
   QrStage,
   Relationship,
   Role,
+  UpdateInfo,
   User,
+  UserProfile,
   VoiceState,
 } from '../types';
 import { displayName } from '../avatars';
 
 const TOKEN_KEY = 'rustycord.token';
-const ME_KEY = 'rustycord.me';
 const TYPING_TTL = 8000;
 const SPEAKING_TTL = 2500;
 const RECENT_EMOJI_KEY = 'rustycord.recentEmoji';
@@ -63,6 +64,8 @@ export class AppStore {
   unlistenToast: (() => void) | null = null;
   mode = $state<'none' | 'tauri' | 'mock'>('none');
   connStage = $state<ConnStage | 'offline'>('offline');
+  /** Детали последнего обрыва (close-код/причина) — видны в баннере. */
+  connDetail = $state('');
   loginBusy = $state(false);
   loginError = $state('');
   booted = false;
@@ -85,6 +88,9 @@ export class AppStore {
   sessionId = $state('');
   guilds = $state<Guild[]>([]);
   dms = $state<Channel[]>([]);
+  /** Юзер-READY несёт массив users — все упомянутые в ЛС участники.
+   *  Кэш «кто есть кто» для recipient_ids-каналов и упоминаний. */
+  usersById = $state<Record<string, User>>({});
   /** Друзья/заявки/блок-лист (user_id → relationship). Юзер-аккаунт только. */
   relationships = $state<Record<string, Relationship>>({});
   /** Статусы друзей (PRESENCE_UPDATE без guild_id + READY.presences). */
@@ -111,7 +117,18 @@ export class AppStore {
   typingByChannel = $state<Record<string, Record<string, TypingEntry>>>({});
   drafts = $state<Record<string, string>>({});
   editing = $state<{ channelId: string; messageId: string } | null>(null);
+  /** Ответ на сообщение: цель ответа (Esc/Отправка сбрасывают). */
+  replyTo = $state<Message | null>(null);
   profileCard = $state<{ userId: string; guildId: string } | null>(null);
+  /** Расширенные профили (GET /users/{id}/profile) — юзер-аккаунт. */
+  profiles = $state<Record<string, UserProfile>>({});
+  /** Проверка обновлений: не-null → есть свежий релиз на GitHub. */
+  updateInfo = $state<UpdateInfo | null>(null);
+  /** Боковые панели чата: закреплённые / поиск. */
+  showPins = $state(false);
+  showSearch = $state(false);
+  /** Свой статус (online/idle/dnd/invisible) — для пикера в юзер-панели. */
+  myStatus = $state('online');
   toasts = $state<{ id: number; text: string; kind: 'info' | 'error' }[]>([]);
 
   private toastSeq = 1;
@@ -183,8 +200,33 @@ export class AppStore {
   get channelTitle(): string {
     const ch = this.activeChannel;
     if (!ch) return '';
-    if (ch.type === 1 || ch.type === 3) return ch.recipients?.map((r) => displayName(r)).join(', ') || 'Личные сообщения';
+    if (ch.type === 1 || ch.type === 3) {
+      return this.dmRecipients(ch)
+        .map((r) => displayName(r))
+        .join(', ') || 'Личные сообщения';
+    }
     return ch.name ?? '';
+  }
+
+  /** Участники ЛС/группы: recipients (REST) либо recipient_ids → usersById
+   *  (юзер-READY отдаёт каналы с айдишниками, полные объекты — отдельно). */
+  dmRecipients(ch: Channel): User[] {
+    if (ch.recipients?.length) return ch.recipients;
+    const ids = ch.recipient_ids ?? [];
+    const users = ids.map((id) => this.usersById[id]).filter(Boolean) as User[];
+    if (users.length) return users;
+    // фолбэк: друзья и кэш сообщений знают этих людей
+    return ids
+      .map((id) => this.relationships[id]?.user ?? null)
+      .filter(Boolean) as User[];
+  }
+
+  /** Насытить DM-канал recipients из usersById — один раз при входе в кэш. */
+  private hydrateDm(c: Channel): Channel {
+    if (c.recipients?.length) return c;
+    const users = this.dmRecipients(c);
+    if (users.length) return { ...c, recipients: users };
+    return c;
   }
 
   /* ================= lifecycle ================= */
@@ -193,9 +235,29 @@ export class AppStore {
     if (this.booted) return;
     this.booted = true;
     this.loadRecentEmoji();
+    // Проверка обновлений при старте: свежий релиз на GitHub → уведомление.
+    // Не блокирует загрузку и молчит при проблемах сети.
+    void this.checkForUpdate();
     const token = localStorage.getItem(TOKEN_KEY);
     if (token && detectTauri()) {
       await this.login(token, true);
+    }
+  }
+
+  /** Спросить Rust-слой про последний релиз; показать плашку, если новее. */
+  async checkForUpdate() {
+    if (!detectTauri()) return;
+    const seenKey = 'rustycord.seenUpdate';
+    try {
+      const info = await (await createBackend('tauri')).checkUpdate();
+      if (!info || !info.is_newer) return;
+      this.updateInfo = info;
+      // Показываем плашку один раз на версию — иначе при каждом старте надоедает.
+      if (localStorage.getItem(seenKey) !== info.latest) {
+        this.toast(`Доступна версия ${info.latest} — открой «Что нового» рядом с профилем`, 'info');
+      }
+    } catch {
+      /* тихо — проверка обновлений не критична */
     }
   }
 
@@ -208,7 +270,6 @@ export class AppStore {
       const user = await backend.connect(token);
       this.user = user;
       localStorage.setItem(TOKEN_KEY, token);
-      localStorage.setItem(ME_KEY, JSON.stringify({ id: user.id, username: user.username }));
       void plugins.loadAll();
     } catch (e) {
       this.loginError = e instanceof Error ? e.message : String(e);
@@ -317,7 +378,6 @@ export class AppStore {
       this.attach(backend);
       const user = await backend.connect('demo');
       this.user = user;
-      localStorage.setItem(ME_KEY, JSON.stringify({ id: user.id, username: user.username }));
       void plugins.loadAll();
     } catch (e) {
       this.loginError = e instanceof Error ? e.message : String(e);
@@ -329,7 +389,6 @@ export class AppStore {
 
   async logout() {
     localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(ME_KEY);
     await plugins.stopAll();
     try {
       await this.backend?.disconnect();
@@ -361,6 +420,7 @@ export class AppStore {
     this.user = null;
     this.guilds = [];
     this.dms = [];
+    this.usersById = {};
     this.relationships = {};
     this.friendPresences = {};
     this.membersByGuild = {};
@@ -375,6 +435,12 @@ export class AppStore {
     this.speaking = {};
     this.unread = {};
     this.connStage = 'offline';
+    this.connDetail = '';
+    this.replyTo = null;
+    this.editing = null;
+    this.profiles = {};
+    this.showPins = false;
+    this.showSearch = false;
     this.mode = 'none';
     this.showSettings = false;
     this.showGuildSettings = null;
@@ -391,11 +457,14 @@ export class AppStore {
     switch (ev.type) {
       case 'status':
         this.connStage = ev.stage;
-        if (ev.stage === 'connected' || ev.stage === 'reconnecting' || ev.stage === 'connecting') {
-          // keep UI alive; banner shows stage
+        // Детали — только пополняются: повторный статус без detail не затирает
+        // прошлую причину обрыва (иначе баннер мигает «без причины»).
+        if ('detail' in ev && (ev as { detail?: string }).detail) {
+          this.connDetail = (ev as { detail?: string }).detail ?? '';
         }
+        if (ev.stage === 'connected') this.connDetail = '';
         if (ev.stage === 'disconnected' && !this.user) {
-          this.loginError = ev.detail ?? 'Соединение потеряно';
+          this.loginError = this.connDetail || 'Соединение потеряно';
         }
         break;
       case 'ready':
@@ -484,12 +553,19 @@ export class AppStore {
         const p = d as {
           user: User;
           session_id: string;
+          users?: User[];
           private_channels?: Channel[];
           relationships?: Relationship[];
           presences?: Presence[];
         };
         this.user = p.user;
         this.sessionId = p.session_id;
+        // Юзер-READY несёт полный справочник участников (для recipient_ids).
+        if (p.users) {
+          const map = { ...this.usersById };
+          for (const u of p.users) map[u.id] = u;
+          this.usersById = map;
+        }
         // Юзер-READY несёт DM-каналы, друзей и их статусы сразу — Rust
         // теперь пробрасывает полный payload (раньше отношения и ЛС
         // терялись между ядром и UI, и главная выглядела «пустой»).
@@ -497,7 +573,7 @@ export class AppStore {
           const seen = new Set(this.dms.map((x) => x.id));
           for (const c of p.private_channels) {
             if (!seen.has(c.id)) {
-              this.dms.push(c);
+              this.dms.push(this.hydrateDm(c));
               seen.add(c.id);
             }
           }
@@ -603,7 +679,7 @@ export class AppStore {
       case 'CHANNEL_CREATE': {
         const c = d as Channel;
         if (c.type === 1 || c.type === 3) {
-          if (!this.dms.some((x) => x.id === c.id)) this.dms.push(c);
+          if (!this.dms.some((x) => x.id === c.id)) this.dms.push(this.hydrateDm(c));
         } else if (c.guild_id) {
           const g = this.guilds.find((x) => x.id === c.guild_id);
           if (g && !g.channels?.some((x) => x.id === c.id)) g.channels?.push(c);
@@ -634,6 +710,17 @@ export class AppStore {
         this.appendMessage(m.channel_id, m);
         if (m.channel_id !== this.activeChannelId) this.unread[m.channel_id] = true;
         this.clearTyping(m.channel_id, m.author.id);
+        // Упомянутые юзеры приходят полными объектами — пополняем справочник.
+        if (m.mentions?.length) {
+          const map = { ...this.usersById };
+          let changed = false;
+          for (const u of m.mentions)
+            if (!map[u.id]) {
+              map[u.id] = u;
+              changed = true;
+            }
+          if (changed) this.usersById = map;
+        }
         plugins.emit('message:create', m);
         break;
       }
@@ -774,6 +861,11 @@ export class AppStore {
       this.activeChannelId = null;
       return;
     }
+    // Юзер-аккаунт: подписка на события гильдии — при открытии (op 37 + op 14).
+    // Без неё не приедут ни пресенсы участников, ни ленивый список участников.
+    if (id && !this.isBotAccount && this.mode === 'tauri') {
+      void this.backend?.subscribeGuild(id).catch(() => undefined);
+    }
     const remembered = id !== null ? this.lastChannelByGuild[id] : undefined;
     const channels = (guild.channels ?? []).filter((c) => c.type !== 4);
     const target = channels.find((c) => c.id === remembered) ?? channels.find((c) => c.type === 0) ?? channels[0];
@@ -839,8 +931,10 @@ export class AppStore {
     const text = (typeof finalContent === 'string' ? finalContent : content).trim();
     if (!text) return;
     this.draft = '';
+    const replyTo = this.replyTo?.id ?? undefined;
+    this.replyTo = null;
     try {
-      const m = await this.backend.sendMessage(ch, text);
+      const m = await this.backend.sendMessage(ch, text, replyTo);
       this.appendMessage(ch, m);
     } catch (e) {
       this.draft = text;
@@ -881,6 +975,110 @@ export class AppStore {
   cancelEdit() {
     if (this.editing) this.drafts[this.editing.channelId] = '';
     this.editing = null;
+  }
+
+  /* ================= reply / attachments / pins / search (v0.6.0) ================= */
+
+  /** Начать ответ на сообщение (баннер в инпуте, Esc — отмена). */
+  startReply(m: Message) {
+    this.editing = null;
+    this.replyTo = m;
+  }
+
+  cancelReply() {
+    this.replyTo = null;
+  }
+
+  /** Сменить свой статус (юзер-аккаунт; ботам недоступно). */
+  async setStatus(status: 'online' | 'idle' | 'dnd' | 'invisible') {
+    if (!this.backend || this.isBotAccount) return;
+    const prev = this.myStatus;
+    this.myStatus = status; // оптимистично — как оригинал
+    try {
+      await this.apiCall('PATCH', '/users/@me/settings', { status });
+    } catch (e) {
+      this.myStatus = prev;
+      this.toast(`Статус не сменился: ${errMsg(e)}`, 'error');
+    }
+  }
+
+  /** Закрепить/открепить сообщение. */
+  async togglePin(m: Message) {
+    try {
+      if (m.pinned) await this.apiCall('DELETE', `/channels/${m.channel_id}/pins/${m.id}`);
+      else await this.apiCall('PUT', `/channels/${m.channel_id}/pins/${m.id}`);
+      m.pinned = !m.pinned;
+      this.toast(m.pinned ? 'Сообщение закреплено' : 'Сообщение откреплено', 'info');
+    } catch (e) {
+      this.toast(`Не получилось: ${errMsg(e)}`, 'error');
+    }
+  }
+
+  /** Список закреплённых (новые сверху). */
+  async listPins(channelId: string): Promise<Message[]> {
+    const list = (await this.apiCall('GET', `/channels/${channelId}/pins`)) as Message[];
+    return list;
+  }
+
+  /** Поиск по каналу (юзер-аккаунт: тот же ендпоинт, что у оригинала). */
+  async searchChannel(channelId: string, query: string): Promise<Message[]> {
+    const raw = (await this.apiCall(
+      'GET',
+      `/channels/${channelId}/messages/search?query=${encodeURIComponent(query)}`,
+    )) as { messages?: Message[][] };
+    // Ответ — группы по 1 сообщению (аналогично оригиналу).
+    return (raw.messages ?? []).map((gr) => gr[0]).filter(Boolean);
+  }
+
+  /** Расширенный профиль (баннер, био, общие сервера) — юзер-аккаунт. */
+  async fetchProfile(userId: string): Promise<UserProfile | null> {
+    if (this.profiles[userId]) return this.profiles[userId];
+    if (this.isBotAccount) return null;
+    try {
+      const p = (await this.apiCall('GET', `/users/${userId}/profile`)) as UserProfile;
+      this.profiles = { ...this.profiles, [userId]: p };
+      return p;
+    } catch {
+      return null; // у ботов и приватных профилей — тихо
+    }
+  }
+
+  /** Диалог выбора файлов → загрузка в активный канал (multipart). */
+  async uploadAttachments() {
+    const ch = this.activeChannelId;
+    if (!ch || !this.backend) return;
+    if (this.mode === 'mock') {
+      this.toast('В демо-режиме загрузка файлов недоступна', 'error');
+      return;
+    }
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({ multiple: true, title: 'Прикрепить файлы' });
+      if (!selected || (Array.isArray(selected) && !selected.length)) return;
+      const paths = Array.isArray(selected) ? selected : [selected];
+      const content = this.draft.trim() || undefined;
+      this.draft = '';
+      const m = await this.backend.uploadFiles(ch, paths, content);
+      this.appendMessage(ch, m);
+    } catch (e) {
+      this.toast(`Загрузка не удалась: ${errMsg(e)}`, 'error');
+    }
+  }
+
+  /** Открыть страницу релиза во внешнем браузере. */
+  async openReleaseUrl() {
+    if (!this.updateInfo) return;
+    try {
+      const { openUrl } = await import('@tauri-apps/plugin-opener');
+      await openUrl(this.updateInfo.url);
+    } catch {
+      window.open(this.updateInfo.url, '_blank');
+    }
+  }
+
+  /** Пометить «обновление видано» — плашку больше не показываем для этой версии. */
+  markUpdateSeen() {
+    if (this.updateInfo) localStorage.setItem('rustycord.seenUpdate', this.updateInfo.latest);
   }
 
   async deleteMessage(message: Message) {
@@ -1048,7 +1246,13 @@ export class AppStore {
 
   /** Найти существующий DM с пользователем (по списку получателей). */
   dmWith(userId: string): Channel | null {
-    return this.dms.find((c) => (c.type === 1 || c.type === 3) && c.recipients?.some((r) => r.id === userId)) ?? null;
+    return (
+      this.dms.find(
+        (c) =>
+          (c.type === 1 || c.type === 3) &&
+          (c.recipients?.some((r) => r.id === userId) || c.recipient_ids?.includes(userId)),
+      ) ?? null
+    );
   }
 
   /** Открыть личную беседу: существующий DM или создать через REST.
@@ -1183,6 +1387,7 @@ export class AppStore {
   }
 
   userById(userId: string): User | null {
+    if (this.usersById[userId]) return this.usersById[userId];
     for (const map of Object.values(this.membersByGuild)) {
       const m = map[userId];
       if (m?.user) return m.user;
@@ -1191,6 +1396,7 @@ export class AppStore {
       const u = c.recipients?.find((r) => r.id === userId);
       if (u) return u;
     }
+    if (this.relationships[userId]) return this.relationships[userId].user;
     return null;
   }
 

@@ -8,7 +8,7 @@
  * <@user> mentions, <#channel> mentions, <:name:id> custom emoji.
  */
 
-export interface MentionResolver {
+interface MentionResolver {
   user(id: string): string; // display name
   channel(id: string): string; // "#name"
   isMentioningMe(id: string): boolean;

@@ -33,6 +33,34 @@ pub struct RestClient {
     routes: Mutex<HashMap<String, String>>,
 }
 
+/// Собрать multipart-форму Discord: payload_json + files[0..].
+fn build_multipart_form(
+    content: Option<&str>,
+    files: &[(String, String, Vec<u8>)],
+) -> Result<reqwest::multipart::Form> {
+    let mut payload = serde_json::Map::new();
+    payload.insert("tts".into(), Value::Bool(false));
+    if let Some(c) = content {
+        if !c.is_empty() {
+            payload.insert("content".into(), Value::String(c.to_string()));
+        }
+    }
+    let mut form = reqwest::multipart::Form::new().part(
+        "payload_json",
+        reqwest::multipart::Part::text(Value::Object(payload).to_string())
+            .mime_str("application/json")
+            .context("mime payload_json")?,
+    );
+    for (i, (name, mime, bytes)) in files.iter().enumerate() {
+        let part = reqwest::multipart::Part::bytes(bytes.clone())
+            .file_name(name.clone())
+            .mime_str(mime)
+            .with_context(|| format!("mime для {name}"))?;
+        form = form.part(format!("files[{i}]"), part);
+    }
+    Ok(form)
+}
+
 /// Conservative route key: keeps major params (channels/{id}, guilds/{id}),
 /// masks every other snowflake as `{id}`.
 fn route_key(method: &Method, path: &str) -> String {
@@ -144,6 +172,54 @@ impl RestClient {
     /// POST without a body (e.g. the typing trigger).
     pub async fn post_empty(&self, path: &str) -> Result<()> {
         self.request(Method::POST, path, &[], None).await
+    }
+
+    /// Отправка сообщения с вложениями: multipart/form-data в формате
+    /// Discord — часть `payload_json` (тело сообщения) + части `files[0..]`.
+    /// `files` — (filename, mime, bytes).
+    pub async fn post_multipart<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        content: Option<&str>,
+        files: &[(String, String, Vec<u8>)],
+    ) -> Result<T> {
+        let url = format!("{}{}", BASE_URL, path);
+        let mut retries = 0u8;
+        loop {
+            // Form не Clone — собираем заново на каждый повтор (429-ретраи).
+            let form = build_multipart_form(content, files)?;
+            let resp = self
+                .http
+                .post(&url)
+                .multipart(form)
+                .send()
+                .await
+                .with_context(|| format!("multipart POST {path}"))?;
+            let status = resp.status();
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                let body: Value = resp.json().await.unwrap_or(Value::Null);
+                let retry_after: f64 = body
+                    .get("retry_after")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1.0);
+                retries += 1;
+                if retries > 3 {
+                    bail!("429 при загрузке файлов: слишком много повторов");
+                }
+                tracing::warn!(path, retry_after, "429 при загрузке — ждём");
+                tokio::time::sleep(Duration::from_secs_f64(retry_after.max(0.25))).await;
+                continue;
+            }
+            let text = resp.text().await?;
+            if !status.is_success() {
+                let msg = serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+                    .unwrap_or_else(|| text.chars().take(200).collect());
+                bail!("Discord API {} {}: {}", status.as_u16(), path, msg);
+            }
+            return Ok(serde_json::from_str(&text)?);
+        }
     }
 
     async fn request<T: DeserializeOwned>(

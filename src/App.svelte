@@ -34,7 +34,7 @@
 
   const isVoiceChannel = $derived(app.activeChannel?.type === 2 || app.activeChannel?.type === 13);
   const showMemberList = $derived(
-    !!app.activeGuildId && app.showMembers && app.activeChannelId !== null && !isVoiceChannel,
+    !!app.activeGuildId && app.showMembers && app.activeChannelId !== null && !isVoiceChannel && !app.showPins && !app.showSearch,
   );
   const showReconnectBanner = $derived(
     app.user !== null && (app.connStage === 'reconnecting' || app.connStage === 'connecting' || app.connStage === 'disconnected'),
@@ -46,10 +46,22 @@
 {:else}
   <div class="layout">
     {#if showReconnectBanner}
-      <div class="banner">
+      <div class="banner" title={app.connDetail || ''}>
         {app.connStage === 'disconnected' ? 'Соединение потеряно' : 'Переподключаемся к Gateway'}…
-        {app.connStage === 'disconnected' ? 'пробуем снова с backoff' : 'RESUME ' + (app.sessionId ? app.sessionId.slice(0, 8) + '…' : '')}
+        {#if app.connDetail}
+          <span class="banner-detail"> · {app.connDetail}</span>
+        {:else if app.connStage === 'disconnected'}
+          <span class="banner-detail"> · пробуем снова с backoff</span>
+        {:else}
+          <span class="banner-detail"> · RESUME {(app.sessionId || '').slice(0, 8)}…</span>
+        {/if}
       </div>
+    {/if}
+    {#if app.updateInfo}
+      <button class="update-chip" onclick={() => { void app.openReleaseUrl(); app.markUpdateSeen(); }}
+        title={app.updateInfo.notes || 'Открыть страницу релиза'}>
+        ✨ Доступна версия {app.updateInfo.latest} — скачать
+      </button>
     {/if}
     <div class="main">
       <ServerRail />
@@ -90,6 +102,21 @@
     flex-shrink: 0;
     font-family: var(--font-code);
   }
+  .banner-detail { font-weight: 400; opacity: 0.85; }
+  .update-chip {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    z-index: 110;
+    background: var(--blurple);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    border-radius: 10px;
+    padding: 10px 16px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  }
+  .update-chip:hover { filter: brightness(1.1); }
   .main {
     flex: 1;
     display: flex;

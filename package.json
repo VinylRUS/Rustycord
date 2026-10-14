@@ -1,7 +1,7 @@
 {
   "name": "rustycord",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Unofficial Discord client built with Rust + Tauri + Svelte 5 (reverse-engineered architecture)",
   "repository": {
     "type": "git",
@@ -18,7 +18,9 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.2.0"
+    "@tauri-apps/api": "^2.2.0",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-opener": "^2"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
@@ -29,5 +31,8 @@
     "svelte-check": "^4.1.1",
     "typescript": "^5.7.2",
     "vite": "^8.3.4"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
   }
 }

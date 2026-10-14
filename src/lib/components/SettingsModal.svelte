@@ -12,6 +12,14 @@
   let snowflakeError = $state('');
   let rawFrame = $state('{\n  "op": 8,\n  "d": { "guild_id": "...", "query": "", "limit": 0 }\n}');
   let rawStatus = $state<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  let logPath = $state('');
+
+  // Путь к файлу логов — тянем при открытии окна (для баг-репортов).
+  $effect(() => {
+    if (app.showSettings && !logPath) {
+      void app.backend?.getLogPath().then((p) => (logPath = p));
+    }
+  });
 
   /* ---------- plugins ---------- */
   let pluginList = $state<import('../types').PluginInfo[]>([]);
@@ -109,33 +117,11 @@
     rawStatus = null;
     try {
       await app.gatewaySendRaw(rawFrame);
-      rawStatus = { kind: 'ok', text: 'Кадр отправлен в gateway — ответ придёт потоком dispatch-событий (RUST_LOG=debug покажет его в консоли).' };
+      rawStatus = { kind: 'ok', text: 'Кадр отправлен в gateway — ответ придёт потоком dispatch-событий (логи — в файле из вкладки «Подключение»).' };
     } catch (e) {
       rawStatus = { kind: 'err', text: e instanceof Error ? e.message : String(e) };
     }
   }
-
-  const intents = [
-    ['GUILDS', 1],
-    ['GUILD_MEMBERS', 2],
-    ['GUILD_MODERATION', 4],
-    ['GUILD_EMOJIS_AND_STICKERS', 8],
-    ['GUILD_INTEGRATIONS', 16],
-    ['GUILD_WEBHOOKS', 32],
-    ['GUILD_INVITES', 64],
-    ['GUILD_VOICE_STATES', 128],
-    ['GUILD_PRESENCES', 256],
-    ['GUILD_MESSAGES', 512],
-    ['GUILD_MESSAGE_REACTIONS', 1024],
-    ['GUILD_MESSAGE_TYPING', 2048],
-    ['DIRECT_MESSAGES', 4096],
-    ['DIRECT_MESSAGE_REACTIONS', 8192],
-    ['DIRECT_MESSAGE_TYPING', 16384],
-    ['MESSAGE_CONTENT', 32768],
-    ['GUILD_SCHEDULED_EVENTS', 65536],
-  ] as const;
-  const intentsSum = $derived(intents.reduce((acc, [, v]) => acc + v, 0));
-  const intentsActive = $derived(intents.filter(([, v]) => (intentsSum & v) !== 0).length);
 </script>
 
 {#if app.showSettings}
@@ -169,13 +155,20 @@
         <table>
           <tbody>
           <tr><td>Режим</td><td class="mono">{app.mode === 'mock' ? 'Демо (симуляция Gateway)' : 'Tauri → Rust core'}</td></tr>
-          <tr><td>Статус</td><td class="mono">{app.connStage}</td></tr>
+          <tr><td>Статус</td><td class="mono">{app.connStage}{app.connDetail ? ` (${app.connDetail})` : ''}</td></tr>
           <tr><td>Session ID</td><td class="mono small">{app.sessionId || '—'}</td></tr>
-          <tr><td>Gateway</td><td class="mono small">wss://gateway.discord.gg/?v=10&amp;encoding=json</td></tr>
-          <tr><td>Intents</td><td class="mono">{intentsSum} ({intentsActive} intents, user)</td></tr>
+          <tr><td>Gateway</td><td class="mono small">wss://gateway.discord.gg/?v={app.isBotAccount ? '10' : '9'}&amp;encoding=json</td></tr>
           <tr><td>Гильдий в кэше</td><td class="mono">{app.guilds.length}</td></tr>
+          <tr><td>Логи</td><td class="mono small" title={logPath}>{logPath || '…'}</td></tr>
           </tbody>
         </table>
+        {#if logPath && logPath !== 'демо-режим: логи пишутся только в приложении'}
+          <div class="row">
+            <button class="btn-ghost" onclick={() => { void navigator.clipboard?.writeText(logPath); }}>
+              Скопировать путь к логам (для баг-репортов)
+            </button>
+          </div>
+        {/if}
         <div class="row">
           <button class="btn-blurple" onclick={() => void app.logout()}>
             <span style="display:inline-flex;align-items:center;gap:6px">

@@ -3,7 +3,7 @@
  * reverse-engineered detail: avatars are content-hashed, so the same
  * hash always maps to the same immutable file (aggressive caching).
  */
-import type { User, Channel, Guild } from './types';
+import type { User, Guild } from './types';
 
 const CDN = 'https://cdn.discordapp.com';
 
@@ -34,17 +34,8 @@ export function guildIconUrl(guild: Guild, size = 64): string | null {
   return `${CDN}/icons/${guild.id}/${guild.icon}.${ext}?size=${size}`;
 }
 
-export function guildBannerUrl(guild: Guild, size = 512): string | null {
-  if (!guild.banner) return null;
-  return `${CDN}/banners/${guild.id}/${guild.banner}.png?size=${size}`;
-}
 
-/** DM channels have no icon — we build a color chip from recipient ids. */
-export function dmColor(channel: Channel): string {
-  const ids = channel.recipients?.map((r) => Number(BigInt(r.id) % 5n)) ?? [0];
-  return DEFAULT_COLORS[ids[0] ?? 0];
-}
-
+/** DM channels have no icon — цветовые чипы строим на месте из recipient ids. */
 export function emojiUrl(emoji: {
   id: string | null;
   name: string | null;

@@ -9,7 +9,7 @@
  * добавляет отдельной секцией сверху (guild.emojis из GUILD_CREATE).
  */
 
-export interface EmojiCategory {
+interface EmojiCategory {
   id: string;
   name: string;
   /** Короткие теги для поиска (ru + en). */
@@ -377,7 +377,3 @@ export const EMOJI_NAMES: Record<string, string> = {
   '🤖': 'робот robot бот bot',
   '🏳️‍🌈': 'прайд rainbow flag',
 };
-
-/** Юникод-эмодзи без категории (для поиска по всем). */
-export const ALL_UNICODE_EMOJI: { emoji: string; category: string }[] =
-  EMOJI_CATEGORIES.flatMap((c) => c.emojis.map((emoji) => ({ emoji, category: c.name })));
