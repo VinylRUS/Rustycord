@@ -1,6 +1,7 @@
 <script lang="ts">
   import { app } from '../stores/app.svelte';
   import Icon from './Icon.svelte';
+  import { APP_VERSION } from '../version';
 
   let tab = $state<'qr' | 'email' | 'token'>('qr');
   let email = $state('');
@@ -171,8 +172,8 @@
   </div>
 
   <div class="footer">
-    <span>Gateway wss://gateway.discord.gg · REST api/v10 · remote-auth v2 · Intents 131071</span>
-    <span>RustyCord v0.4.0 · не аффилирован с Discord Inc.</span>
+    <span>Gateway v9 · REST api/v10 · remote-auth v2</span>
+    <span>RustyCord v{APP_VERSION} · не аффилирован с Discord Inc.</span>
   </div>
 </div>
 

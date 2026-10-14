@@ -243,7 +243,18 @@ pub async fn handle_dispatch(
         "GUILD_CREATE" => {
             // Мягкий разбор: одна кривая гильдия не должна ронять ВСЮ сессию
             // (раньше `?` здесь убивал соединение → бесконечный reconnect).
-            let parsed: Option<Guild> = serde_json::from_value(d.clone()).ok();
+            // Двухступенчато: строгий serde-разбор, а при неудаче — salvage
+            // с поэлементным разбором коллекций (битый канал/роль/участник
+            // выбрасывается, а не вся гильдия). Точная причина строго
+            // неудачного разбора пишется в лог — это главная зацепка
+            // для диагностики нестандартных payload'ов юзер-сессий.
+            let parsed: Option<Guild> = match serde_json::from_value::<Guild>(d.clone()) {
+                Ok(g) => Some(g),
+                Err(e) => {
+                    tracing::warn!("gateway: GUILD_CREATE строгий разбор не прошёл: {e}");
+                    Guild::salvage_from_value(&d)
+                }
+            };
             let needs_chunk = parsed
                 .as_ref()
                 .map_or(true, |g| g.members.as_ref().map_or(true, |m| m.is_empty()));
@@ -301,7 +312,7 @@ pub async fn handle_dispatch(
                 }
             } else {
                 tracing::warn!(
-                    "gateway: GUILD_CREATE не разобран (shape) — прокидываем сырое событие в UI"
+                    "gateway: GUILD_CREATE не разобран даже salvage (нет id) — прокидываем сырое событие в UI"
                 );
             }
             let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
