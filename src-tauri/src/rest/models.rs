@@ -143,6 +143,12 @@ pub struct Channel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Guild {
     pub id: String,
+    /// Юзер-сессии шлют GUILD_CREATE БЕЗ верхнеуровневого name — имя
+    /// живёт в properties.name (подтверждено живыми логами v0.7.1:
+    /// «строгий разбор не прошёл: missing field `name`»). Поэтому поле
+    /// опционально на уровне serde, а display-имя добирается через
+    /// [`Guild::name_from_payload`] в обработчике gateway.
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub icon: Option<String>,
@@ -173,6 +179,21 @@ pub struct Guild {
 }
 
 impl Guild {
+    /// Display-имя гильдии из сырого payload: верхнеуровневое `name`,
+    /// а для юзер-сессий — `properties.name`. Возвращает None, если
+    /// имени нет вовсе (ленивая гильдия) — вызывающий берёт из кэша.
+    pub fn name_from_payload(v: &serde_json::Value) -> Option<String> {
+        v.get("name")
+            .and_then(|x| x.as_str())
+            .or_else(|| {
+                v.get("properties")
+                    .and_then(|p| p.get("name"))
+                    .and_then(|x| x.as_str())
+            })
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    }
+
     /// Salvage-разбор GUILD_CREATE из сырого JSON: оболочка гильдии
     /// вытягивается толерантно, а коллекции (каналы/роли/участники/
     /// пресенсы/войс-состояния/эмодзи) разбираются ПОЭЛЕМЕНТНО — битая
@@ -180,11 +201,7 @@ impl Guild {
     /// Возвращает None только если нет id (запись бесполезна в принципе).
     pub fn salvage_from_value(v: &serde_json::Value) -> Option<Guild> {
         let id = v.get("id")?.as_str()?.to_string();
-        let name = v
-            .get("name")
-            .and_then(|x| x.as_str())
-            .unwrap_or("…")
-            .to_string();
+        let name = Guild::name_from_payload(v).unwrap_or_else(|| "…".to_string());
 
         let (channels, ch_bad) = salvage_list::<Channel>(v.get("channels"));
         let (roles, role_bad) = salvage_list::<Role>(v.get("roles"));
@@ -523,5 +540,41 @@ mod tests {
     fn guild_salvage_requires_id() {
         let v = json!({"name": "Нет id"});
         assert!(Guild::salvage_from_value(&v).is_none());
+    }
+
+    /// Живой кейс v0.7.1: юзер-сессия прислала GUILD_CREATE БЕЗ
+    /// верхнеуровневого name («missing field `name`» в строгом разборе),
+    /// имя — в properties.name.
+    #[test]
+    fn guild_create_without_name_parses_and_falls_back_to_properties() {
+        let mut v = realistic_guild_create();
+        v["properties"] = json!({"name": "Имя из properties", "emoji_allowlist": []});
+        v.as_object_mut().unwrap().remove("name");
+
+        // Строгий разбор больше не падает: name опционален (= "").
+        let g: Guild = serde_json::from_value(v.clone()).expect("name опционален (serde default)");
+        assert_eq!(g.name, "");
+
+        // Display-имя добирается из properties.name.
+        assert_eq!(
+            Guild::name_from_payload(&v).as_deref(),
+            Some("Имя из properties")
+        );
+
+        // Salvage тоже тянет имя из properties.
+        let s = Guild::salvage_from_value(&v).expect("salvage");
+        assert_eq!(s.name, "Имя из properties");
+        assert_eq!(s.channels.as_ref().map(Vec::len), Some(6));
+    }
+
+    /// Полностью безымянная ленивая гильдия: name_from_payload → None,
+    /// salvage ставит «…» (обработчик возьмёт прежнее имя из кэша).
+    #[test]
+    fn guild_create_nameless_returns_none_for_display_name() {
+        let mut v = realistic_guild_create();
+        v.as_object_mut().unwrap().remove("name");
+        assert!(Guild::name_from_payload(&v).is_none());
+        let s = Guild::salvage_from_value(&v).expect("salvage");
+        assert_eq!(s.name, "…");
     }
 }

@@ -241,6 +241,9 @@ pub async fn handle_dispatch(
         }
 
         "GUILD_CREATE" => {
+            // d делаем mut сразу: после обогащения имени/иконки payload
+            // нормализуется перед отправкой в UI (см. ниже).
+            let mut d = d;
             // Мягкий разбор: одна кривая гильдия не должна ронять ВСЮ сессию
             // (раньше `?` здесь убивал соединение → бесконечный reconnect).
             // Двухступенчато: строгий serde-разбор, а при неудаче — salvage
@@ -259,12 +262,34 @@ pub async fn handle_dispatch(
                 .as_ref()
                 .map_or(true, |g| g.members.as_ref().map_or(true, |m| m.is_empty()));
             if let Some(g) = parsed {
+                // Юзер-сессии шлют GUILD_CREATE без верхнеуровневого name —
+                // display-имя живёт в properties.name, а если и его нет
+                // (ленивая гильдия) — остаётся прежнее имя из кэша (стаб
+                // READY). Иконка — та же логика: пустую не пишем поверх
+                // существующей, иначе рейл теряет картинки серверов.
+                let mut name = if g.name.is_empty() {
+                    Guild::name_from_payload(&d).unwrap_or_default()
+                } else {
+                    g.name.clone()
+                };
+                let mut icon = g.icon.clone();
                 {
                     let mut cache = state.cache.write().unwrap();
+                    if let Some(old) = cache.guilds.get(&g.id) {
+                        if name.is_empty() && !old.name.is_empty() && old.name != "…" {
+                            name = old.name.clone();
+                        }
+                        if icon.is_none() {
+                            icon = old.icon.clone();
+                        }
+                    }
+                    if name.is_empty() {
+                        name = "Без названия".to_string();
+                    }
                     let mut gs = GuildState {
                         id: g.id.clone(),
-                        name: g.name.clone(),
-                        icon: g.icon.clone(),
+                        name: name.clone(),
+                        icon: icon.clone(),
                         banner: g.banner.clone(),
                         owner_id: g.owner_id.clone(),
                         roles: g.roles.clone(),
@@ -297,7 +322,7 @@ pub async fn handle_dispatch(
                 }
                 tracing::info!(
                     "gateway: GUILD_CREATE «{}» ({} каналов)",
-                    g.name,
+                    name,
                     g.channels.as_ref().map(Vec::len).unwrap_or(0)
                 );
                 // op 14-подписка на список участников — ТОЛЬКО по запросу
@@ -308,6 +333,25 @@ pub async fn handle_dispatch(
                         let _ = tx.try_send(crate::state::GatewayCommand::RequestMembers {
                             guild_id: g.id.clone(),
                         });
+                    }
+                }
+                // Нормализуем payload для UI: вписываем добытое имя/иконку,
+                // чтобы фронтенд не увидел гильдию без name (его стаб
+                // с настоящим именем иначе перетирается безымянной).
+                if let Some(obj) = d.as_object_mut() {
+                    let has_name = obj
+                        .get("name")
+                        .and_then(|x| x.as_str())
+                        .is_some_and(|s| !s.is_empty());
+                    if !has_name {
+                        obj.insert("name".to_string(), json!(name));
+                    }
+                    let has_icon = obj
+                        .get("icon")
+                        .and_then(|x| x.as_str())
+                        .is_some_and(|s| !s.is_empty());
+                    if icon.is_some() && !has_icon {
+                        obj.insert("icon".to_string(), json!(icon));
                     }
                 }
             } else {

@@ -18,6 +18,20 @@
     app.selectGuild(id);
   }
 
+  // Инициалы для кружка без иконки. name бывает undefined (GUILD_CREATE
+  // юзер-сессий без верхнеуровневого name) — без защиты TypeError из
+  // name.split ронял весь {#each} и рейл серверов исчезал целиком.
+  function initials(name?: string | null): string {
+    const s = (name ?? '').trim();
+    if (!s) return '?';
+    return s
+      .split(/\s+/)
+      .map((w) => w[0])
+      .join('')
+      .slice(0, 2)
+      .toUpperCase();
+  }
+
   async function submitJoin() {
     joining = true;
     await app.joinServer(invite);
@@ -49,12 +63,12 @@
     {@const unread = unreadOfGuild(guild.id)}
     <div class="pill-container">
       <button class="server" class:active onclick={() => select(guild.id)}>
-        <span class="tooltip">{guild.name}</span>
+        <span class="tooltip">{guild.name ?? 'Без названия'}</span>
         {#if icon}
-          <img src={icon} alt={guild.name} />
+          <img src={icon} alt={guild.name ?? ''} />
         {:else}
           <span class="guild-initial" style="background: {defaultAvatarColor(guild.id)}">
-            {guild.name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase()}
+            {initials(guild.name)}
           </span>
         {/if}
       </button>

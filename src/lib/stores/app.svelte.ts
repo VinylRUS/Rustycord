@@ -638,6 +638,11 @@ export class AppStore {
           }
         }
         this.applyMerged(p.guilds ?? [], p.merged_presences, p.merged_members);
+        // Надёжный источник имён/иконок юзер-гильдий: REST-эндпоинт
+        // всегда несёт name+icon (gateway-пейлоады юзер-сессий — нет:
+        // стабы READY бывают безымянными, GUILD_CREATE держит имя в
+        // properties.name). Мержим поверх стабов.
+        void this.fetchUserGuilds();
         break;
       }
       case 'READY_SUPPLEMENTAL': {
@@ -655,7 +660,18 @@ export class AppStore {
         break;
       }
       case 'GUILD_CREATE': {
-        const g = d as Guild;
+        // Merge, а не replace: юзер-сессии шлют GUILD_CREATE без
+        // верхнеуровневого name/icon — если затирать стаб из READY,
+        // гильдия останется безымянной (а ServerRail рисует инициалы
+        // из name — undefined ронял весь рейл серверов целиком).
+        const raw = d as Partial<Guild> & { id: string };
+        const existing = this.guilds.find((x) => x.id === raw.id);
+        const g = {
+          ...existing,
+          ...raw,
+          name: raw.name ?? existing?.name ?? 'Без названия',
+          icon: raw.icon ?? existing?.icon ?? null,
+        } as Guild;
         this.guilds = this.guilds.filter((x) => x.id !== g.id);
         this.guilds.push(g);
         plugins.emit('guild:create', g);
@@ -979,6 +995,34 @@ export class AppStore {
         // Unknown events are intentionally ignored — like the real client,
         // forward-compatibility comes from graceful skipping.
         break;
+    }
+  }
+
+  /** Подтягиваем настоящие имена/иконки гильдий юзера через REST
+   *  GET /users/@me/guilds: в отличие от gateway-пейлоадов юзер-сессий
+   *  (безымянные стабы READY, GUILD_CREATE с именем в properties.name),
+   *  этот эндпоинт всегда возвращает name и icon. Вызов после READY. */
+  private async fetchUserGuilds(): Promise<void> {
+    if (this.mode !== 'tauri' || this.isBotAccount) return;
+    try {
+      const res = await this.backend?.apiRequest('GET', '/users/@me/guilds');
+      const list = res as
+        | { id: string; name?: string; icon?: string | null }[]
+        | undefined;
+      if (!Array.isArray(list)) return;
+      for (const u of list) {
+        if (!u?.id) continue;
+        const idx = this.guilds.findIndex((g) => g.id === u.id);
+        if (idx >= 0) {
+          this.guilds[idx] = {
+            ...this.guilds[idx],
+            name: u.name || this.guilds[idx].name,
+            icon: u.icon ?? this.guilds[idx].icon ?? null,
+          };
+        }
+      }
+    } catch {
+      // Не критично: имена доберутся из GUILD_CREATE (properties.name).
     }
   }
 
