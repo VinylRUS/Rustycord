@@ -13,6 +13,15 @@
   const isDm = $derived(channel?.type === 1 || channel?.type === 3);
   const guild = $derived(app.activeGuild);
 
+  /** Идёт наш звонок в этой беседе (ЛС/группа)? */
+  const inDmCall = $derived(
+    !!channel && isDm && app.myVoice?.channelId === channel.id && app.myVoice.guildId === '',
+  );
+  /** Кто-то уже в звонке этой беседы (приглашение присоединиться). */
+  const dmCallOthers = $derived(
+    !!channel && isDm && !inDmCall && app.dmCallUsers(channel.id).some((v) => v.user_id !== app.user?.id),
+  );
+
   let pins = $state<Message[]>([]);
   let pinsBusy = $state(false);
   let searchQuery = $state('');
@@ -85,6 +94,12 @@
       { label: 'Копировать название', action: () => void navigator.clipboard?.writeText(channel.name ?? '') },
     ]);
   }
+
+  /** Позвонить в этой беседе / положить трубку. */
+  function toggleDmCall() {
+    if (!channel) return;
+    void app.toggleVoice(null, channel.id);
+  }
 </script>
 
 <section class="chat">
@@ -103,6 +118,20 @@
       {/if}
     </div>
     <div class="right">
+      {#if isDm}
+        <button
+          class="hbtn call"
+          class:active={inDmCall}
+          title={inDmCall ? 'Положить трубку' : 'Позвонить'}
+          onclick={toggleDmCall}
+        >
+          {#if inDmCall}
+            <Icon name="phone-off" size={22} color="#f23f43" />
+          {:else}
+            <Icon name="phone" size={20} color="#b5bac1" />
+          {/if}
+        </button>
+      {/if}
       <button class="hbtn" class:active={app.showPins} title="Закреплённые сообщения" onclick={togglePins}>
         <Icon name="pin" size={22} color="#b5bac1" />
       </button>
@@ -133,6 +162,60 @@
       </div>
     </div>
   </header>
+
+  {#if inDmCall && channel}
+    <!-- Активный звонок в этой беседе: участники + управление -->
+    <div class="call-bar">
+      <div class="call-peers">
+        {#each app.dmCallUsers(channel.id) as vs (vs.user_id)}
+          {@const u = app.userById(vs.user_id)}
+          <div class="peer" class:speaking={!!app.speaking[vs.user_id]}>
+            <Avatar user={u} size={36} speaking={!!app.speaking[vs.user_id]} ringColor="#111214" />
+            <span class="peer-name truncate">
+              {u?.global_name || u?.username || 'Участник'}
+              {#if vs.user_id === app.user?.id}(вы){/if}
+            </span>
+            {#if vs.self_mute}<Icon name="mic-off" size={12} color="#f23f43" />{/if}
+          </div>
+        {/each}
+        {#if !app.dmCallUsers(channel.id).length}
+          <div class="peer">
+            <Avatar user={app.user} size={36} ringColor="#111214" />
+            <span class="peer-name">Соединяемся…</span>
+          </div>
+        {/if}
+      </div>
+      <div class="call-actions">
+        <span class="call-timer muted">{app.myVoice?.mode ? 'на связи' : 'подключаемся…'}</span>
+        <button
+          class="cbtn"
+          class:off={app.myVoice?.selfMute}
+          title={app.myVoice?.selfMute ? 'Включить микрофон' : 'Выключить микрофон'}
+          onclick={() => void app.setSelfMute(!app.myVoice?.selfMute)}
+        >
+          <Icon name={app.myVoice?.selfMute ? 'mic-off' : 'mic'} size={18} color={app.myVoice?.selfMute ? '#f23f43' : '#b5bac1'} />
+        </button>
+        <button
+          class="cbtn"
+          class:off={app.myVoice?.selfDeaf}
+          title={app.myVoice?.selfDeaf ? 'Включить звук' : 'Выключить звук'}
+          onclick={() => void app.setSelfDeaf(!app.myVoice?.selfDeaf)}
+        >
+          <Icon name={app.myVoice?.selfDeaf ? 'headphones-off' : 'headphones'} size={18} color={app.myVoice?.selfDeaf ? '#f23f43' : '#b5bac1'} />
+        </button>
+        <button class="cbtn hangup" title="Завершить звонок" onclick={toggleDmCall}>
+          <Icon name="phone-off" size={18} color="#fff" />
+        </button>
+      </div>
+    </div>
+  {:else if dmCallOthers && channel}
+    <!-- Кто-то уже в звонке: приглашение как в оригинале -->
+    <div class="call-bar incoming">
+      <Icon name="phone" size={16} color="#23a55a" />
+      <span class="call-line">Идёт звонок — {app.dmCallUsers(channel.id).length} участн.</span>
+      <button class="join-call" onclick={toggleDmCall}>Присоединиться</button>
+    </div>
+  {/if}
 
   <div class="chat-body">
     <div class="chat-main">
@@ -249,6 +332,76 @@
   .hbtn:hover:not(:disabled) { background: var(--bg-modifier-hover); }
   .hbtn.active { color: var(--header-primary); background: var(--bg-modifier-hover); }
   .hbtn.off { color: var(--text-muted); }
+  .hbtn.call.active { background: #f23f4322; }
+
+  /* ---- звонок в беседе ---- */
+  .call-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    box-shadow: 0 1px 0 rgba(0, 0, 0, 0.2);
+    flex-shrink: 0;
+  }
+  .call-bar.incoming {
+    justify-content: flex-start;
+  }
+  .call-peers {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .call-peers::-webkit-scrollbar { display: none; }
+  .peer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .peer-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--header-primary);
+    max-width: 140px;
+  }
+  .call-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .call-timer { font-size: 12px; margin-right: 4px; }
+  .cbtn {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .cbtn:hover { background: var(--bg-modifier-hover); }
+  .cbtn.hangup { background: #f23f43; }
+  .cbtn.hangup:hover { background: #d8383c; }
+  .call-line {
+    flex: 1;
+    font-size: 13px;
+    color: var(--text-normal);
+    text-align: left;
+  }
+  .join-call {
+    background: #23a55a;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 6px 14px;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+  }
   .search {
     display: flex;
     align-items: center;

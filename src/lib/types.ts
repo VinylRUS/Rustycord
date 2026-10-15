@@ -71,6 +71,15 @@ export interface Role {
 
 export type ChannelType = 0 | 1 | 2 | 3 | 4 | 5 | 11 | 12 | 13 | 15;
 
+/** Перезапись прав на канал: id — роль (type 0, для @everyone id = guild_id)
+ * или участник (type 1); allow/deny — битовые маски строкой. */
+export interface Overwrite {
+  id: string;
+  type: number;
+  allow: string;
+  deny: string;
+}
+
 /** Метаданные треда (type 11/12): архив, авто-архив, блокировка. */
 export interface ThreadMetadata {
   archived: boolean;
@@ -97,6 +106,8 @@ export interface Channel {
   recipient_ids?: string[];
   owner_id?: string;
   icon?: string | null;
+  /** Перезаписи прав канала — по ним UI скрывает каналы, недоступные роли. */
+  permission_overwrites?: Overwrite[];
   /** Треды (type 11/12): архив/авто-архив/блокировка. */
   thread_metadata?: ThreadMetadata;
 }

@@ -6,48 +6,95 @@
   const guild = $derived(app.activeGuild);
   const guildId = $derived(guild?.id ?? '');
 
+  /** Строка списка: полноценный участник либо presence-only юзер
+   *  (merged_presences/op 14 дают статусы людей, чья карточка участника
+   *  ещё не приехала — оригинал показывает их так же). */
+  interface Row {
+    id: string;
+    member: Member | null;
+    presenceUser: { id: string; username?: string; global_name?: string | null; avatar?: string | null } | null;
+    name: string;
+    status: string;
+    hasMember: boolean;
+  }
+
+  const OFFLINE_CAP = 100;
+
+  const rows = $derived.by(() => {
+    if (!guild) return [] as Row[];
+    const out: Row[] = [];
+    const seen = new Set<string>();
+    for (const m of Object.values(app.membersByGuild[guildId] ?? {})) {
+      if (!m.user || seen.has(m.user.id)) continue;
+      seen.add(m.user.id);
+      out.push({
+        id: m.user.id,
+        member: m,
+        presenceUser: null,
+        name: m.nick || m.user.global_name || m.user.username,
+        status: app.statusOf(guildId, m.user.id),
+        hasMember: true,
+      });
+    }
+    // Presence-only: онлайн-участники без карточки (большие серверы).
+    for (const p of Object.values(app.presencesByGuild[guildId] ?? {})) {
+      if (!p.user?.id || seen.has(p.user.id) || p.status === 'offline') continue;
+      seen.add(p.user.id);
+      out.push({
+        id: p.user.id,
+        member: null,
+        presenceUser: p.user,
+        name: p.user.global_name || p.user.username || `id:${p.user.id.slice(-4)}`,
+        status: p.status,
+        hasMember: false,
+      });
+    }
+    return out;
+  });
+
   interface Group {
     role: Role | null; // null → offline
-    members: Member[];
+    members: Row[];
   }
 
   const groups = $derived.by(() => {
     if (!guild) return [] as Group[];
-    const members = Object.values(app.membersByGuild[guildId] ?? {});
     const hoisted = [...guild.roles].filter((r) => r.hoist).sort((a, b) => b.position - a.position);
     const result: Group[] = [];
     for (const role of hoisted) {
-      const list = members.filter((m) => {
-        if (!m.user) return false;
-        const status = app.statusOf(guildId, m.user.id);
-        if (status === 'offline') return false;
-        return app.topRole(guildId, m.user.id)?.id === role.id;
+      const list = rows.filter((r) => {
+        if (r.status === 'offline') return false;
+        return app.topRole(guildId, r.id)?.id === role.id;
       });
       if (list.length) result.push({ role, members: list });
     }
     // online members without hoisted role
-    const noRole = members.filter((m) => {
-      if (!m.user) return false;
-      return app.statusOf(guildId, m.user.id) !== 'offline' && !app.topRole(guildId, m.user.id);
+    const noRole = rows.filter((r) => {
+      return r.status !== 'offline' && !app.topRole(guildId, r.id);
     });
-    if (noRole.length) result.push({ role: guild.roles.find((r) => r.id === guildId) ?? null, members: noRole });
-    // offline
-    const offline = members.filter((m) => m.user && app.statusOf(guildId, m.user.id) === 'offline');
+    if (noRole.length)
+      result.push({ role: guild.roles.find((r) => r.id === guildId) ?? null, members: noRole });
+    // offline (с потолком, как оригинал — остальные скрыты «ещё N»)
+    const offline = rows.filter((r) => r.status === 'offline');
     if (offline.length) result.push({ role: null, members: offline });
     return result;
   });
 
-  const totalOnline = $derived(
-    Object.values(app.membersByGuild[guildId] ?? {}).filter((m) => m.user && app.statusOf(guildId, m.user.id) !== 'offline').length,
+  const onlineCount = $derived(rows.filter((r) => r.status !== 'offline').length);
+  const offlineHidden = $derived(
+    Math.max(
+      0,
+      rows.filter((r) => r.status === 'offline').length - OFFLINE_CAP,
+    ),
   );
 
-  function name(m: Member): string {
-    return m.nick || m.user?.global_name || m.user?.username || '?';
+  function colorOf(r: Row): string {
+    return r.hasMember ? app.memberColor(guildId, r.id) : 'var(--header-primary)';
   }
 
-  function activity(m: Member): string | null {
-    if (!m.user) return null;
-    const p = app.presencesByGuild[guildId]?.[m.user.id];
+  function activity(r: Row): string | null {
+    if (!app.presencesByGuild[guildId]?.[r.id]) return null;
+    const p = app.presencesByGuild[guildId][r.id];
     const custom = p?.activities?.find((a) => a.type === 4);
     if (custom?.state) return custom.state;
     const game = p?.activities?.find((a) => a.type === 0);
@@ -59,34 +106,42 @@
 <aside class="members">
   {#if !app.chunksDone[guildId] && guild}
     <div class="chunk-hint muted">
-      Загружаем участников (GUILD_MEMBERS_CHUNK)…
+      Загружаем участников…
     </div>
   {/if}
+
+  <div class="member-stats muted">
+    В сети — {onlineCount}
+    {#if guild?.member_count}
+      · всего {guild.member_count}
+    {/if}
+  </div>
+
   {#each groups as g (g.role?.id ?? 'offline')}
     <div class="group">
       <div class="group-title muted">
         {g.role ? g.role.name.toUpperCase() : 'ОФЛАЙН'} — {g.members.length}
       </div>
-      {#each g.members as m (m.user!.id)}
+      {#each g.role === null ? g.members.slice(0, OFFLINE_CAP) : g.members as m (m.id)}
         <button
           class="member"
           class:offline={g.role === null}
-          onclick={() => (app.profileCard = { userId: m.user!.id, guildId })}
+          onclick={() => (app.profileCard = { userId: m.id, guildId })}
           oncontextmenu={(e) => {
             e.preventDefault();
-            app.profileCard = { userId: m.user!.id, guildId };
+            app.profileCard = { userId: m.id, guildId };
           }}
         >
           <Avatar
-            user={m.user}
+            user={(m.member?.user ?? m.presenceUser) as never}
             size={32}
-            status={g.role === null ? 'offline' : app.statusOf(guildId, m.user!.id)}
+            status={g.role === null ? 'offline' : m.status}
             ringColor="var(--bg-secondary)"
           />
           <div class="meta">
-            <span class="name truncate" style="color: {app.memberColor(guildId, m.user!.id)}">
-              {name(m)}
-              {#if m.user?.bot}<span class="bot">APP</span>{/if}
+            <span class="name truncate" style="color: {colorOf(m)}">
+              {m.name}
+              {#if m.member?.user?.bot}<span class="bot">APP</span>{/if}
             </span>
             {#if activity(m)}
               <span class="activity truncate muted">{activity(m)}</span>
@@ -94,6 +149,9 @@
           </div>
         </button>
       {/each}
+      {#if g.role === null && offlineHidden > 0}
+        <div class="offline-more muted">…и ещё {offlineHidden} не в сети</div>
+      {/if}
     </div>
   {/each}
   <div class="pad"></div>
@@ -110,6 +168,13 @@
   .chunk-hint {
     font-size: 12px;
     padding: 8px 16px;
+  }
+  .member-stats {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    padding: 8px 16px 4px;
   }
   .group { margin-bottom: 16px; }
   .group-title {
@@ -140,5 +205,9 @@
     vertical-align: 2px;
   }
   .activity { font-size: 12px; }
+  .offline-more {
+    font-size: 11px;
+    padding: 4px 16px;
+  }
   .pad { height: 24px; }
 </style>

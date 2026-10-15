@@ -588,7 +588,8 @@ export class MockBackend implements Backend {
     this.emit({ type: 'dispatch', t: 'GUILD_MEMBER_REMOVE', d: { guild_id: guildId, user: { id: userId } } });
   }
 
-  async joinVoice(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean, selfVideo?: boolean): Promise<void> {
+  async joinVoice(guildId: string | null, channelId: string | null, selfMute: boolean, selfDeaf: boolean, selfVideo?: boolean): Promise<void> {
+    const gid = guildId ?? channelId ?? 'dm';
     this.emit({
       type: 'dispatch',
       t: 'VOICE_STATE_UPDATE',
@@ -599,10 +600,10 @@ export class MockBackend implements Backend {
       this.emit({
         type: 'voice',
         kind: 'connected',
-        data: { guild_id: guildId, channel_id: channelId, mode: 'xsalsa20_poly1305', ssrc: 424242, endpoint: 'guild-42.discord.media', ip: '127.0.0.1', port: 50001 },
+        data: { guild_id: gid, channel_id: channelId, mode: 'xsalsa20_poly1305', ssrc: 424242, endpoint: 'guild-42.discord.media', ip: '127.0.0.1', port: 50001 },
       });
     } else {
-      this.emit({ type: 'voice', kind: 'disconnected', data: { guild_id: guildId } });
+      this.emit({ type: 'voice', kind: 'disconnected', data: { guild_id: gid } });
       // Выход из войса гасит и трансляцию.
       for (const s of this.demoStreams) {
         this.emit({ type: 'dispatch', t: 'STREAM_DELETE', d: { stream_key: s } });

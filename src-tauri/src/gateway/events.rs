@@ -619,58 +619,120 @@ pub async fn handle_dispatch(
 
         "VOICE_STATE_UPDATE" => {
             if let Ok(vs) = serde_json::from_value::<VoiceState>(d.clone()) {
-                let Some(gid) = vs.guild_id.clone() else {
-                    return;
-                };
-                {
-                    let mut cache = state.cache.write().unwrap();
-                    if let Some(gs) = cache.guilds.get_mut(&gid) {
-                        gs.voice_states.retain(|v| v.user_id != vs.user_id);
-                        if vs.channel_id.is_some() {
-                            gs.voice_states.push(vs.clone());
-                        }
-                    }
-                }
-                // Голосовой рукопожатие для нас самих: запоминаем session_id.
-                let is_self = state.self_id().as_deref() == Some(vs.user_id.as_str());
-                if is_self {
-                    if let (Some(sid), true) = (vs.session_id.clone(), vs.channel_id.is_some()) {
-                        let mut hs = state.voice_handshake.lock().unwrap();
-                        let entry = hs.entry(gid.clone()).or_default();
-                        entry.guild_id = gid.clone();
-                        entry.user_id = vs.user_id.clone();
-                        entry.session_id = Some(sid);
-                        entry.channel_id = vs.channel_id.clone();
-                        drop(hs);
-                        // Эхо op4: подтягиваем живую сессию к актуальным флагам.
-                        let sessions = state.voice_sessions.lock().unwrap();
-                        if let Some(handle) = sessions.get(&gid) {
-                            *handle.controls.lock().unwrap() =
-                                VoiceControls::new(vs.self_mute, vs.self_deaf);
-                            // Мьют в songbird: движок шлёт тишину вместо микрофона
-                            // (деафиен тоже глушит передачу — как в оригинале).
-                            // Driver — клон канала управления, mute уходит в задачи.
-                            if let Some(mut driver) = handle.driver.clone() {
-                                driver.mute(vs.self_mute || vs.self_deaf);
+                match vs.guild_id.clone() {
+                    None => {
+                        // Звонок в ЛС/группе: guild_id отсутствует. Своё эхо op4
+                        // сшивает рукопожатие по channel_id (voice-сервер
+                        // идентифицирует DM-сессию по каналу); чужие состояния
+                        // просто едут в UI (участники звонка).
+                        let is_self =
+                            state.self_id().as_deref() == Some(vs.user_id.as_str());
+                        if is_self {
+                            match vs.channel_id.clone() {
+                                Some(cid) => {
+                                    // Вход/флаги в звонке ЛС: ключ = channel_id.
+                                    if let Some(sid) = vs.session_id.clone() {
+                                        let mut hs = state.voice_handshake.lock().unwrap();
+                                        let entry = hs.entry(cid.clone()).or_default();
+                                        entry.guild_id = cid.clone(); // songbird server_id = канал
+                                        entry.user_id = vs.user_id.clone();
+                                        entry.session_id = Some(sid);
+                                        entry.channel_id = Some(cid.clone());
+                                        entry.is_dm = true;
+                                    }
+                                    let sessions = state.voice_sessions.lock().unwrap();
+                                    if let Some(handle) = sessions.get(&cid) {
+                                        *handle.controls.lock().unwrap() =
+                                            VoiceControls::new(vs.self_mute, vs.self_deaf);
+                                        if let Some(mut driver) = handle.driver.clone() {
+                                            driver.mute(vs.self_mute || vs.self_deaf);
+                                        }
+                                    }
+                                }
+                                None => {
+                                    // Выход из звонка ЛС/группы: гасим DM-сессию.
+                                    let dm_keys: Vec<String> = state
+                                        .voice_handshake
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .filter(|(_, h)| h.is_dm)
+                                        .map(|(k, _)| k.clone())
+                                        .collect();
+                                    for k in &dm_keys {
+                                        state.voice_handshake.lock().unwrap().remove(k);
+                                        state.voice_sessions.lock().unwrap().remove(k);
+                                        state.voice_desired.lock().unwrap().remove(k);
+                                        let mut tasks = state.voice_tasks.lock().await;
+                                        if let Some((handle, token)) = tasks.remove(k) {
+                                            token.cancel();
+                                            handle.abort();
+                                        }
+                                        let _ = app.emit(
+                                            "discord://voice",
+                                            json!({ "kind": "disconnected", "data": { "guild_id": k, "dm": true } }),
+                                        );
+                                    }
+                                }
                             }
                         }
-                    } else if vs.channel_id.is_none() {
-                        // Выход из войса: гасим голосовую сессию.
-                        state.voice_handshake.lock().unwrap().remove(&gid);
-                        state.voice_sessions.lock().unwrap().remove(&gid);
-                        state.voice_desired.lock().unwrap().remove(&gid);
-                        let mut tasks = state.voice_tasks.lock().await;
-                        if let Some((handle, token)) = tasks.remove(&gid) {
-                            token.cancel();
-                            handle.abort();
+                        state.voice_notify.notify_one();
+                    }
+                    Some(gid) => {
+                        {
+                            let mut cache = state.cache.write().unwrap();
+                            if let Some(gs) = cache.guilds.get_mut(&gid) {
+                                gs.voice_states.retain(|v| v.user_id != vs.user_id);
+                                if vs.channel_id.is_some() {
+                                    gs.voice_states.push(vs.clone());
+                                }
+                            }
                         }
-                        let _ = app.emit(
-                            "discord://voice",
-                            json!({ "kind": "disconnected", "data": { "guild_id": gid } }),
-                        );
+                        // Голосовое рукопожатие для нас самих: запоминаем session_id.
+                        let is_self =
+                            state.self_id().as_deref() == Some(vs.user_id.as_str());
+                        if is_self {
+                            if let (Some(sid), true) =
+                                (vs.session_id.clone(), vs.channel_id.is_some())
+                            {
+                                let mut hs = state.voice_handshake.lock().unwrap();
+                                let entry = hs.entry(gid.clone()).or_default();
+                                entry.guild_id = gid.clone();
+                                entry.user_id = vs.user_id.clone();
+                                entry.session_id = Some(sid);
+                                entry.channel_id = vs.channel_id.clone();
+                                drop(hs);
+                                // Эхо op4: подтягиваем живую сессию к актуальным флагам.
+                                let sessions = state.voice_sessions.lock().unwrap();
+                                if let Some(handle) = sessions.get(&gid) {
+                                    *handle.controls.lock().unwrap() =
+                                        VoiceControls::new(vs.self_mute, vs.self_deaf);
+                                    // Мьют в songbird: движок шлёт тишину вместо микрофона
+                                    // (деафиен тоже глушит передачу — как в оригинале).
+                                    // Driver — клон канала управления, mute уходит в задачи.
+                                    if let Some(mut driver) = handle.driver.clone() {
+                                        driver.mute(vs.self_mute || vs.self_deaf);
+                                    }
+                                }
+                            } else if vs.channel_id.is_none() {
+                                // Выход из войса: гасим голосовую сессию.
+                                state.voice_handshake.lock().unwrap().remove(&gid);
+                                state.voice_sessions.lock().unwrap().remove(&gid);
+                                state.voice_desired.lock().unwrap().remove(&gid);
+                                let mut tasks = state.voice_tasks.lock().await;
+                                if let Some((handle, token)) = tasks.remove(&gid) {
+                                    token.cancel();
+                                    handle.abort();
+                                }
+                                let _ = app.emit(
+                                    "discord://voice",
+                                    json!({ "kind": "disconnected", "data": { "guild_id": gid } }),
+                                );
+                            }
+                        }
+                        state.voice_notify.notify_one();
                     }
                 }
-                state.voice_notify.notify_one();
             }
             let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
@@ -687,6 +749,23 @@ pub async fn handle_dispatch(
                 entry.user_id = user_id;
                 entry.token = Some(token);
                 entry.endpoint = Some(endpoint);
+            } else if !token.is_empty() {
+                // Звонок в ЛС/группе: guild_id = null — заполняем единственное
+                // незавершённое DM-рукопожатие (голосовая сессия одна за раз).
+                let user_id = state.self_id().unwrap_or_default();
+                let mut hs = state.voice_handshake.lock().unwrap();
+                if let Some((_, entry)) = hs
+                    .iter_mut()
+                    .find(|(_, h)| h.is_dm && h.token.is_none())
+                {
+                    entry.user_id = user_id;
+                    entry.token = Some(token);
+                    entry.endpoint = Some(endpoint);
+                    tracing::info!(
+                        "gateway: VOICE_SERVER_UPDATE для звонка ЛС (канал {})",
+                        entry.guild_id
+                    );
+                }
             }
             state.voice_notify.notify_one();
             let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));

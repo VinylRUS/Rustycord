@@ -734,10 +734,12 @@ pub async fn ban_member(
 
 /// op 4 — join/leave a voice channel (channel_id = None → leave),
 /// self mute/deafen/video flags ride along the same frame.
+/// guild_id = None → звонок в ЛС/группе: op4 уходит с guild_id:null,
+/// voice-сервер идентифицирует сессию по channel_id (server_id = канал).
 #[tauri::command]
 pub async fn join_voice(
     state: State<'_, Arc<AppState>>,
-    guild_id: String,
+    guild_id: Option<String>,
     channel_id: Option<String>,
     self_mute: bool,
     self_deaf: bool,
@@ -750,9 +752,11 @@ pub async fn join_voice(
         .clone()
         .ok_or("Gateway не подключён")?;
     let self_video = self_video.unwrap_or(false);
-    // Желаемое состояние мьюта на случай, если сессия стартует раньше,
-    // чем придёт первое эхо VOICE_STATE_UPDATE (events.rs обновляет её дальше).
-    {
+    // Ключ состояния (мьют-флаги и рукопожатие): гильдия для серверного
+    // войса, канал — для звонков ЛС (session_id-эхо придёт с guild_id:null
+    // и ляжет под тем же ключом — см. events.rs).
+    let state_key = guild_id.clone().or_else(|| channel_id.clone());
+    if let Some(key) = &state_key {
         let desired = if channel_id.is_some() {
             (self_mute, self_deaf)
         } else {
@@ -762,7 +766,7 @@ pub async fn join_voice(
             .voice_desired
             .lock()
             .unwrap()
-            .insert(guild_id.clone(), desired);
+            .insert(key.clone(), desired);
     }
     tx.send(GatewayCommand::VoiceStateUpdate {
         guild_id,
@@ -871,7 +875,10 @@ pub async fn subscribe_guild(
         .unwrap()
         .clone()
         .ok_or("Gateway не подключён")?;
-    // op 14: текстовые/войс-каналы из кэша — первые 10, диапазон [0, 99].
+    // op 14: текстовые/войс-каналы из кэша — до 25 каналов, диапазон [0, 99].
+    // Официальный клиент подписывает видимые каналы по мере скролла; 25
+    // покрывает типичный сервер и даёт полный список «кто в сети» (раньше
+    // 10 каналов — на больших серверах онлайн выглядел урезанным).
     let channels: Vec<(String, Vec<u32>)> = {
         let cache = state.cache.read().unwrap();
         cache
@@ -881,7 +888,7 @@ pub async fn subscribe_guild(
                 gs.channels
                     .iter()
                     .filter(|c| matches!(c.kind, 0 | 2 | 5 | 13))
-                    .take(10)
+                    .take(25)
                     .map(|c| (c.id.clone(), vec![0, 99]))
                     .collect()
             })

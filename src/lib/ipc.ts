@@ -56,8 +56,9 @@ export interface Backend {
   gatewaySendRaw(frame: string): Promise<void>;
   kickMember(guildId: string, userId: string): Promise<void>;
   banMember(guildId: string, userId: string): Promise<void>;
-  /** op 4 — войти/выйти из войс-канала; selfVideo — флаг камеры. */
-  joinVoice(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean, selfVideo?: boolean): Promise<void>;
+  /** op 4 — войти/выйти из войс-канала; guildId = null → звонок в ЛС/группе;
+   *  channelId = null → покинуть. selfVideo — флаг камеры. */
+  joinVoice(guildId: string | null, channelId: string | null, selfMute: boolean, selfDeaf: boolean, selfVideo?: boolean): Promise<void>;
   /** op 18 — начать трансляцию экрана/камеры (экспериментально). */
   startStream(streamType: 'screen' | 'camera', guildId: string, channelId: string): Promise<void>;
   /** op 20 — прекратить трансляцию. */
@@ -93,7 +94,7 @@ export interface Backend {
   readPlugin(name: string): Promise<string>;
 
   // voice
-  joinVoice(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean): Promise<void>;
+  joinVoice(guildId: string | null, channelId: string | null, selfMute: boolean, selfDeaf: boolean): Promise<void>;
 
   // tools
   parseSnowflake(id: string): Promise<SnowflakeInfo>;
@@ -226,7 +227,7 @@ class TauriBackend implements Backend {
     return this.invoke<string>('plugin_read', { name });
   }
 
-  async joinVoice(guildId: string, channelId: string | null, selfMute: boolean, selfDeaf: boolean, selfVideo?: boolean): Promise<void> {
+  async joinVoice(guildId: string | null, channelId: string | null, selfMute: boolean, selfDeaf: boolean, selfVideo?: boolean): Promise<void> {
     await this.invoke('join_voice', { guildId, channelId, selfMute, selfDeaf, selfVideo });
   }
 

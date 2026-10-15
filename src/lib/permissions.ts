@@ -89,6 +89,43 @@ export function computePermissions(
   return bits;
 }
 
+/** Права на канал: база (роли) + перезаписи — алгоритм из документации
+ *  Discord: @everyone-оверврайт → роль-оверврайты → личные оверврайты.
+ *  ADMINISTRATOR на базе short-circuit'ит всё (как в оригинале). */
+export function computeChannelPermissions(
+  base: bigint,
+  guildId: string,
+  overwrites: { id: string; type: number; allow: string; deny: string }[],
+  memberRoleIds: string[],
+  userId: string,
+): bigint {
+  if (base & PERMISSIONS.ADMINISTRATOR) return ~0n;
+  let bits = base;
+  const everyone = overwrites.find((o) => o.id === guildId && o.type === 0);
+  if (everyone) {
+    bits |= BigInt(everyone.allow || '0');
+    bits &= ~BigInt(everyone.deny || '0');
+  }
+  // Сначала собираем allow/deny по ВСЕМ ролям участника, потом применяем
+  // (как официальный клиент: allow любой роли + deny любой роли).
+  let allow = 0n;
+  let deny = 0n;
+  for (const o of overwrites) {
+    if (o.type === 0 && memberRoleIds.includes(o.id)) {
+      allow |= BigInt(o.allow || '0');
+      deny |= BigInt(o.deny || '0');
+    }
+  }
+  bits |= allow;
+  bits &= ~deny;
+  const mine = overwrites.find((o) => o.type === 1 && o.id === userId);
+  if (mine) {
+    bits |= BigInt(mine.allow || '0');
+    bits &= ~BigInt(mine.deny || '0');
+  }
+  return bits;
+}
+
 export function has(permBits: bigint, flag: bigint): boolean {
   if (permBits & PERMISSIONS.ADMINISTRATOR) return true;
   return (permBits & flag) === flag;

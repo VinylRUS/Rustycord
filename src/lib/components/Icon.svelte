@@ -65,6 +65,8 @@
   {:else if name === 'search'}
     <circle cx="10.5" cy="10.5" r="6.5" />
     <line x1="15.5" y1="15.5" x2="21" y2="21" />
+  {:else if name === 'phone'}
+    <path d="M6.6 3.5 4 4.7C3.4 5 3.1 5.7 3.3 6.4c1.5 5.6 5 9.1 10.6 10.6.7.2 1.4-.1 1.7-.7l1.2-2.6c.3-.6.1-1.3-.5-1.6l-2.6-1.5c-.5-.3-1.1-.2-1.5.2l-1 1c-1.8-1-3.2-2.4-4.2-4.2l1-1c.4-.4.5-1 .2-1.5L6.6 3.5z" fill="currentColor" stroke="none" transform="scale(-1 1) translate(-24 0)" />
   {:else if name === 'phone-off'}
     <path d="M3 15c4-5 9-7 15-7l3 3-4 3-3-2c-2 1-4 2.5-5 5l-2-3-4 1z" fill="currentColor" stroke="none" transform="rotate(-8 12 12)" />
     <line x1="3" y1="3" x2="21" y2="21" />

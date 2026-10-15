@@ -36,11 +36,23 @@
   const guild = $derived(app.activeGuild);
   const channels = $derived(app.activeGuildChannels);
 
-  const uncategorized = $derived(channels.filter((c) => c.type !== 4 && !c.parent_id));
-  const categories = $derived(channels.filter((c) => c.type === 4));
+  /** Канал виден текущей роли? (переписи прав из GUILD_CREATE/REST). */
+  function visible(c: Channel): boolean {
+    return !guild || app.canViewChannel(guild.id, c);
+  }
+
+  const uncategorized = $derived(
+    channels.filter((c) => c.type !== 4 && !c.parent_id && visible(c)),
+  );
+  /** Категории без единого видимого канала прячем целиком — как оригинал. */
+  const categories = $derived(
+    channels.filter(
+      (c) => c.type === 4 && channels.some((ch) => ch.parent_id === c.id && ch.type !== 4 && visible(ch)),
+    ),
+  );
 
   function childrenOf(catId: string): Channel[] {
-    return channels.filter((c) => c.parent_id === catId && c.type !== 4);
+    return channels.filter((c) => c.parent_id === catId && c.type !== 4 && visible(c));
   }
 
   function isText(c: Channel): boolean {
@@ -147,7 +159,7 @@
           class:active={app.activeChannelId === c.id}
           onclick={() => app.selectChannel(c.id)}
         >
-          <Avatar user={u} size={32} status={app.statusOf(app.activeGuild?.id ?? '', u?.id ?? '')} ringColor="var(--bg-secondary)" />
+          <Avatar user={u} size={32} status={app.statusOfDm(u?.id ?? '')} ringColor="var(--bg-secondary)" />
           <span class="dm-name truncate">{c.recipients?.map((r) => displayName(r)).join(', ')}</span>
           {#if app.unread[c.id]}
             <span class="unread-badge"></span>
@@ -205,6 +217,22 @@
         <Icon name="camera" size={18} color={app.myStreams.some((s) => s.type === 'camera') ? '#23a55a' : '#b5bac1'} />
       </button>
       <button class="voice-leave" title="Отключиться" onclick={() => void app.leaveVoice()}>
+        <Icon name="phone-off" size={20} color="#f23f43" />
+      </button>
+    </div>
+  {:else if app.myVoice && !guild}
+    <!-- Звонок в ЛС/группе: панель как в оригинале (участники + управление) -->
+    <div class="voice-panel">
+      <div class="voice-info">
+        <div class="voice-status">
+          <Icon name="signal" size={16} color="#23a55a" />
+          <span>Звонок · {app.dmCallUsers(app.myVoice.channelId).length || 1}</span>
+        </div>
+        <div class="voice-target truncate">
+          {app.channelTitle || 'Беседа'} · {app.myVoice.mode ?? 'подключаемся…'}
+        </div>
+      </div>
+      <button class="voice-leave" title="Завершить звонок" onclick={() => void app.leaveVoice()}>
         <Icon name="phone-off" size={20} color="#f23f43" />
       </button>
     </div>

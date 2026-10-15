@@ -57,8 +57,10 @@ pub enum GatewayCommand {
         channels: Vec<(String, Vec<u32>)>,
     },
     /// op 4 — join/leave a voice channel or change self mute/deaf.
+    /// `guild_id: None` — звонок в ЛС/группе (протокол DM-звонков: op4 уходит
+    /// с guild_id:null, а voice-сервер идентифицирует сессию по channel_id).
     VoiceStateUpdate {
-        guild_id: String,
+        guild_id: Option<String>,
         channel_id: Option<String>,
         self_mute: bool,
         self_deaf: bool,
@@ -131,6 +133,9 @@ impl Cache {
 /// the voice coordinator can dial the media server.
 #[derive(Debug, Clone, Default)]
 pub struct VoiceHandshake {
+    /// Ключ сессии: guild_id — для серверного войса, channel_id — для
+    /// звонков в ЛС/группе (голосовой сервер идентифицирует DM-сессию
+    /// по каналу, он же уходит в songbird как server_id).
     pub guild_id: String,
     pub user_id: String,
     pub session_id: Option<String>,
@@ -139,6 +144,9 @@ pub struct VoiceHandshake {
     /// Канал, в который ведём рукопожатие (из эха op4) — нужен songbird'у
     /// для ConnectionInfo, VOICE_SERVER_UPDATE его не несёт.
     pub channel_id: Option<String>,
+    /// Звонок в ЛС/группе: VOICE_STATE/VOICE_SERVER_UPDATE приходят с
+    /// guild_id:null — рукопожатие сшивается по этому флагу + session_id.
+    pub is_dm: bool,
 }
 
 impl VoiceHandshake {

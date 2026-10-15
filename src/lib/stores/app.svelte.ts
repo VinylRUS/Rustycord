@@ -7,6 +7,12 @@
  */
 import { createBackend, type Backend } from '../ipc';
 import { plugins, onPluginToast } from '../plugins/manager';
+import {
+  computeChannelPermissions,
+  computePermissions,
+  has,
+  PERMISSIONS,
+} from '../permissions';
 import type {
   BanEntry,
   Channel,
@@ -48,6 +54,7 @@ interface TypingEntry {
 }
 
 interface MyVoice {
+  /** '' для звонка в ЛС/группе (протокол DM-звонков: guild_id = null). */
   guildId: string;
   channelId: string;
   selfMute: boolean;
@@ -123,6 +130,9 @@ export class AppStore {
   /* ---------- voice ---------- */
   myVoice = $state<MyVoice | null>(null);
   speaking = $state<Record<string, boolean>>({});
+  /** Участники звонков в ЛС/группах: channel_id → голосовые состояния
+   *  (VOICE_STATE_UPDATE с guild_id = null — как у оригинального клиента). */
+  dmCalls = $state<Record<string, VoiceState[]>>({});
 
   /* ---------- ui ---------- */
   activeGuildId = $state<string | null>(null); // null → DM home
@@ -485,6 +495,8 @@ export class AppStore {
     this.activeChannelId = null;
     this.myVoice = null;
     this.speaking = {};
+    this.dmCalls = {};
+    this.streams = {};
     this.unread = {};
     this.connStage = 'offline';
     this.connDetail = '';
@@ -1006,7 +1018,33 @@ export class AppStore {
       case 'VOICE_STATE_UPDATE': {
         const vs = d as VoiceState;
         plugins.emit('voice:state', vs);
-        if (!vs.guild_id) break;
+        // Звонок в ЛС/группе: guild_id = null — участники едут в dmCalls.
+        if (!vs.guild_id) {
+          const map = { ...this.dmCalls };
+          for (const key of Object.keys(map)) {
+            map[key] = map[key].filter((v) => v.user_id !== vs.user_id);
+          }
+          if (vs.channel_id) {
+            map[vs.channel_id] = [...(map[vs.channel_id] ?? []), vs];
+          } else {
+            delete map['']; // страховка от мусорного ключа
+          }
+          this.dmCalls = map;
+          if (vs.user_id === this.user?.id) {
+            if (vs.channel_id) {
+              this.myVoice = {
+                guildId: '',
+                channelId: vs.channel_id,
+                selfMute: !!vs.self_mute,
+                selfDeaf: !!vs.self_deaf,
+                selfVideo: !!vs.self_video,
+              };
+            } else {
+              this.myVoice = null;
+            }
+          }
+          break;
+        }
         const list = (this.voiceByGuild[vs.guild_id] ?? []).filter((v) => v.user_id !== vs.user_id);
         if (vs.channel_id) list.push(vs);
         this.voiceByGuild[vs.guild_id] = list;
@@ -1083,18 +1121,23 @@ export class AppStore {
     }
   }
 
-  /** Подтягиваем настоящие имена/иконки гильдий юзера через REST
+  /** Подтягиваем ПОЛНЫЙ список гильдий юзера через REST
    *  GET /users/@me/guilds: в отличие от gateway-пейлоадов юзер-сессий
    *  (безымянные стабы READY, GUILD_CREATE с именем в properties.name),
-   *  этот эндпоинт всегда возвращает name и icon. Вызов после READY. */
+   *  этот эндпоинт всегда возвращает name и icon — это авторитетный
+   *  источник для рейла серверов. Гильдии, которых ещё нет в кэше,
+   *  ДОБАВЛЯЕМСЯ (union): стабы READY могут быть неполными — без этого
+   *  часть серверов не отображалась вовсе. Новые гильдии без каналов
+   *  подписываемся op 37 — GUILD_CREATE подвезёт каналы. */
   private async fetchUserGuilds(): Promise<void> {
     if (this.mode !== 'tauri' || this.isBotAccount) return;
     try {
-      const res = await this.backend?.apiRequest('GET', '/users/@me/guilds');
+      const res = await this.backend?.apiRequest('GET', '/users/@me/guilds?limit=200');
       const list = res as
-        | { id: string; name?: string; icon?: string | null }[]
+        | { id: string; name?: string; icon?: string | null; owner?: boolean }[]
         | undefined;
       if (!Array.isArray(list)) return;
+      const fresh: string[] = [];
       for (const u of list) {
         if (!u?.id) continue;
         const idx = this.guilds.findIndex((g) => g.id === u.id);
@@ -1104,7 +1147,30 @@ export class AppStore {
             name: u.name || this.guilds[idx].name,
             icon: u.icon ?? this.guilds[idx].icon ?? null,
           };
+        } else {
+          // Сервер есть в аккаунте, но стаба READY не было — добавляем.
+          this.guilds.push({
+            id: u.id,
+            name: u.name || '…',
+            icon: u.icon ?? null,
+            owner_id: '',
+            roles: [],
+            channels: [],
+          } as Guild);
+          fresh.push(u.id);
         }
+      }
+      // Порядок из guild_folders сохраняем, новинки — в конец.
+      if (Object.keys(this.guildOrder).length) {
+        this.guilds = [...this.guilds].sort(
+          (a, b) => (this.guildOrder[a.id] ?? 1e9) - (this.guildOrder[b.id] ?? 1e9),
+        );
+      }
+      // Только что добавленные гильдии без каналов: подписка op 37 —
+      // по наблюдениям v0.5.0 юзер-сессии получают GUILD_CREATE на
+      // подписанные гильдии.
+      for (const gid of fresh) {
+        void this.backend?.subscribeGuild(gid).catch(() => undefined);
       }
     } catch {
       // Не критично: имена доберутся из GUILD_CREATE (properties.name).
@@ -1165,9 +1231,14 @@ export class AppStore {
     if (id && !this.isBotAccount && this.mode === 'tauri') {
       void this.backend?.subscribeGuild(id).catch(() => undefined);
     }
+    // Выбор канала: только из ВИДИМЫХ текущей роли (скрытые каналы
+    // пропускаем — как в оригинале).
     const remembered = id !== null ? this.lastChannelByGuild[id] : undefined;
-    const channels = (guild.channels ?? []).filter((c) => c.type !== 4);
-    const target = channels.find((c) => c.id === remembered) ?? channels.find((c) => c.type === 0) ?? channels[0];
+    const channels = id !== null ? this.visibleChannels(id).filter((c) => c.type !== 4) : [];
+    const target =
+      channels.find((c) => c.id === remembered) ??
+      channels.find((c) => c.type === 0) ??
+      channels[0];
     this.selectChannel(target?.id ?? null);
   }
 
@@ -1550,9 +1621,12 @@ export class AppStore {
     }
   }
 
-  async toggleVoice(guildId: string, channelId: string) {
+  async toggleVoice(guildId: string | null, channelId: string) {
     if (!this.backend) return;
-    const joined = this.myVoice?.guildId === guildId && this.myVoice?.channelId === channelId;
+    // guildId = null → звонок в ЛС/группе (myVoice.guildId === '').
+    const joined =
+      this.myVoice?.channelId === channelId &&
+      this.myVoice?.guildId === (guildId ?? '');
     try {
       await this.backend.joinVoice(
         guildId,
@@ -1571,7 +1645,13 @@ export class AppStore {
     if (!this.backend || !this.myVoice) return;
     try {
       await this.stopLocalPreview();
-      await this.backend.joinVoice(this.myVoice.guildId, null, false, false, false);
+      await this.backend.joinVoice(
+        this.myVoice.guildId || null,
+        null,
+        false,
+        false,
+        false,
+      );
     } catch (e) {
       this.toast(`Ошибка выхода: ${errMsg(e)}`, 'error');
     }
@@ -1580,7 +1660,13 @@ export class AppStore {
   async setSelfMute(mute: boolean) {
     if (!this.backend || !this.myVoice) return;
     try {
-      await this.backend.joinVoice(this.myVoice.guildId, this.myVoice.channelId, mute, this.myVoice.selfDeaf, this.myVoice.selfVideo);
+      await this.backend.joinVoice(
+        this.myVoice.guildId || null,
+        this.myVoice.channelId,
+        mute,
+        this.myVoice.selfDeaf,
+        this.myVoice.selfVideo,
+      );
     } catch {
       /* silent */
     }
@@ -1589,7 +1675,13 @@ export class AppStore {
   async setSelfDeaf(deaf: boolean) {
     if (!this.backend || !this.myVoice) return;
     try {
-      await this.backend.joinVoice(this.myVoice.guildId, this.myVoice.channelId, this.myVoice.selfMute, deaf, this.myVoice.selfVideo);
+      await this.backend.joinVoice(
+        this.myVoice.guildId || null,
+        this.myVoice.channelId,
+        this.myVoice.selfMute,
+        deaf,
+        this.myVoice.selfVideo,
+      );
     } catch {
       /* silent */
     }
@@ -1929,6 +2021,70 @@ export class AppStore {
     if (guild) return guild.status;
     // Вне гильдии (друзья, ЛС) — карта дружеских статусов.
     return this.friendPresences[userId]?.status ?? 'offline';
+  }
+
+  /** Статус собеседника ЛС/группы: друзья → любые общие серверы.
+   *  Раньше брали только friendPresences — неличные партнёры по группе
+   *  всегда выглядели «не в сети». */
+  statusOfDm(userId: string): string {
+    const friend = this.friendPresences[userId];
+    if (friend) return friend.status;
+    for (const map of Object.values(this.presencesByGuild)) {
+      const p = map[userId];
+      if (p) return p.status;
+    }
+    return 'offline';
+  }
+
+  /** Участники звонка в ЛС/группе (VOICE_STATE_UPDATE с guild_id = null). */
+  dmCallUsers(channelId: string): VoiceState[] {
+    return this.dmCalls[channelId] ?? [];
+  }
+
+  /** Своя карточка участника гильдии (роли — для расчёта прав). */
+  myMemberOf(guildId: string): Member | null {
+    if (!this.user) return null;
+    return this.membersByGuild[guildId]?.[this.user.id] ?? null;
+  }
+
+  /** Базовые права в гильдии: объединение бит ролей (вкл. @everyone).
+   *  null = данных нет (не пришла карточка/роли) — UI не фильтрует. */
+  myBasePermissions(guildId: string): bigint | null {
+    const guild = this.guilds.find((g) => g.id === guildId);
+    const me = this.myMemberOf(guildId);
+    if (!guild || !me || !guild.roles.length) return null;
+    const roleIds = [...me.roles, guildId]; // @everyone = id гильдии
+    return computePermissions(roleIds, guild.roles);
+  }
+
+  /** Виден ли канал текущему юзеру: VIEW_CHANNEL с учётом перезаписей
+   *  (@everyone → роли → личные). Без данных о ролях не скрываем —
+   *  лучше показать лишний канал, чем спрятать весь сервер. */
+  canViewChannel(guildId: string, channel: Channel): boolean {
+    if (this.isBotAccount || this.isDemo) return true;
+    if (channel.type === 4) return true; // категории фильтруем по детям
+    const base = this.myBasePermissions(guildId);
+    if (base === null) return true;
+    if (has(base, PERMISSIONS.ADMINISTRATOR)) return true;
+    const overwrites = channel.permission_overwrites ?? [];
+    if (!overwrites.length) return has(base, PERMISSIONS.VIEW_CHANNEL);
+    const me = this.myMemberOf(guildId);
+    const roleIds = [...(me?.roles ?? []), guildId];
+    const bits = computeChannelPermissions(
+      base,
+      guildId,
+      overwrites,
+      roleIds,
+      this.user?.id ?? '',
+    );
+    return has(bits, PERMISSIONS.VIEW_CHANNEL);
+  }
+
+  /** Каналы гильдии, видимые текущему юзеру (для сайдбара/выбора). */
+  visibleChannels(guildId: string): Channel[] {
+    const guild = this.guilds.find((g) => g.id === guildId);
+    if (!guild) return [];
+    return (guild.channels ?? []).filter((c) => this.canViewChannel(guildId, c));
   }
 
   voiceUsers(guildId: string, channelId: string): VoiceState[] {

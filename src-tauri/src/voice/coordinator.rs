@@ -89,13 +89,14 @@ async fn run_session(
     cancel: CancellationToken,
 ) {
     let guild_id = hs.guild_id.clone();
-    tracing::info!("voice[songbird]: сессия для гильдии {guild_id}");
+    let kind = if hs.is_dm { "звонок ЛС" } else { "гильдия" };
+    tracing::info!("voice[songbird]: сессия ({kind}) для {guild_id}");
     let res = voice_session(&app, &state, &hs, &cancel).await;
     if let Err(e) = res {
         tracing::error!("voice[songbird]: ошибка сессии: {e:#}");
         let _ = app.emit(
             "discord://voice",
-            json!({ "kind": "disconnected", "data": { "guild_id": guild_id } }),
+            json!({ "kind": "disconnected", "data": { "guild_id": guild_id, "dm": hs.is_dm } }),
         );
     }
     // Self-cleanup so a fresh join can start immediately.

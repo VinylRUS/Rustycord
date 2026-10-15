@@ -156,9 +156,14 @@
       <p class="note">Токен живёт в localStorage браузера (ключ <code>token</code>) или в DevTools → Application.</p>
     {/if}
 
-    <button class="btn-ghost demo" onclick={() => void demo()} disabled={app.loginBusy}>
-      🦀 Открыть демо-режим (без входа)
-    </button>
+    {#if !isTauri}
+      <!-- Демо-режим — только для разработки в браузере: в собранном
+           приложении кнопку прячем (production-клиент ведёт себя как
+           настоящий клиент, без «симуляций»). -->
+      <button class="btn-ghost demo" onclick={() => void demo()} disabled={app.loginBusy}>
+        🦀 Открыть демо-режим (без входа)
+      </button>
+    {/if}
 
     <button class="help-toggle" onclick={() => (showHelp = !showHelp)}>
       {showHelp ? 'Скрыть' : 'Насколько это безопасно?'}

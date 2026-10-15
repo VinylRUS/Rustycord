@@ -111,6 +111,20 @@ pub struct Member {
     pub communication_disabled_until: Option<String>,
 }
 
+/// Перезапись прав на канал (permission overwrite): `id` — роль или юзер
+/// (`type`: 0 = роль, 1 = участник; для @everyone id = guild_id).
+/// allow/deny — битовые маски строкой (значения бывают > 2^53).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Overwrite {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: u8,
+    #[serde(default, deserialize_with = "de_permissions")]
+    pub allow: String,
+    #[serde(default, deserialize_with = "de_permissions")]
+    pub deny: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Channel {
     pub id: String,
@@ -138,6 +152,11 @@ pub struct Channel {
     pub owner_id: Option<String>,
     #[serde(default)]
     pub icon: Option<String>,
+    /// Перезаписи прав канала — по ним UI скрывает каналы, недоступные
+    /// роли пользователя (VIEW_CHANNEL). Присутствуют в GUILD_CREATE,
+    /// CHANNEL_CREATE/UPDATE — REST-объекты каналов их тоже несут.
+    #[serde(default)]
+    pub permission_overwrites: Vec<Overwrite>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -584,5 +603,28 @@ mod tests {
         assert!(Guild::name_from_payload(&v).is_none());
         let s = Guild::salvage_from_value(&v).expect("salvage");
         assert_eq!(s.name, "…");
+    }
+
+    /// v0.9.0: каналы несут permission_overwrites — скрытые для роли каналы
+    /// определяются по deny VIEW_CHANNEL (бит 10, 1024) на @everyone/роль.
+    /// allow/deny приходят строкой, но местами числом — оба должны парситься.
+    #[test]
+    fn channel_overwrites_parse_string_and_number() {
+        let mut v = realistic_guild_create();
+        v["channels"][0]["permission_overwrites"] = json!([
+            {"id": "918746238947562345", "type": 0,
+             "allow": "0", "deny": "1024"},           // @everyone: deny VIEW_CHANNEL
+            {"id": "918746238947562346", "type": 0,
+             "allow": 1024, "deny": "0"},             // роль: allow (числом!)
+            {"id": "111111111111111111", "type": 1,
+             "allow": "1024", "deny": "0"}            // конкретный юзер
+        ]);
+        let g: Guild = serde_json::from_value(v).expect("overwrites парсятся");
+        let chans = g.channels.unwrap();
+        let ow = &chans[0].permission_overwrites;
+        assert_eq!(ow.len(), 3);
+        assert_eq!(ow[0].deny, "1024");
+        assert_eq!(ow[1].allow, "1024", "allow числом тоже принимается");
+        assert_eq!(ow[2].kind, 1);
     }
 }

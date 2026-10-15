@@ -280,16 +280,22 @@ async fn run_session(
                         tracing::debug!("gateway: op 14 member list для {guild_id} ({} каналов)", channels.len());
                     }
                     Some(GatewayCommand::VoiceStateUpdate { guild_id, channel_id, self_mute, self_deaf, self_video }) => {
-                        wsutil::send_json(&mut writer, &json!({
-                            "op": 4,
-                            "d": {
-                                "guild_id": guild_id,
-                                "channel_id": channel_id,   // null → покинуть канал
-                                "self_mute": self_mute,
-                                "self_deaf": self_deaf,
-                                "self_video": self_video
-                            }
-                        })).await?;
+                        // op 4: войти/покинуть голосовой канал. Для звонков в
+                        // ЛС/группе guild_id = null — так шлёт официальный
+                        // клиент (voice-сервер идентифицирует по channel_id).
+                        wsutil::send_json(
+                            &mut writer,
+                            &json!({
+                                "op": 4,
+                                "d": {
+                                    "guild_id": guild_id,     // null → звонок в ЛС
+                                    "channel_id": channel_id, // null → покинуть канал
+                                    "self_mute": self_mute,
+                                    "self_deaf": self_deaf,
+                                    "self_video": self_video
+                                }
+                            }),
+                        ).await?;
                     }
                     Some(GatewayCommand::StreamCreate { stream_type, guild_id, channel_id }) => {
                         // op 18 STREAM_CREATE — «показать экран»/«включить

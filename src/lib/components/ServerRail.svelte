@@ -10,6 +10,8 @@
   let joining = $state(false);
   let newServerName = $state('');
   let creatingServer = $state(false);
+  /** Иконки, чей CDN-запрос упал (устаревший хэш/сеть) — показываем инициалы. */
+  let iconFailed = $state<Record<string, boolean>>({});
 
   function unreadOfGuild(guildId: string): boolean {
     const g = app.guilds.find((x) => x.id === guildId);
@@ -69,14 +71,19 @@
   <div class="separator"></div>
 
   {#each guilds as guild (guild.id)}
-    {@const icon = guildIconUrl(guild)}
+    {@const icon = iconFailed[guild.id] ? null : guildIconUrl(guild)}
     {@const active = app.activeGuildId === guild.id}
     {@const unread = unreadOfGuild(guild.id)}
     <div class="pill-container">
       <button class="server" class:active onclick={() => select(guild.id)}>
         <span class="tooltip">{guild.name ?? 'Без названия'}</span>
         {#if icon}
-          <img src={icon} alt={guild.name ?? ''} />
+          <img
+            src={icon}
+            alt={guild.name ?? ''}
+            loading="lazy"
+            onerror={() => (iconFailed[guild.id] = true)}
+          />
         {:else}
           <span class="guild-initial" style="background: {defaultAvatarColor(guild.id)}">
             {initials(guild.name)}
