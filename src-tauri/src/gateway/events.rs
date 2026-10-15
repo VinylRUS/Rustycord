@@ -625,8 +625,7 @@ pub async fn handle_dispatch(
                         // сшивает рукопожатие по channel_id (voice-сервер
                         // идентифицирует DM-сессию по каналу); чужие состояния
                         // просто едут в UI (участники звонка).
-                        let is_self =
-                            state.self_id().as_deref() == Some(vs.user_id.as_str());
+                        let is_self = state.self_id().as_deref() == Some(vs.user_id.as_str());
                         if is_self {
                             match vs.channel_id.clone() {
                                 Some(cid) => {
@@ -689,8 +688,7 @@ pub async fn handle_dispatch(
                             }
                         }
                         // Голосовое рукопожатие для нас самих: запоминаем session_id.
-                        let is_self =
-                            state.self_id().as_deref() == Some(vs.user_id.as_str());
+                        let is_self = state.self_id().as_deref() == Some(vs.user_id.as_str());
                         if is_self {
                             if let (Some(sid), true) =
                                 (vs.session_id.clone(), vs.channel_id.is_some())
@@ -754,9 +752,7 @@ pub async fn handle_dispatch(
                 // незавершённое DM-рукопожатие (голосовая сессия одна за раз).
                 let user_id = state.self_id().unwrap_or_default();
                 let mut hs = state.voice_handshake.lock().unwrap();
-                if let Some((_, entry)) = hs
-                    .iter_mut()
-                    .find(|(_, h)| h.is_dm && h.token.is_none())
+                if let Some((_, entry)) = hs.iter_mut().find(|(_, h)| h.is_dm && h.token.is_none())
                 {
                     entry.user_id = user_id;
                     entry.token = Some(token);

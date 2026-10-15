@@ -89,7 +89,11 @@ async fn run_session(
     cancel: CancellationToken,
 ) {
     let guild_id = hs.guild_id.clone();
-    let kind = if hs.is_dm { "звонок ЛС" } else { "гильдия" };
+    let kind = if hs.is_dm {
+        "звонок ЛС"
+    } else {
+        "гильдия"
+    };
     tracing::info!("voice[songbird]: сессия ({kind}) для {guild_id}");
     let res = voice_session(&app, &state, &hs, &cancel).await;
     if let Err(e) = res {
