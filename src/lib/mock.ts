@@ -8,7 +8,7 @@
  *     is exactly what the Rust core receives from the real Gateway.
  */
 import type { Backend, GetMessageOptions } from './ipc';
-import type { BackendEvent, Channel, Guild, LoginResult, Member, Message, PluginInfo, PluginMeta, Presence, Relationship, Role, SnowflakeInfo, StateSnapshot, UpdateInfo, User, UserProfile, VoiceState } from './types';
+import type { BackendEvent, Channel, Guild, GuildFolder, LoginResult, Member, Message, PluginInfo, PluginMeta, Presence, RailOrderItem, Relationship, Role, SnowflakeInfo, StateSnapshot, UpdateInfo, User, UserProfile, VoiceState } from './types';
 import { parseSnowflakeLocal } from './time';
 
 /* ---------- helpers ---------- */
@@ -139,6 +139,93 @@ const GUILD: Guild = {
   presences: PRESENCES,
   member_count: MEMBERS.length,
   large: false,
+};
+
+/* ================= v0.9.3: демо-папки =================
+ * Два мини-сервера + раскладка рейла с папкой «Проекты» — как в реальном
+ * клиенте после декодирования user_settings_proto. Нужны, чтобы папки
+ * (раскрытие в рейле) работали в демо-режиме браузера. */
+
+const GUILD2_ID = '1301000000000000020';
+const GUILD3_ID = '1301000000000000030';
+
+const EVERYONE_ROLE = (gid: string): Role[] => [
+  { id: gid, name: '@everyone', color: 0, hoist: false, position: 0, permissions: '104324673', managed: false },
+];
+
+function miniGuild(
+  id: string,
+  name: string,
+  members: Member[],
+  presences: Presence[],
+): Guild {
+  const cat = `${id.slice(0, -1)}1`;
+  const chat = `${id.slice(0, -1)}2`;
+  const voice = `${id.slice(0, -1)}3`;
+  return {
+    id,
+    name,
+    icon: null,
+    owner_id: members[0]?.user?.id ?? ALEXEY.id,
+    roles: EVERYONE_ROLE(id),
+    emojis: [],
+    channels: [
+      { id: cat, type: 4, guild_id: id, name: 'Общее', position: 0, parent_id: null },
+      { id: chat, type: 0, guild_id: id, name: 'общий', position: 0, parent_id: cat, topic: null },
+      { id: voice, type: 2, guild_id: id, name: 'Войс', position: 1, parent_id: cat },
+    ],
+    threads: [],
+    voice_states: [],
+    presences,
+    member_count: members.length,
+    large: false,
+    // члены едут прямо в GUILD_CREATE (мини-гильдии демо: чанк не нужен).
+    members,
+  };
+}
+
+const GUILD2 = miniGuild(
+  GUILD2_ID,
+  'Rust Playground',
+  [
+    { user: ALEXEY, nick: null, roles: [], joined_at: '2025-12-01T10:00:00.000+00:00' },
+    { user: OLYA, nick: null, roles: [], joined_at: '2025-12-02T10:00:00.000+00:00' },
+    { user: ME, nick: null, roles: [], joined_at: '2025-12-03T10:00:00.000+00:00' },
+  ],
+  [
+    { user: { id: ALEXEY.id }, status: 'online', activities: [] },
+    { user: { id: OLYA.id }, status: 'idle', activities: [] },
+  ],
+);
+
+const GUILD3 = miniGuild(
+  GUILD3_ID,
+  'Мемы про крабов',
+  [
+    { user: MARINA, nick: null, roles: [], joined_at: '2025-12-05T10:00:00.000+00:00' },
+    { user: PYOTR, nick: null, roles: [], joined_at: '2025-12-06T10:00:00.000+00:00' },
+    { user: ME, nick: null, roles: [], joined_at: '2025-12-07T10:00:00.000+00:00' },
+  ],
+  [
+    { user: { id: MARINA.id }, status: 'dnd', activities: [] },
+    { user: { id: PYOTR.id }, status: 'offline', activities: [] },
+  ],
+);
+
+/** Раскладка рейла демо-мира: главный сервер + папка «Проекты». */
+const GUILD_LAYOUT: {
+  folders: GuildFolder[];
+  guild_positions: string[];
+  rail_order: RailOrderItem[];
+} = {
+  folders: [
+    { id: '7', name: 'Проекты', color: 0x5865f2, guild_ids: [GUILD2_ID, GUILD3_ID] },
+  ],
+  guild_positions: [GUILD_ID, GUILD2_ID, GUILD3_ID],
+  rail_order: [
+    { type: 'guild', id: GUILD_ID },
+    { type: 'folder', index: 0 },
+  ],
 };
 
 const DMS: Channel[] = [
@@ -394,6 +481,14 @@ export class MockBackend implements Backend {
       t: 'GUILD_CREATE',
       d: { ...GUILD, members: [], presences: PRESENCES, voice_states: [...VOICE_STATES] },
     });
+    await delay(200);
+    // v0.9.3: мини-гильдии демо-папки «Проекты» + раскладка рейла
+    // (как её декодирует Rust из user_settings_proto реального клиента).
+    this.emit({ type: 'dispatch', t: 'GUILD_CREATE', d: { ...GUILD2 } });
+    await delay(150);
+    this.emit({ type: 'dispatch', t: 'GUILD_CREATE', d: { ...GUILD3 } });
+    await delay(100);
+    this.emit({ type: 'guildLayout', ...GUILD_LAYOUT });
     await delay(300);
     this.emit({
       type: 'dispatch',
@@ -415,7 +510,11 @@ export class MockBackend implements Backend {
   async getState(): Promise<StateSnapshot> {
     return {
       user: ME,
-      guilds: [{ ...GUILD, members: this.members, presences: PRESENCES, voice_states: VOICE_STATES }],
+      guilds: [
+        { ...GUILD, members: this.members, presences: PRESENCES, voice_states: VOICE_STATES },
+        { ...GUILD2 },
+        { ...GUILD3 },
+      ],
       dms: DMS,
       relationships: this.relationships.map((r) => ({ ...r })),
       friend_presences: FRIEND_PRESENCES,
@@ -541,8 +640,84 @@ export class MockBackend implements Backend {
     /* демо-режим: все события и так приходят из локальной симуляции */
   }
 
-  async subscribeChannel(_guildId: string, _channelId: string | null): Promise<void> {
-    /* демо-режим: список участников приходит из локальной симуляции */
+  async subscribeChannel(
+    guildId: string,
+    channelId: string | null,
+    _ranges?: [number, number][],
+  ): Promise<void> {
+    // Демо-контракт 1:1 с продакшеном: selectChannel → subscribeChannel →
+    // событие memberList (в реале — GUILD_MEMBER_LIST_UPDATE из Rust).
+    // Собираем сайдбар из локального мира: группы по хойст-ролям (сверху
+    // вниз), внутри — по алфавиту; в конце — офлайн (как сервер собирает).
+    if (!channelId) return;
+    const world: Record<string, { members: Member[]; presences: Presence[]; roles: Role[] }> = {
+      [GUILD_ID]: { members: this.members, presences: PRESENCES, roles: ROLES },
+      [GUILD2_ID]: { members: GUILD2.members ?? [], presences: GUILD2.presences ?? [], roles: GUILD2.roles },
+      [GUILD3_ID]: { members: GUILD3.members ?? [], presences: GUILD3.presences ?? [], roles: GUILD3.roles },
+    };
+    const w = world[guildId];
+    if (!w) return;
+    const statusOf = (uid: string) =>
+      w.presences.find((p) => p.user.id === uid)?.status ?? 'offline';
+    const actsOf = (uid: string) =>
+      w.presences.find((p) => p.user.id === uid)?.activities ?? [];
+    const byName = (a: Member, b: Member) =>
+      (a.nick || a.user?.global_name || a.user?.username || '').localeCompare(
+        b.nick || b.user?.global_name || b.user?.username || '',
+        'ru',
+      );
+    type Row = Extract<import('./types').MemberListRowData, { kind: 'member' }>;
+    const rowOf = (m: Member): Row => {
+      const u = m.user!;
+      const status = statusOf(u.id);
+      return {
+        kind: 'member',
+        user_id: u.id,
+        username: u.username,
+        global_name: u.global_name ?? null,
+        nick: m.nick ?? null,
+        discriminator: u.discriminator ?? '0',
+        avatar: u.avatar ?? null,
+        bot: u.bot ?? false,
+        status,
+        activities: actsOf(u.id) as Row['activities'],
+        roles: m.roles,
+        hoisted_role: null,
+      };
+    };
+    const rows: import('./types').MemberListRowData[] = [];
+    let online = 0;
+    const hoisted = [...w.roles].filter((r) => r.hoist).sort((a, b) => b.position - a.position);
+    for (const role of hoisted) {
+      const group = w.members
+        .filter((m) => m.roles.includes(role.id) && statusOf(m.user!.id) !== 'offline')
+        .sort(byName);
+      if (!group.length) continue;
+      rows.push({ kind: 'group', id: role.id, count: group.length });
+      for (const m of group) rows.push(rowOf(m));
+      online += group.length;
+    }
+    const noRole = w.members
+      .filter((m) => !m.roles.some((rid) => hoisted.some((r) => r.id === rid)) && statusOf(m.user!.id) !== 'offline')
+      .sort(byName);
+    if (noRole.length) {
+      rows.push({ kind: 'group', id: 'online', count: noRole.length });
+      for (const m of noRole) rows.push(rowOf(m));
+      online += noRole.length;
+    }
+    const offline = w.members.filter((m) => statusOf(m.user!.id) === 'offline');
+    if (offline.length) {
+      rows.push({ kind: 'group', id: 'offline', count: offline.length });
+      for (const m of offline.sort(byName)) rows.push(rowOf(m));
+    }
+    this.emit({
+      type: 'memberList',
+      guild_id: guildId,
+      channel_id: channelId,
+      member_count: w.members.length,
+      online_count: online,
+      rows,
+    });
   }
 
   async checkUpdate(): Promise<UpdateInfo | null> {

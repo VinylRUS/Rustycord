@@ -153,16 +153,72 @@
     return null;
   }
 
-  /** Юзер-аккаунты ждут первый SYNC ленивого списка, боты — чанки op 8. */
+  /** Юзер-аккаунты ждут первый SYNC ленивого списка, боты — чанки op 8.
+   *  Демо (mode='mock') синхронно присылает memberList — не мигаем. */
   const loading = $derived(
-    !!guild && (app.isBotAccount ? !app.chunksDone[guildId] : !lazyActive),
+    !!guild &&
+      app.mode === 'tauri' &&
+      (app.isBotAccount ? !app.chunksDone[guildId] : !lazyActive),
   );
 
   const shownOnline = $derived(lazyActive && lazy ? lazy.online_count : onlineCount);
   const shownTotal = $derived(lazyActive && lazy ? lazy.member_count : guild?.member_count);
+
+  /* ================= догрузка при скролле (математика официала) =================
+   * onScroll → GUILD_SUBSCRIPTIONS_CHANNEL из бандла discord.com:
+   *   l(x, extra) = max(0, ceil(x / rowHeight) + extra)  — видимые строки
+   *   overscan = l(высота/2); start = l(scrollTop, -overscan);
+   *   end = l(scrollTop + высота, overscan)
+   *   диапазоны: всегда [0,99] (если start > 0), дальше сотнями
+   *   [floor(start/100)*100 … end]. Сервер присылает SYNC только по
+   *   НОВЫМ диапазонам — повторная подписка не плодит трафик. */
+  const ROW_HEIGHT = 40;
+  const CHUNK = 100;
+  let lastRangesKey = '';
+  let scrollTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Сменился канал — стартовая подписка уже ушла из selectChannel ([[0,99]]),
+  // кэш диапазонов скролла обнуляем.
+  $effect(() => {
+    void app.activeChannelId;
+    lastRangesKey = '';
+  });
+
+  function onMembersScroll(e: Event) {
+    if (!lazyActive) return; // список ещё не приехал — нечего расширять
+    if (scrollTimer) clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => {
+      scrollTimer = null;
+      const el = e.currentTarget as HTMLElement;
+      const rows = (x: number, extra = 0) => Math.max(0, Math.ceil(x / ROW_HEIGHT) + extra);
+      const overscan = rows(el.clientHeight * 0.5);
+      let start = rows(el.scrollTop, -overscan);
+      const end = rows(el.scrollTop + el.clientHeight, overscan);
+      const ranges: [number, number][] = [];
+      const push = (s: number) => {
+        ranges.push([s, s + CHUNK - 1]);
+        return s + CHUNK;
+      };
+      if (start > 0) start = Math.max(push(0), start);
+      start = Math.floor(start / CHUNK) * CHUNK;
+      for (; start <= end; ) start = push(start);
+      const key = ranges.map(([a, b]) => `${a}:${b}`).join(',');
+      if (key === lastRangesKey) return; // ничего не изменилось
+      lastRangesKey = key;
+      app.subscribeMemberListRanges(ranges);
+    }, 150);
+  }
+
+  /** Участников в загруженных строках (для футера «…и ещё N»). */
+  const memberRows = $derived(
+    lazy ? lazy.rows.reduce((n, r) => (r.kind === 'member' ? n + 1 : n), 0) : 0,
+  );
+  const hiddenCount = $derived(
+    lazyActive && lazy && lazy.member_count > memberRows ? lazy.member_count - memberRows : 0,
+  );
 </script>
 
-<aside class="members">
+<aside class="members" onscroll={onMembersScroll}>
   {#if loading}
     <div class="chunk-hint muted">
       Загружаем участников…
@@ -210,6 +266,9 @@
         </button>
       {/if}
     {/each}
+    {#if hiddenCount > 0}
+      <div class="offline-more lazy-more">…и ещё {hiddenCount} — прокрутите ниже, подгрузим</div>
+    {/if}
   {:else}
     {#each groups as g (g.role?.id ?? 'offline')}
       <div class="group">
@@ -305,6 +364,11 @@
   .offline-more {
     font-size: 11px;
     padding: 4px 16px;
+  }
+  /* Ленивый режим: футер под последней группой. */
+  .lazy-more {
+    margin-top: 8px;
+    margin-bottom: 8px;
   }
   .pad { height: 24px; }
 </style>

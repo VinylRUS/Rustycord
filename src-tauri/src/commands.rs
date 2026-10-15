@@ -895,18 +895,25 @@ pub async fn subscribe_guild(
 }
 
 /// Подписаться на ленивый список участников канала (юзер-сессии):
-/// op 37 с ОДНИМ каналом и диапазоном [[0, 99]] — ровно как
+/// op 37 с ОДНИМ каналом и диапазонами строк — ровно как
 /// subscribeChannel в официальном клиенте. Ответ приезжает событием
 /// GUILD_MEMBER_LIST_UPDATE (SYNC → готовый сайдбар: группы + участники
 /// с пресенсами). `channel_id = null` → псевдоканал "0" (общий список
 /// участников гильдии, так делает официал без выбранного канала).
-/// Вызывается при КАЖДОМ переключении канала (дедупа нет — сервер
-/// просто присылает свежий SYNC, это и есть самовосстановление).
+///
+/// `ranges` — диапазоны [начало, конец] включительно, по 100 строк
+/// ([[0,99]] — стартовая подписка при переключении канала; при скролле
+/// фронтенд расширяет до [[0,99],[100,199],…] математикой официала:
+/// всегда [0,99] + сотни до видимой зоны + overscan = полвьюпорта).
+/// Вызывается при КАЖДОМ переключении канала и расширении (дедупа нет —
+/// сервер присылает SYNC только по НОВЫМ диапазонам, это и есть
+/// самовосстановление).
 #[tauri::command]
 pub async fn subscribe_channel(
     state: State<'_, Arc<AppState>>,
     guild_id: String,
     channel_id: Option<String>,
+    ranges: Option<Vec<(u64, u64)>>,
 ) -> Result<(), String> {
     if state.is_bot.load(Ordering::SeqCst) {
         return Ok(()); // боты получают список через op 8
@@ -917,19 +924,28 @@ pub async fn subscribe_channel(
         .unwrap()
         .clone()
         .ok_or("Gateway не подключён")?;
-    // Сменился канал — обнуляем старый снимок списка (придёт новый SYNC).
+    let ranges = ranges.unwrap_or_else(|| vec![(0, 99)]);
+    // Атомарно фиксируем целевое состояние подписки: канал + диапазоны.
+    // Сменился канал — обнуляем старый снимок (придёт новый SYNC);
+    // channel_id ставим СРАЗУ: пока SYNC нового канала едет, события
+    // старого (сервер держит его подписку до LRU-вытеснения) обязаны
+    // игнорироваться снапшотом, иначе список мерцает между каналами.
     {
         let mut lists = state.member_lists.lock().unwrap();
-        if let Some(list) = lists.get_mut(&guild_id) {
-            let cid = channel_id.clone().unwrap_or_else(|| "0".to_string());
-            if list.channel_id != cid {
-                list.rows.clear();
-            }
+        let list = lists.entry(guild_id.clone()).or_default();
+        let cid = channel_id.clone().unwrap_or_else(|| "0".to_string());
+        if list.channel_id != cid {
+            list.channel_id = cid;
+            list.rows.clear();
+            list.member_count = 0;
+            list.online_count = 0;
         }
+        list.ranges = ranges.clone();
     }
     tx.send(GatewayCommand::SubscribeMemberList {
         guild_id: guild_id.clone(),
         channel_id,
+        ranges,
     })
     .await
     .map_err(es)?;

@@ -5,7 +5,8 @@
 
   /** Иконки, чей CDN-запрос упал (устаревший хэш/сеть) — показываем инициалы. */
   let iconFailed = $state<Record<string, boolean>>({});
-  /** Раскрытая папка (index) — flyout с серверами папки. */
+  /** Раскрытая папка (index) — серверы раскрываются в рейле столбиком,
+   *  как в официальном клиенте (поповер по центру экрана — не по-дискордовски). */
   let openFolder = $state<number | null>(null);
 
   let showJoin = $state(false);
@@ -16,6 +17,12 @@
 
   function select(id: string | null) {
     openFolder = null;
+    app.selectGuild(id);
+  }
+
+  /** Сервер внутри раскрытой папки: папка остаётся раскрытой
+   *  (как в оригинале — клик по серверу не сворачивает папку). */
+  function selectInFolder(id: string) {
     app.selectGuild(id);
   }
 
@@ -133,87 +140,100 @@
         {@const unread = app.unreadOfFolder(item.index)}
         {@const active = f.guild_ids.includes(app.activeGuildId ?? '')}
         {@const expanded = openFolder === item.index}
-        <div class="pill-container">
-          <button
-            class="server folder"
-            class:active
-            class:expanded
-            style="--folder-color: {colorOf(f.color)}"
-            onclick={() => (openFolder = expanded ? null : item.index)}
-          >
-            <span class="tooltip">{folderTitle(item.index)}</span>
-            <span class="folder-body">
-              {#each f.guild_ids.slice(0, 4) as gid, j}
-                {@const g = app.guilds.find((x) => x.id === gid)}
-                {#if g}
-                  <span class="mini" data-pos={j}>
-                    {#if iconFailed[gid]}
-                      <span class="mini-initial" style="background: {defaultAvatarColor(gid)}">
-                        {initials(g.name)}
-                      </span>
-                    {:else if guildIconUrl(g)}
+        {#if expanded}
+          <!-- Раскрытая папка: цветной столбик с шапкой и серверами — как в оригинале -->
+          <div class="folder-open" style="--folder-color: {colorOf(f.color)}">
+            <div class="pill-container">
+              <button
+                class="folder-head"
+                onclick={() => (openFolder = null)}
+                title="Свернуть папку"
+              >
+                <span class="tooltip">{folderTitle(item.index)}</span>
+                <span class="folder-head-name truncate">{folderTitle(item.index)}</span>
+              </button>
+              <span class="pill pill-head visible"></span>
+            </div>
+            {#each f.guild_ids as gid (gid)}
+              {@const g = app.guilds.find((x) => x.id === gid)}
+              {#if g}
+                {@const icon = iconFailed[gid] ? null : guildIconUrl(g)}
+                {@const gActive = app.activeGuildId === gid}
+                {@const gMentions = app.mentionCountOfGuild(gid)}
+                {@const gUnread = app.unreadOfGuild(gid)}
+                <div class="pill-container">
+                  <button class="server" class:active={gActive} onclick={() => selectInFolder(gid)}>
+                    <span class="tooltip">{g.name ?? 'Без названия'}</span>
+                    {#if icon}
                       <img
-                        src={guildIconUrl(g) ?? ''}
+                        src={icon}
                         alt={g.name ?? ''}
                         loading="lazy"
                         onerror={() => (iconFailed[gid] = true)}
                       />
                     {:else}
-                      <span class="mini-initial" style="background: {defaultAvatarColor(gid)}">
+                      <span class="guild-initial" style="background: {defaultAvatarColor(gid)}">
                         {initials(g.name)}
                       </span>
                     {/if}
-                  </span>
-                {/if}
-              {/each}
-              {#if f.guild_ids.length > 4}<span class="mini-more">+{f.guild_ids.length - 4}</span>{/if}
-            </span>
-          </button>
-          <span class="pill" class:visible={active || expanded}></span>
-          {#if mentions > 0 && !active}
-            <span class="badge show">{mentions > 99 ? '99+' : mentions}</span>
-          {:else if unread && !active}
-            <span class="unread-dot"></span>
-          {/if}
-        </div>
+                  </button>
+                  <span class="pill" class:visible={gActive}></span>
+                  {#if gMentions > 0 && !gActive}
+                    <span class="badge show">{gMentions > 99 ? '99+' : gMentions}</span>
+                  {:else if gUnread && !gActive}
+                    <span class="unread-dot"></span>
+                  {/if}
+                </div>
+              {/if}
+            {/each}
+          </div>
+        {:else}
+          <div class="pill-container">
+            <button
+              class="server folder"
+              class:active
+              style="--folder-color: {colorOf(f.color)}"
+              onclick={() => (openFolder = item.index)}
+            >
+              <span class="tooltip">{folderTitle(item.index)}</span>
+              <span class="folder-body">
+                {#each f.guild_ids.slice(0, 4) as gid, j}
+                  {@const g = app.guilds.find((x) => x.id === gid)}
+                  {#if g}
+                    <span class="mini" data-pos={j}>
+                      {#if iconFailed[gid]}
+                        <span class="mini-initial" style="background: {defaultAvatarColor(gid)}">
+                          {initials(g.name)}
+                        </span>
+                      {:else if guildIconUrl(g)}
+                        <img
+                          src={guildIconUrl(g) ?? ''}
+                          alt={g.name ?? ''}
+                          loading="lazy"
+                          onerror={() => (iconFailed[gid] = true)}
+                        />
+                      {:else}
+                        <span class="mini-initial" style="background: {defaultAvatarColor(gid)}">
+                          {initials(g.name)}
+                        </span>
+                      {/if}
+                    </span>
+                  {/if}
+                {/each}
+                {#if f.guild_ids.length > 4}<span class="mini-more">+{f.guild_ids.length - 4}</span>{/if}
+              </span>
+            </button>
+            <span class="pill" class:visible={active}></span>
+            {#if mentions > 0 && !active}
+              <span class="badge show">{mentions > 99 ? '99+' : mentions}</span>
+            {:else if unread && !active}
+              <span class="unread-dot"></span>
+            {/if}
+          </div>
+        {/if}
       {/if}
     {/if}
   {/each}
-
-  {#if openFolder !== null && app.guildFolders[openFolder]}
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="folder-backdrop" onclick={() => (openFolder = null)}></div>
-    <div class="folder-pop">
-      {#if app.guildFolders[openFolder!].name}
-        <div class="folder-pop-title">{app.guildFolders[openFolder!].name}</div>
-      {/if}
-      {#each app.guildFolders[openFolder!].guild_ids as gid (gid)}
-        {@const g = app.guilds.find((x) => x.id === gid)}
-        {#if g}
-          {@const icon = iconFailed[gid] ? null : guildIconUrl(g)}
-          {@const gActive = app.activeGuildId === gid}
-          {@const gMentions = app.mentionCountOfGuild(gid)}
-          <button
-            class="folder-server"
-            class:active={gActive}
-            onclick={() => select(gid)}
-          >
-            {#if icon}
-              <img src={icon} alt={g.name ?? ''} loading="lazy" onerror={() => (iconFailed[gid] = true)} />
-            {:else}
-              <span class="guild-initial" style="background: {defaultAvatarColor(gid)}">
-                {initials(g.name)}
-              </span>
-            {/if}
-            <span class="folder-server-name truncate">{g.name}</span>
-            {#if gMentions > 0 && !gActive}
-              <span class="badge show">{gMentions > 99 ? '99+' : gMentions}</span>
-            {/if}
-          </button>
-        {/if}
-      {/each}
-    </div>
-  {/if}
 
   <div class="pill-container">
     <button
@@ -432,12 +452,10 @@
     position: relative;
   }
   .server.folder:hover .folder-body,
-  .server.folder.active .folder-body,
-  .server.folder.expanded .folder-body {
+  .server.folder.active .folder-body {
     background: var(--folder-color, #5865f2);
   }
   .server.folder.active,
-  .server.folder.expanded,
   .server.folder:hover {
     border-radius: 16px;
   }
@@ -477,63 +495,41 @@
     font-weight: 700;
   }
 
-  /* раскрывающийся список папки */
-  .folder-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 69;
+  /* раскрытая папка: цветной столбик с шапкой и серверами — как в официале */
+  .folder-open {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    width: 48px;
+    background: var(--folder-color, #5865f2);
+    border-radius: 16px;
+    padding: 8px 0;
+    animation: folderOpen 0.15s ease;
   }
-  .folder-pop {
-    position: fixed;
-    left: 84px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 260px;
-    max-height: 70vh;
-    overflow-y: auto;
-    background: var(--bg-primary);
-    border-radius: var(--radius-md);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-    padding: 10px;
-    z-index: 70;
-    animation: joinIn 0.15s ease;
+  @keyframes folderOpen {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
   }
-  .folder-pop-title {
-    color: var(--header-primary);
-    font-size: 13px;
-    font-weight: 700;
-    padding: 4px 10px 10px;
-  }
-  .folder-server {
+  .folder-head {
+    width: 40px;
+    height: 20px;
     display: flex;
     align-items: center;
-    gap: 10px;
-    width: 100%;
-    padding: 6px 10px;
-    border-radius: var(--radius-sm);
+    justify-content: center;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    position: relative;
   }
-  .folder-server:hover { background: var(--bg-modifier-hover); }
-  .folder-server.active { background: var(--bg-modifier-active); }
-  .folder-server img {
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    object-fit: cover;
-    flex-shrink: 0;
+  .folder-head:hover { filter: brightness(1.2); }
+  .folder-head-name {
+    max-width: 40px;
+    line-height: 1;
   }
-  .folder-server .guild-initial {
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    font-size: 12px;
-    flex-shrink: 0;
-  }
-  .folder-server-name {
-    color: var(--text-normal);
-    font-size: 14px;
-    font-weight: 600;
-    flex: 1;
-    text-align: left;
+  .pill-head.visible {
+    height: 20px;
   }
 
   /* красный бейдж упоминаний */

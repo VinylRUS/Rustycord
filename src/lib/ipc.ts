@@ -69,11 +69,12 @@ export interface Backend {
   // v0.6.0: подписки, обновления, файлы
   /** Юзер-сессии: op 37 + op 14 на гильдию (вызывается при её открытии). */
   subscribeGuild(guildId: string): Promise<void>;
-  /** op 37 с ОДНИМ каналом (диапазон [[0,99]]) — ленивый список
-   *  участников текущего канала; channelId = null → список всей гильдии
-   *  (псевдоканал "0"). Вызывается на каждый переключатель канала —
-   *  как CHANNEL_SELECT → subscribeChannel в официальном клиенте. */
-  subscribeChannel(guildId: string, channelId: string | null): Promise<void>;
+  /** op 37 с ОДНИМ каналом — ленивый список участников текущего канала;
+   *  ranges — диапазоны строк [начало, конец] включительно (стартово
+   *  [[0,99]]; при скролле фронт расширяет — как onScroll →
+   *  GUILD_SUBSCRIPTIONS_CHANNEL официального клиента).
+   *  channelId = null → список всей гильдии (псевдоканал "0"). */
+  subscribeChannel(guildId: string, channelId: string | null, ranges?: [number, number][]): Promise<void>;
   /** Проверка релизов на GitHub — null, если проверить не удалось. */
   checkUpdate(): Promise<UpdateInfo | null>;
   /** Загрузка файлов в канал (multipart). paths — абсолютные пути из диалога. */
@@ -256,8 +257,12 @@ class TauriBackend implements Backend {
     await this.invoke('subscribe_guild', { guildId });
   }
 
-  async subscribeChannel(guildId: string, channelId: string | null): Promise<void> {
-    await this.invoke('subscribe_channel', { guildId, channelId });
+  async subscribeChannel(
+    guildId: string,
+    channelId: string | null,
+    ranges?: [number, number][],
+  ): Promise<void> {
+    await this.invoke('subscribe_channel', { guildId, channelId, ranges });
   }
 
   async checkUpdate(): Promise<UpdateInfo | null> {

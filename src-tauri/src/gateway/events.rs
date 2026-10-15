@@ -513,127 +513,169 @@ pub async fn handle_dispatch(
                     })
                 };
 
-                // Собираем (uid, presence, member) для гидратации кэша —
-                // как eY/eZ в официальном клиенте (UserStore+PresenceStore):
-                // статусы отсюда видят профиль, ЛС и «кто в сети».
+                // Собираем (uid, member) для гидратации кэша — как eY/eZ
+                // в официальном клиенте (UserStore+PresenceStore): статусы
+                // отсюда видят профиль, ЛС и «кто в сети». Гидратация — из
+                // событий ЛЮБОГО канала: сервер держит подписки прежних
+                // каналов до LRU-вытеснения и шлёт их обновления тоже.
                 let mut hydrate: Vec<(String, Value)> = Vec::new();
+                let scan = |item: &Value, out: &mut Vec<(String, Value)>| {
+                    if let Some(m) = item.get("member") {
+                        if let Some(uid) = m
+                            .get("user")
+                            .and_then(|u| u.get("id"))
+                            .and_then(|v| v.as_str())
+                        {
+                            out.push((uid.to_string(), m.clone()));
+                        }
+                    }
+                };
+                if let Some(ops) = d.get("ops").and_then(|v| v.as_array()) {
+                    for op in ops {
+                        match op.get("op").and_then(|v| v.as_str()).unwrap_or("") {
+                            "SYNC" => {
+                                if let Some(items) = op.get("items").and_then(|v| v.as_array()) {
+                                    for it in items {
+                                        scan(it, &mut hydrate);
+                                    }
+                                }
+                            }
+                            "INSERT" | "UPDATE" => {
+                                if let Some(item) = op.get("item") {
+                                    scan(item, &mut hydrate);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Снапшот строк — только для ТЕКУЩЕГО канала (его зафикси-
+                // ровал subscribe_channel заранее): события прежних
+                // каналов не должны затирать сайдбар — иначе список
+                // мерцает между каналами при быстром переключении.
                 let mut rows_changed = false;
+                let is_current;
                 {
                     let mut lists = state.member_lists.lock().unwrap();
                     let list = lists.entry(guild_id.clone()).or_default();
-                    if list.channel_id != list_id {
-                        // Новый список (переключили канал) — чистый лист:
-                        // первый SYNC привезёт полный снапшот.
+                    if list.channel_id.is_empty() {
+                        // Гонка «событие раньше команды» (или первый список
+                        // гильдии после старта) — принимаем как текущий.
                         list.channel_id = list_id.clone();
-                        list.rows.clear();
-                        rows_changed = true;
                     }
-                    if list.member_count != member_count {
-                        list.member_count = member_count;
-                        rows_changed = true;
-                    }
-                    if let Some(groups) = d.get("groups").and_then(|v| v.as_array()) {
-                        let online = groups
-                            .iter()
-                            .find(|g| g.get("id").and_then(|v| v.as_str()) == Some("online"))
-                            .and_then(|g| g.get("count").and_then(|v| v.as_u64()))
-                            .unwrap_or(0);
-                        if list.online_count != online {
-                            list.online_count = online;
+                    is_current = list.channel_id == list_id;
+                    if is_current {
+                        if list.member_count != member_count {
+                            list.member_count = member_count;
                             rows_changed = true;
                         }
-                    }
-                    if let Some(ops) = d.get("ops").and_then(|v| v.as_array()) {
-                        for op in ops {
-                            let kind = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
-                            match kind {
-                                "SYNC" => {
-                                    // Мы подписаны на один диапазон [[0,99]] —
-                                    // SYNC привозит его целиком: полная замена.
-                                    let items = op
-                                        .get("items")
-                                        .and_then(|v| v.as_array())
-                                        .map(|arr| arr.iter().filter_map(parse_item).collect())
-                                        .unwrap_or_default();
-                                    list.rows = items;
-                                    rows_changed = true;
-                                }
-                                "INSERT" => {
-                                    let idx = op.get("index").and_then(|v| v.as_u64());
-                                    if let (Some(idx), Some(item)) = (idx, op.get("item")) {
-                                        if let Some(row) = parse_item(item) {
-                                            let idx = (idx as usize).min(list.rows.len());
-                                            list.rows.insert(idx, row);
-                                            rows_changed = true;
+                        if let Some(groups) = d.get("groups").and_then(|v| v.as_array()) {
+                            let online = groups
+                                .iter()
+                                .find(|g| g.get("id").and_then(|v| v.as_str()) == Some("online"))
+                                .and_then(|g| g.get("count").and_then(|v| v.as_u64()))
+                                .unwrap_or(0);
+                            if list.online_count != online {
+                                list.online_count = online;
+                                rows_changed = true;
+                            }
+                        }
+                        if let Some(ops) = d.get("ops").and_then(|v| v.as_array()) {
+                            for op in ops {
+                                let kind = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                                match kind {
+                                    "SYNC" => {
+                                        // Официальный sync(range, items):
+                                        // rows[start + i] = item — ПРИСВАИВАНИЕ
+                                        // по индексу с удлинением списка
+                                        // (сверено с бандлом discord.com:
+                                        // t.forEach((e,t)=>this.update(n+t,e))).
+                                        // Старые строки за пределами новых
+                                        // items НЕ трогаем — удаления едят
+                                        // отдельными DELETE/INVALIDATE ops.
+                                        // Диапазоны ходят подряд ([0,99],
+                                        // потом [100,199]…), поэтому дырок
+                                        // не бывает; start > len — дописываем
+                                        // в конец (защита вместо JS-дырок).
+                                        let items: Vec<MemberListRow> = op
+                                            .get("items")
+                                            .and_then(|v| v.as_array())
+                                            .map(|arr| arr.iter().filter_map(parse_item).collect())
+                                            .unwrap_or_default();
+                                        let start = op
+                                            .get("range")
+                                            .and_then(|r| r.as_array())
+                                            .and_then(|r| r.first())
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0)
+                                            as usize;
+                                        if start >= list.rows.len() {
+                                            list.rows.extend(items);
+                                        } else {
+                                            for (i, item) in items.into_iter().enumerate() {
+                                                let idx = start + i;
+                                                if idx < list.rows.len() {
+                                                    list.rows[idx] = item;
+                                                } else {
+                                                    list.rows.push(item);
+                                                }
+                                            }
                                         }
+                                        rows_changed = true;
                                     }
-                                }
-                                "UPDATE" => {
-                                    let idx = op.get("index").and_then(|v| v.as_u64());
-                                    if let (Some(idx), Some(item)) = (idx, op.get("item")) {
-                                        let idx = idx as usize;
-                                        if idx < list.rows.len() {
+                                    "INSERT" => {
+                                        let idx = op.get("index").and_then(|v| v.as_u64());
+                                        if let (Some(idx), Some(item)) = (idx, op.get("item")) {
                                             if let Some(row) = parse_item(item) {
-                                                list.rows[idx] = row;
+                                                let idx = (idx as usize).min(list.rows.len());
+                                                list.rows.insert(idx, row);
                                                 rows_changed = true;
                                             }
                                         }
                                     }
-                                }
-                                "DELETE" => {
-                                    if let Some(idx) = op.get("index").and_then(|v| v.as_u64()) {
-                                        let idx = idx as usize;
-                                        if idx < list.rows.len() {
-                                            list.rows.remove(idx);
-                                            rows_changed = true;
+                                    "UPDATE" => {
+                                        let idx = op.get("index").and_then(|v| v.as_u64());
+                                        if let (Some(idx), Some(item)) = (idx, op.get("item")) {
+                                            let idx = idx as usize;
+                                            if idx < list.rows.len() {
+                                                if let Some(row) = parse_item(item) {
+                                                    list.rows[idx] = row;
+                                                    rows_changed = true;
+                                                }
+                                            }
                                         }
                                     }
-                                }
-                                "INVALIDATE" => {
-                                    // Строки диапазона вышли из зоны подписки.
-                                    if let Some(range) = op.get("range").and_then(|v| v.as_array())
-                                    {
-                                        let start =
-                                            range.first().and_then(|v| v.as_u64()).unwrap_or(0)
-                                                as usize;
-                                        let end = range.get(1).and_then(|v| v.as_u64()).unwrap_or(0)
-                                            as usize;
-                                        if start <= end && start < list.rows.len() {
-                                            let end = (end + 1).min(list.rows.len());
-                                            list.rows.drain(start..end);
-                                            rows_changed = true;
+                                    "DELETE" => {
+                                        if let Some(idx) = op.get("index").and_then(|v| v.as_u64())
+                                        {
+                                            let idx = idx as usize;
+                                            if idx < list.rows.len() {
+                                                list.rows.remove(idx);
+                                                rows_changed = true;
+                                            }
                                         }
                                     }
-                                }
-                                _ => {}
-                            }
-                            // Гидратация: member-строки ops несут presence.
-                            let scan = |item: &Value, out: &mut Vec<(String, Value)>| {
-                                if let Some(m) = item.get("member") {
-                                    if let Some(uid) = m
-                                        .get("user")
-                                        .and_then(|u| u.get("id"))
-                                        .and_then(|v| v.as_str())
-                                    {
-                                        out.push((uid.to_string(), m.clone()));
-                                    }
-                                }
-                            };
-                            match kind {
-                                "SYNC" => {
-                                    if let Some(items) = op.get("items").and_then(|v| v.as_array())
-                                    {
-                                        for it in items {
-                                            scan(it, &mut hydrate);
+                                    "INVALIDATE" => {
+                                        // Строки диапазона вышли из зоны подписки.
+                                        if let Some(range) =
+                                            op.get("range").and_then(|v| v.as_array())
+                                        {
+                                            let start =
+                                                range.first().and_then(|v| v.as_u64()).unwrap_or(0)
+                                                    as usize;
+                                            let end =
+                                                range.get(1).and_then(|v| v.as_u64()).unwrap_or(0)
+                                                    as usize;
+                                            if start <= end && start < list.rows.len() {
+                                                let end = (end + 1).min(list.rows.len());
+                                                list.rows.drain(start..end);
+                                                rows_changed = true;
+                                            }
                                         }
                                     }
+                                    _ => {}
                                 }
-                                "INSERT" | "UPDATE" => {
-                                    if let Some(item) = op.get("item") {
-                                        scan(item, &mut hydrate);
-                                    }
-                                }
-                                _ => {}
                             }
                         }
                     }
@@ -670,9 +712,9 @@ pub async fn handle_dispatch(
                         }
                     }
                 }
-                // Снапшот в UI — на каждое событие (строки/счётчики меняются
-                // независимо, а события приходят с человеческой частотой).
-                {
+                // Снапшот в UI — только для текущего канала (чужие списки
+                // не должны перебивать сайдбар активного канала).
+                if is_current {
                     let lists = state.member_lists.lock().unwrap();
                     if let Some(list) = lists.get(&guild_id) {
                         let _ = app.emit(
@@ -1288,12 +1330,15 @@ fn apply_merged(state: &SharedState, d: &Value) {
 /// и повторного IDENTIFY они пусты. Официальный клиент на CONNECTION_OPEN
 /// и CONNECTION_RESUMED делает flush ВСЕХ подписок (GuildSubscriptionsStore
 /// → updateGuildSubscriptions) — повторяем для каналов, чьи списки у нас
-/// уже были (guild_id → channel_id хранится в state.member_lists).
+/// уже были (guild_id → channel_id + ranges хранится в state.member_lists;
+/// ranges — чтобы не терять докрученные скроллом сотни строк).
 fn replay_member_list_subscriptions(state: &SharedState) {
     if state.is_bot.load(Ordering::SeqCst) {
         return;
     }
-    let replay: Vec<(String, Option<String>)> = {
+    /// (guild_id, channel_id, ranges) — что переиграть.
+    type ReplayItem = (String, Option<String>, Vec<(u64, u64)>);
+    let replay: Vec<ReplayItem> = {
         let lists = state.member_lists.lock().unwrap();
         lists
             .iter()
@@ -1303,7 +1348,12 @@ fn replay_member_list_subscriptions(state: &SharedState) {
                 } else {
                     Some(l.channel_id.clone())
                 };
-                (gid.clone(), cid)
+                let ranges = if l.ranges.is_empty() {
+                    vec![(0, 99)]
+                } else {
+                    l.ranges.clone()
+                };
+                (gid.clone(), cid, ranges)
             })
             .collect()
     };
@@ -1313,11 +1363,12 @@ fn replay_member_list_subscriptions(state: &SharedState) {
     let tx = state.gateway_tx.read().unwrap().clone();
     if let Some(tx) = tx {
         tauri::async_runtime::spawn(async move {
-            for (gid, cid) in replay {
+            for (gid, cid, ranges) in replay {
                 if tx
                     .send(crate::state::GatewayCommand::SubscribeMemberList {
                         guild_id: gid,
                         channel_id: cid,
+                        ranges,
                     })
                     .await
                     .is_err()

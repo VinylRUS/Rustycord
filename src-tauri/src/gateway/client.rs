@@ -424,19 +424,28 @@ async fn send_command(writer: &mut crate::wsutil::WsWriter, cmd: &GatewayCommand
         GatewayCommand::SubscribeMemberList {
             guild_id,
             channel_id,
+            ranges,
         } => {
             // op 37 на ОДНУ гильдию с ОДНИМ каналом — 1:1 с официальным
-            // клиентом (subscribeChannel → {channels:{cid:[[0,99]]}}).
+            // клиентом (subscribeChannel → {channels:{cid:ranges}}).
             // Каналов не больше 5 на гильдию (LRU ChannelsStore в бандле
             // discord.com) — больше живой шлюз закрывает 4002; v0.9.1 слал
             // 25 каналов и ловил 4002 на каждый клик по серверу.
             // channel_id = None → псевдоканал "0": общий список участников
             // гильдии (member sidebar без выбранного канала).
+            // Диапазоны приходят от фронтенда: стартово [[0,99]], при
+            // скролле — [[0,99],[100,199],…] до видимой зоны + overscan
+            // (onScroll → GUILD_SUBSCRIPTIONS_CHANNEL у официала; всегда
+            // включает [0,99], сотни выровнены по JM=100).
             let cid = channel_id.clone().unwrap_or_else(|| "0".to_string());
+            let ranges: Vec<(u64, u64)> = if ranges.is_empty() {
+                vec![(0, 99)]
+            } else {
+                ranges.clone()
+            };
             let mut chans = serde_json::Map::new();
-            // [[0, 99]] — стандартный диапазон ленивого списка (константа
-            // LD из бандла, размер диапазона JM = 100 строк).
-            chans.insert(cid.clone(), json!([[0, 99]]));
+            // Vec<(u64,u64)> сериализуется как [[a,b],…] — как в бандле.
+            chans.insert(cid.clone(), serde_json::to_value(&ranges)?);
             // Полный формат подписки — 1:1 с G.get() официального клиента
             // (путь replay на CONNECTION_OPEN шлёт ВСЕ поля, включая пустые
             // members/thread_member_lists — серверная схема строгая и при
@@ -462,8 +471,10 @@ async fn send_command(writer: &mut crate::wsutil::WsWriter, cmd: &GatewayCommand
                 }),
             )
             .await?;
+            let last = ranges.last().map(|(_, b)| b + 1).unwrap_or(0);
             tracing::info!(
-                "gateway: op 37 список участников {guild_id} · канал {cid} · диапазон [0,99]"
+                "gateway: op 37 список участников {guild_id} · канал {cid} · {} диапазон(ов), строк до {last}",
+                ranges.len()
             );
         }
         GatewayCommand::VoiceStateUpdate {

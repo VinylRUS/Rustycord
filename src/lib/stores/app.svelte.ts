@@ -1430,12 +1430,14 @@ export class AppStore {
 
   selectChannel(id: string | null) {
     this.activeChannelId = id;
-    // Ленивый список участников канала: op 37 с ОДНИМ каналом и диапазоном
-    // [[0,99]] — на каждое переключение, как CHANNEL_SELECT →
+    // Ленивый список участников канала: op 37 с ОДНИМ каналом и стартовым
+    // диапазоном [[0,99]] — на каждое переключение, как CHANNEL_SELECT →
     // subscribeChannel в официальном клиенте. Ответ —
-    // GUILD_MEMBER_LIST_UPDATE (готовый сайдбар с пресенсами).
-    if (id && this.activeGuildId && !this.isBotAccount && this.mode === 'tauri') {
-      void this.backend?.subscribeChannel(this.activeGuildId, id).catch(() => undefined);
+    // GUILD_MEMBER_LIST_UPDATE (в демо — memberList из локального мира).
+    if (id && this.activeGuildId && !this.isBotAccount && this.backend) {
+      void this.backend
+        ?.subscribeChannel(this.activeGuildId, id, [[0, 99]])
+        .catch(() => undefined);
     }
     if (id) {
       delete this.unread[id];
@@ -1443,6 +1445,18 @@ export class AppStore {
       if (this.activeGuildId) this.lastChannelByGuild[this.activeGuildId] = id;
       if (!this.messagesLoaded[id]) void this.loadMessages(id);
     }
+  }
+
+  /** Расширить диапазоны ленивого списка при скролле сайдбара — 1:1 с
+   *  onScroll → GUILD_SUBSCRIPTIONS_CHANNEL официального клиента: всегда
+   *  [0,99] + сотни до видимой зоны + overscan (счёт диапазонов ведёт
+   *  Rust в member_lists — replay после переподключения не теряет их). */
+  subscribeMemberListRanges(ranges: [number, number][]) {
+    const ch = this.activeChannelId;
+    if (!ch || !this.activeGuildId || this.isBotAccount || !this.backend) return;
+    void this.backend
+      ?.subscribeChannel(this.activeGuildId, ch, ranges)
+      .catch(() => undefined);
   }
 
   async loadMessages(channelId: string) {

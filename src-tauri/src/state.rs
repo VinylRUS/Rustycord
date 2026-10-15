@@ -51,7 +51,7 @@ pub enum GatewayCommand {
     BulkGuildSubscribe { guild_ids: Vec<String> },
     /// op 37 — подписка на ленивый список участников ОДНОГО канала
     /// (member-диапазоны едут внутри подписки — как в официальном клиенте:
-    /// subscribeChannel кладёт {channels:{cid:[[0,99]]}} в op 37).
+    /// subscribeChannel кладёт {channels:{cid:ranges}} в op 37).
     /// ВАЖНО: официальный клиент держит LRU максимум из 5 каналов на
     /// гильдию (ChannelsStore `new LRU({max: 5})` в бандле discord.com) —
     /// живой шлюз закрывает соединение 4002 «Error while decoding payload»,
@@ -59,11 +59,16 @@ pub enum GatewayCommand {
     /// на каждый клик по серверу). Поэтому здесь РОВНО ОДИН канал —
     /// текущий; `None` → псевдоканал "0" (общий список гильдии, так
     /// делает официальный клиент для member sidebar без канала).
+    /// Диапазоны ([[0,99],[100,199],…) считает фронтенд по скроллу —
+    /// ровно как onScroll → GUILD_SUBSCRIPTIONS_CHANNEL у официала:
+    /// всегда включает [0,99], дальше сотнями до видимой зоны + overscan.
     /// Ответ: GUILD_MEMBER_LIST_UPDATE (SYNC/INSERT/UPDATE/DELETE ops).
     SubscribeMemberList {
         guild_id: String,
         /// Канал, чей список участников показать (None → список гильдии).
         channel_id: Option<String>,
+        /// Диапазоны строк [начало, конец] (включительно), по 100 строк.
+        ranges: Vec<(u64, u64)>,
     },
     /// op 4 — join/leave a voice channel or change self mute/deaf.
     /// `guild_id: None` — звонок в ЛС/группе (протокол DM-звонков: op4 уходит
@@ -136,6 +141,10 @@ pub struct MemberListState {
     pub channel_id: String,
     pub member_count: u64,
     pub online_count: u64,
+    /// Подписанные диапазоны строк — для replay после переподключения
+    /// (CONNECTION_OPEN/RESUMED → flush, как GuildSubscriptionsStore).
+    #[serde(skip)]
+    pub ranges: Vec<(u64, u64)>,
     pub rows: Vec<MemberListRow>,
 }
 
