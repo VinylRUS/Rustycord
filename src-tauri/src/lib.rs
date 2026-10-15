@@ -2,6 +2,7 @@ mod auth;
 mod commands;
 mod gateway;
 mod rest;
+mod settings_proto;
 mod snowflake;
 mod state;
 mod superprops;

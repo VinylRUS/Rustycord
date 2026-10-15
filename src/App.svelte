@@ -13,6 +13,23 @@
   import SettingsModal from './lib/components/SettingsModal.svelte';
   import GuildSettingsModal from './lib/components/GuildSettingsModal.svelte';
   import Toasts from './lib/components/Toasts.svelte';
+  import QuickSwitcher from './lib/components/QuickSwitcher.svelte';
+
+  // Быстрый переключатель — Ctrl+K / Cmd+K (как в оригинале).
+  // В браузерной разработке без Tauri не перехватываем (DevTools и адресная
+  // строка браузера важнее), в приложении — глобальный хоткей.
+  const isTauri = '__TAURI_INTERNALS__' in globalThis;
+  function onGlobalKey(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+      e.preventDefault();
+      app.showQuickSwitcher = !app.showQuickSwitcher;
+    }
+  }
+  $effect(() => {
+    if (!isTauri) return;
+    window.addEventListener('keydown', onGlobalKey);
+    return () => window.removeEventListener('keydown', onGlobalKey);
+  });
 
   // Auto-login with a saved token (Tauri only).
   $effect(() => {
@@ -87,6 +104,7 @@
 <ProfileCard />
 <SettingsModal />
 <GuildSettingsModal />
+<QuickSwitcher />
 <Toasts />
 <!-- Капча — на любом экране (вход и авторизованные действия) -->
 

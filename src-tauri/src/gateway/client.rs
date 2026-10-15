@@ -240,44 +240,75 @@ async fn run_session(
                     Some(GatewayCommand::BulkGuildSubscribe { guild_ids }) => {
                         // op 37 (юзер-сессии): подписка на события всех гильдий
                         // сразу — presences/typing/threads/member_updates.
+                        // Чанкование как в официальном клиенте
+                        // (updateGuildSubscriptions): сумма JSON-весов пар
+                        // [gid, sub] не должна превышать 15 360 байт на кадр.
+                        let mut frames: Vec<Value> = Vec::new();
                         let mut subs = serde_json::Map::new();
+                        let mut budget = 0usize;
                         for gid in &guild_ids {
-                            subs.insert(gid.clone(), json!({
+                            let sub = json!({
                                 "typing": true, "threads": true,
                                 "activities": true, "member_updates": true
-                            }));
-                        }
-                        wsutil::send_json(&mut writer, &json!({
-                            "op": 37,
-                            "d": { "subscriptions": subs }
-                        })).await?;
-                        tracing::info!("gateway: op 37 bulk subscribe на {} гильдий", guild_ids.len());
-                    }
-                    Some(GatewayCommand::SubscribeMemberList { guild_id, channels }) => {
-                        // op 14 (юзер-сессии): ленивый список участников по
-                        // диапазонам канала — приезжает GUILD_MEMBERS_CHUNK.
-                        // threads: false — сверь с discord-client-rs
-                        // (create_op_14: typing=true, threads=false,
-                        // activities=true): байт-в-байт наш payload отличался
-                        // от эталона ровно этим полем, и живой gateway отвечал
-                        // на наш вариант close 4002 «Error while decoding
-                        // payload» — цикл крашей при клике по серверу.
-                        let mut chans = serde_json::Map::new();
-                        for (cid, ranges) in &channels {
-                            // ranges = [0, 99] → JSON [[0, 99]] на канал.
-                            chans.insert(cid.clone(), json!([ranges]));
-                        }
-                        wsutil::send_json(&mut writer, &json!({
-                            "op": 14,
-                            "d": {
-                                "guild_id": guild_id,
-                                "typing": true,
-                                "threads": false,
-                                "activities": true,
-                                "channels": chans
+                            });
+                            let cost = format!("[{gid:?},{sub}]").len();
+                            if budget + cost > 15_360 {
+                                frames.push(json!({ "op": 37, "d": { "subscriptions": subs } }));
+                                subs = serde_json::Map::new();
+                                budget = 0;
                             }
-                        })).await?;
-                        tracing::debug!("gateway: op 14 member list для {guild_id} ({} каналов)", channels.len());
+                            subs.insert(gid.clone(), sub);
+                            budget += cost;
+                        }
+                        if !subs.is_empty() {
+                            frames.push(json!({ "op": 37, "d": { "subscriptions": subs } }));
+                        }
+                        let n_frames = frames.len();
+                        for frame in &frames {
+                            wsutil::send_json(&mut writer, frame).await?;
+                        }
+                        tracing::info!(
+                            "gateway: op 37 bulk subscribe на {} гильдий ({} кадров)",
+                            guild_ids.len(),
+                            n_frames
+                        );
+                    }
+                    Some(GatewayCommand::SubscribeGuildChannels { guild_id, channel_ids }) => {
+                        // op 37 на ОДНУ гильдию с каналами: официальный клиент
+                        // кладёт member-диапазоны каналов прямо в подписку
+                        // (subscribeChannel → {channels:{cid:[[0,99]]}}), а не
+                        // в отдельный op 14. Наш старый op 14 живой шлюз
+                        // отвергал close 4002 «Error while decoding payload»
+                        // — сейчас формат 1:1 с бандлом discord.com.
+                        let mut chans = serde_json::Map::new();
+                        for cid in &channel_ids {
+                            // [[0, 99]] — стандартный диапазон ленивого списка.
+                            chans.insert(cid.clone(), json!([[0, 99]]));
+                        }
+                        let mut subs = serde_json::Map::new();
+                        subs.insert(
+                            guild_id.clone(),
+                            json!({
+                                "typing": true,
+                                "threads": true,
+                                "activities": true,
+                                "member_updates": true,
+                                "channels": chans
+                            }),
+                        );
+                        wsutil::send_json(
+                            &mut writer,
+                            &json!({
+                                "op": 37,
+                                "d": { "subscriptions": subs }
+                            }),
+                        )
+                        .await?;
+                        tracing::info!(
+                            "gateway: op 37 подписка {} + {} каналов (member-чанки)",
+                            guild_id,
+                            channel_ids.len()
+                        );
                     }
                     Some(GatewayCommand::VoiceStateUpdate { guild_id, channel_id, self_mute, self_deaf, self_video }) => {
                         // op 4: войти/покинуть голосовой канал. Для звонков в

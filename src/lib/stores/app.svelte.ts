@@ -23,6 +23,7 @@ import type {
   Message,
   Presence,
   QrStage,
+  RailOrderItem,
   Relationship,
   Role,
   UpdateInfo,
@@ -37,6 +38,10 @@ const TYPING_TTL = 8000;
 const SPEAKING_TTL = 2500;
 const RECENT_EMOJI_KEY = 'rustycord.recentEmoji';
 const RECENT_EMOJI_MAX = 24;
+
+/** Элемент рейла серверов: отдельная гильдия или папка (index в
+ *  guildFolders — раскладка декодируется в Rust и приходит событием). */
+export type RailItem = RailOrderItem;
 
 /** Уникальный ключ эмодзи в списке реакций (id:name — кастомные уникальны id). */
 export function emojiKey(e: { id: string | null; name: string | null }): string {
@@ -107,9 +112,13 @@ export class AppStore {
   user = $state<User | null>(null);
   sessionId = $state('');
   guilds = $state<Guild[]>([]);
-  /** Порядок серверов в рейле — из guild_folders юзер-READY (папки и
-   *  drag-порядок пользователя, как в официальном клиенте). Guild без
-   *  записи → в конец (в порядке прибытия GUILD_CREATE). */
+  /** Папки серверов и порядок рейла — из user_settings (proto/legacy,
+   *  декодирует Rust, событие guildLayout). Порядок папок и отдельных
+   *  серверов — как расставил юзер в официальном клиенте. */
+  guildFolders = $state<import('../types').GuildFolder[]>([]);
+  railOrder = $state<RailItem[]>([]);
+  /** Плоский порядок для сортировки this.guilds: railOrder + хвост для
+   *  гильдий вне раскладки (вступил после запуска). */
   guildOrder = $state<Record<string, number>>({});
   dms = $state<Channel[]>([]);
   /** Юзер-READY несёт массив users — все упомянутые в ЛС участники.
@@ -141,6 +150,11 @@ export class AppStore {
   showMembers = $state(true);
   showSettings = $state(false);
   unread = $state<Record<string, boolean>>({});
+  /** Непрочитанные упоминания по каналам (счётчик для красного бейджа
+   *  в рейле — как в оригинале). */
+  mentions = $state<Record<string, number>>({});
+  /** Быстрый переключатель (Ctrl+K): открыт/закрыт. */
+  showQuickSwitcher = $state(false);
   typingByChannel = $state<Record<string, Record<string, TypingEntry>>>({});
   drafts = $state<Record<string, string>>({});
   editing = $state<{ channelId: string; messageId: string } | null>(null);
@@ -176,6 +190,60 @@ export class AppStore {
 
   get activeGuild(): Guild | null {
     return this.guilds.find((g) => g.id === this.activeGuildId) ?? null;
+  }
+
+  /** Элементы рейла в порядке пользователя. Если раскладка ещё не приехала
+   *  (или её нет) — все гильдии по одному, в порядке this.guilds. */
+  get railItems(): RailItem[] {
+    if (!this.railOrder.length && !this.guildFolders.length) {
+      return this.guilds.map((g) => ({ type: 'guild', id: g.id }) as RailItem);
+    }
+    const out: RailItem[] = [];
+    const inLayout = new Set<string>();
+    for (const item of this.railOrder) {
+      if (item.type === 'guild') {
+        inLayout.add(item.id);
+        if (this.guilds.some((g) => g.id === item.id)) out.push(item);
+      } else {
+        const f = this.guildFolders[item.index];
+        if (f) out.push(item);
+      }
+    }
+    // Гильдии вне раскладки (вступил после запуска) — в конец.
+    for (const g of this.guilds) {
+      if (!inLayout.has(g.id) && !this.guildFolders.some((f) => f.guild_ids.includes(g.id))) {
+        out.push({ type: 'guild', id: g.id });
+      }
+    }
+    return out;
+  }
+
+  /** Счётчик непрочитанных упоминаний гильдии (для красного бейджа). */
+  mentionCountOfGuild(guildId: string): number {
+    const g = this.guilds.find((x) => x.id === guildId);
+    if (!g) return 0;
+    let n = 0;
+    for (const c of g.channels ?? []) n += this.mentions[c.id] ?? 0;
+    return n;
+  }
+
+  /** Непрочитанные упоминания всех гильдий папки (бейдж на папке). */
+  mentionCountOfFolder(index: number): number {
+    const f = this.guildFolders[index];
+    if (!f) return 0;
+    return f.guild_ids.reduce((acc, gid) => acc + this.mentionCountOfGuild(gid), 0);
+  }
+
+  /** Любой непрочитанный (белая точка) в гильдии. */
+  unreadOfGuild(guildId: string): boolean {
+    const g = this.guilds.find((x) => x.id === guildId);
+    return (g?.channels ?? []).some((c) => this.unread[c.id]);
+  }
+
+  unreadOfFolder(index: number): boolean {
+    const f = this.guildFolders[index];
+    if (!f) return false;
+    return f.guild_ids.some((gid) => this.unreadOfGuild(gid));
   }
 
   /** Бот-аккаунт? Управляет копирайтом и лендингом после входа. */
@@ -481,6 +549,9 @@ export class AppStore {
   private reset() {
     this.user = null;
     this.guilds = [];
+    this.guildFolders = [];
+    this.railOrder = [];
+    this.guildOrder = {};
     this.dms = [];
     this.usersById = {};
     this.relationships = {};
@@ -498,6 +569,8 @@ export class AppStore {
     this.dmCalls = {};
     this.streams = {};
     this.unread = {};
+    this.mentions = {};
+    this.showQuickSwitcher = false;
     this.connStage = 'offline';
     this.connDetail = '';
     this.replyTo = null;
@@ -543,6 +616,9 @@ export class AppStore {
       case 'dispatch':
         this.handleDispatch(ev.t, ev.d);
         break;
+      case 'guildLayout':
+        this.applyGuildLayout(ev.folders, ev.guild_positions, ev.rail_order ?? []);
+        break;
       case 'qr':
         this.handleQr(ev);
         break;
@@ -552,6 +628,51 @@ export class AppStore {
       case 'warning':
         this.toast(ev.message, 'error');
         break;
+    }
+  }
+
+  /** Раскладка рейла из user_settings (событие guildLayout от Rust:
+   *  proto-декодер или legacy-JSON, единая нормализованная схема).
+   *  Сортируем this.guilds по плоскому порядку и пересобираем рейл.
+   *  Вызывается до dispatch-READY (событие эмитится раньше) — тогда просто
+   *  запоминаем раскладку, а стабы READY отсортируются по ней на приходе. */
+  applyGuildLayout(
+    folders: import('../types').GuildFolder[],
+    guildPositions: string[],
+    railOrder: RailOrderItem[],
+  ) {
+    this.guildFolders = folders;
+    this.railOrder = railOrder;
+    // Плоский порядок: сначала отдельные гильдии из railOrder, затем
+    // гильдии папок (папки хранят порядок внутри себя).
+    const order: Record<string, number> = {};
+    let i = 0;
+    const seen = new Set<string>();
+    for (const item of railOrder) {
+      if (item.type === 'guild' && !seen.has(item.id)) {
+        order[item.id] = i++;
+        seen.add(item.id);
+      }
+    }
+    for (const f of folders) {
+      for (const gid of f.guild_ids) {
+        if (!seen.has(gid)) {
+          order[gid] = i++;
+          seen.add(gid);
+        }
+      }
+    }
+    for (const gid of guildPositions) {
+      if (!seen.has(gid)) {
+        order[gid] = i++;
+        seen.add(gid);
+      }
+    }
+    this.guildOrder = order;
+    if (Object.keys(order).length) {
+      this.guilds = [...this.guilds].sort(
+        (a, b) => (order[a.id] ?? 1e9) - (order[b.id] ?? 1e9),
+      );
     }
   }
 
@@ -680,17 +801,12 @@ export class AppStore {
             }
           }
         }
-        // Порядок серверов в рейле — как в официальном клиенте: порядок
-        // записей guild_folders из юзер-READY (папки, drag-порядок).
-        // Гильдии вне карты (бот-сессии без guild_folders) — в конце,
-        // сохраняя относительный порядок стабов.
-        if (p.guild_folders && Array.isArray(p.guild_folders)) {
-          const order: Record<string, number> = {};
-          let i = 0;
-          for (const f of p.guild_folders) {
-            for (const gid of f.guild_ids ?? []) order[gid] = i++;
-          }
-          this.guildOrder = order;
+        // Порядок серверов в рейле — событие guildLayout (Rust декодирует
+        // user_settings_proto/legacy ДО этого dispatch'а). Если раскладка
+        // уже приехала — сортируем стабы по ней; иначе гильдии встанут по
+        // прибытию (бот-сессии/демо — папок нет).
+        if (Object.keys(this.guildOrder).length) {
+          const order = this.guildOrder;
           this.guilds = [...this.guilds].sort(
             (a, b) => (order[a.id] ?? 1e9) - (order[b.id] ?? 1e9),
           );
@@ -899,7 +1015,17 @@ export class AppStore {
       case 'MESSAGE_CREATE': {
         const m = d as Message;
         this.appendMessage(m.channel_id, m);
-        if (m.channel_id !== this.activeChannelId) this.unread[m.channel_id] = true;
+        if (m.channel_id !== this.activeChannelId) {
+          this.unread[m.channel_id] = true;
+          // Красный бейдж: упоминание нас (в тексте или @everyone/@here —
+          // их Discord тоже считает упоминанием: у сообщения mentions
+          // содержит нашу карточку и в этом случае).
+          if (m.mentions?.some((u) => u.id === this.user?.id)) {
+            this.mentions[m.channel_id] = (this.mentions[m.channel_id] ?? 0) + 1;
+          } else if (m.mention_everyone) {
+            this.mentions[m.channel_id] = (this.mentions[m.channel_id] ?? 0) + 1;
+          }
+        }
         this.clearTyping(m.channel_id, m.author.id);
         // Упомянутые юзеры приходят полными объектами — пополняем справочник.
         if (m.mentions?.length) {
@@ -1246,6 +1372,7 @@ export class AppStore {
     this.activeChannelId = id;
     if (id) {
       delete this.unread[id];
+      delete this.mentions[id];
       if (this.activeGuildId) this.lastChannelByGuild[this.activeGuildId] = id;
       if (!this.messagesLoaded[id]) void this.loadMessages(id);
     }

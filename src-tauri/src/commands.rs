@@ -853,14 +853,16 @@ pub async fn parse_snowflake(id: String) -> Result<snowflake::SnowflakeInfo, Str
 
 /* ==================== v0.6.0: подписки / апдейты / файлы ==================== */
 
-/// Подписаться на события гильдии (юзер-сессии): op 37 (пресенсы/typing)
-/// на сам сервер + op 14 на ленивый список участников. Основной поток
-/// подписок уходит после READY (events.rs, батчами по 50) — сюда приходят
-/// клики по серверам и гильдии, вступленные уже после запуска.
+/// Подписаться на события гильдии (юзер-сессии): op 37 с каналами —
+/// пресенсы/typing/threads/member_updates + ленивые списки участников
+/// (member-диапазоны каналов едут ВНУТРИ op 37, как в официальном клиенте;
+/// отдельный op 14 живой шлюз отвергал close 4002).
 ///
-/// Повторяемость: если каналов в кэше ещё нет (гильдия-стаб из READY,
-/// GUILD_CREATE в пути), подписка НЕ помечается выполненной — фронтенд
-/// повторит вызов по приходу GUILD_CREATE (см. store: GUILD_CREATE).
+/// Если каналов в кэше ещё нет (гильдия-стаб из READY или REST-union),
+/// уходит «голая» подписка без каналов — GUILD_CREATE подвезёт каналы,
+/// фронтенд повторит вызов и доошлёт их (раньше здесь был deadlock:
+/// ранний return БЕЗ подписки → GUILD_CREATE никогда не приезжал →
+/// сервер оставался пустым навсегда).
 #[tauri::command]
 pub async fn subscribe_guild(
     state: State<'_, Arc<AppState>>,
@@ -875,11 +877,9 @@ pub async fn subscribe_guild(
         .unwrap()
         .clone()
         .ok_or("Gateway не подключён")?;
-    // op 14: текстовые/войс-каналы из кэша — до 25 каналов, диапазон [0, 99].
-    // Официальный клиент подписывает видимые каналы по мере скролла; 25
-    // покрывает типичный сервер и даёт полный список «кто в сети» (раньше
-    // 10 каналов — на больших серверах онлайн выглядел урезанным).
-    let channels: Vec<(String, Vec<u32>)> = {
+    // Каналы для ленивого списка: текст/войс/анонсы/сцена, до 25 штук —
+    // диапазон [0, 99] на каждый (в op 37 это {cid: [[0,99]]}).
+    let channel_ids: Vec<String> = {
         let cache = state.cache.read().unwrap();
         cache
             .guilds
@@ -889,36 +889,31 @@ pub async fn subscribe_guild(
                     .iter()
                     .filter(|c| matches!(c.kind, 0 | 2 | 5 | 13))
                     .take(25)
-                    .map(|c| (c.id.clone(), vec![0, 99]))
+                    .map(|c| c.id.clone())
                     .collect()
             })
             .unwrap_or_default()
     };
-    if channels.is_empty() {
-        // Гильдия ещё «стаб» — GUILD_CREATE не приезжал. Молча ждём ретрая:
-        // это нормальная гонка между кликом юзера и потоком GUILD_CREATE.
-        tracing::debug!("subscribe_guild: у {guild_id} ещё нет каналов — ждём GUILD_CREATE");
-        return Ok(());
-    }
     {
         let mut subs = state.subscribed_guilds.lock().unwrap();
         if subs.contains(&guild_id) {
+            // Полная подписка (с каналами) уже была — повтор не нужен.
             return Ok(());
         }
-        subs.insert(guild_id.clone());
+        // Помечаем ТОЛЬКО подписку с каналами: «голая» подписка стаба не
+        // считается выполненной — после GUILD_CREATE фронтенд повторит
+        // вызов и доошлёт каналы (иначе guard съел бы ретрай навсегда).
+        if !channel_ids.is_empty() {
+            subs.insert(guild_id.clone());
+        }
     }
-    // op 37 на одну гильдию: покрывает вступления ПОСЛЕ READY и клики,
-    // сделанные до того, как батч READY-подписок дошёл до этой гильдии.
-    // Повторная подписка безвредна — официальный клиент шлёт op 37 при
-    // каждом переключении канала.
-    tx.send(GatewayCommand::BulkGuildSubscribe {
-        guild_ids: vec![guild_id.clone()],
+    tx.send(GatewayCommand::SubscribeGuildChannels {
+        guild_id: guild_id.clone(),
+        channel_ids,
     })
     .await
     .map_err(es)?;
-    tx.send(GatewayCommand::SubscribeMemberList { guild_id, channels })
-        .await
-        .map_err(es)?;
+    tracing::info!("subscribe_guild: op 37 для {guild_id}");
     Ok(())
 }
 

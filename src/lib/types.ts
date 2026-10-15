@@ -320,10 +320,34 @@ export type PluginEventName =
   | 'guild:delete'
   | 'voice:state';
 
+/** Папка серверов в рейле (user_settings: proto или legacy guild_folders). */
+export interface GuildFolder {
+  id: string | null;
+  name: string | null;
+  /** RGB-цвет папки (int) — null для дефолтного серого. */
+  color: number | null;
+  guild_ids: string[];
+}
+
+/** Элемент порядка рейла: отдельная гильдия либо папка (индекс в folders). */
+export type RailOrderItem =
+  | { type: 'guild'; id: string }
+  | { type: 'folder'; index: number };
+
 export type BackendEvent =
   | { type: 'status'; stage: ConnStage; detail?: string }
   | { type: 'ready'; user: User; session_id: string }
   | { type: 'dispatch'; t: string; d: unknown }
+  | {
+      /** Раскладка рейла: папки + порядок отдельных гильдий (Rust декодирует
+       *  user_settings_proto/legacy и нормализует в единый формат).
+       *  rail_order — готовый порядок рейла: отдельные гильдии и папки
+       *  вперемешку (legacy хранит точный порядок массива). */
+      type: 'guildLayout';
+      folders: GuildFolder[];
+      guild_positions: string[];
+      rail_order?: RailOrderItem[];
+    }
   | { type: 'qr'; stage: QrStage; svg?: string; fingerprint?: string; token?: string; username?: string; userId?: string; message?: string }
   | {
       type: 'voice';

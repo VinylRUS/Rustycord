@@ -49,12 +49,15 @@ pub enum GatewayCommand {
     /// op 37 — bulk guild subscribe (user sessions: presences/typing/threads
     /// для всех гильдий сразу — так делает официальный клиент после READY).
     BulkGuildSubscribe { guild_ids: Vec<String> },
-    /// op 14 — lazy member list (user sessions): список участников канала
-    /// диапазонами, ответ приезжает теми же GUILD_MEMBERS_CHUNK.
-    SubscribeMemberList {
+    /// op 37 — подписка на ОДНУ гильдию вместе с каналами (member-диапазоны
+    /// каналов едут внутри подписки — так делает официальный клиент:
+    /// subscribeChannel кладёт {channels:{cid:[[0,99]]}} в op 37, а НЕ в
+    /// отдельный op 14). Ответ: GUILD_CREATE (если гильдия ещё не прислана)
+    /// + GUILD_MEMBERS_CHUNK по каждому каналу.
+    SubscribeGuildChannels {
         guild_id: String,
-        /// (channel_id, ranges) — обычно [[0, 99]] на каждый канал.
-        channels: Vec<(String, Vec<u32>)>,
+        /// Каналы для ленивого списка участников (текст/войс/анонсы/сцена).
+        channel_ids: Vec<String>,
     },
     /// op 4 — join/leave a voice channel or change self mute/deaf.
     /// `guild_id: None` — звонок в ЛС/группе (протокол DM-звонков: op4 уходит

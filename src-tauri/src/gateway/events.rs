@@ -141,12 +141,21 @@ pub async fn handle_dispatch(
                 .map(Vec::len)
                 .unwrap_or(0);
             tracing::info!(
-                "gateway: READY — {username} ({user_id}), session {session_id}, {rel_count} отношений, {dm_count} ЛС"
+                "gateway: READY — {username} ({user_id}), session {session_id}, {guild_n} гильдий, {rel_count} отношений, {dm_count} ЛС",
+                guild_n = stub_ids.len(),
             );
             let _ = app.emit(
                 "discord://ready",
                 json!({ "user": d["user"], "session_id": session_id }),
             );
+            // Раскладка рейла (папки серверов): современный Discord хранит
+            // настройки в protobuf (user_settings_proto, base64), legacy —
+            // JSON guild_folders (топ-уровень или внутри user_settings).
+            // Схема прото свёрена с бандлом официального клиента и живёт
+            // в settings_proto.rs. Единое событие для UI в обоих случаях.
+            if !state.is_bot.load(Ordering::SeqCst) {
+                emit_guild_layout(app, &d);
+            }
             // ГЛАВНЫЙ ФИКС видимости серверов: юзер-сессии получают
             // GUILD_CREATE только на подписанные гильдии (op 37). Шторм
             // одним пакетом подозревался в обрывах — поэтому батчами по 50
@@ -769,10 +778,137 @@ pub async fn handle_dispatch(
 
         // Сообщения, реакции, typing и всё остальное идут в UI напрямую —
         // кэш сообщений живёт на стороне фронтенда (как IndexedDB у оригинала).
+        "USER_SETTINGS_PROTO_UPDATE" => {
+            // Современный формат настроек: base64-protobuf. Папки серверов
+            // могли перестроиться (в другом клиенте) — пересылаем раскладку.
+            if !state.is_bot.load(Ordering::SeqCst) {
+                emit_guild_layout(app, &d);
+            }
+            let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
+        }
+        "USER_SETTINGS_UPDATE" => {
+            // Legacy-формат: раскладка может прийти прямо JSON'ом.
+            if !state.is_bot.load(Ordering::SeqCst) {
+                emit_guild_layout(app, &d);
+            }
+            let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
+        }
         _ => {
             let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
     }
+}
+
+/// Раскладка рейла серверов (папки + порядок отдельных гильдий) → единое
+/// событие `discord://guild-layout` для UI. Источники: protobuf
+/// `user_settings_proto` (современные аккаунты) или legacy-JSON
+/// `guild_folders` (топ-уровень / user_settings.guild_folders).
+fn emit_guild_layout(app: &tauri::AppHandle, d: &Value) {
+    // 1. Прото: READY → d.user_settings_proto; PROTO_UPDATE → d.settings.proto.
+    let b64 = ["user_settings_proto"]
+        .iter()
+        .find_map(|k| d.get(*k).and_then(|v| v.as_str()))
+        .or_else(|| {
+            d.get("settings")
+                .and_then(|s| s.get("proto"))
+                .and_then(|v| v.as_str())
+        });
+    if let Some(b64) = b64 {
+        if let Some(layout) = crate::settings_proto::decode_layout(b64) {
+            let mut value = layout_to_json(&layout);
+            // rail_order прото-пути: отдельные гильдии (guild_positions),
+            // затем папки (порядок внутри каждой сохранён).
+            let mut order: Vec<Value> = layout
+                .guild_positions
+                .iter()
+                .map(|gid| json!({ "type": "guild", "id": gid }))
+                .collect();
+            for (i, _) in layout.folders.iter().enumerate() {
+                order.push(json!({ "type": "folder", "index": i }));
+            }
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("rail_order".to_string(), Value::Array(order));
+            }
+            let _ = app.emit("discord://guild-layout", value);
+            tracing::info!(
+                "gateway: раскладка рейла (proto): {} папок, {} отдельных гильдий",
+                layout.folders.len(),
+                layout.guild_positions.len()
+            );
+            return;
+        }
+    }
+    // 2. Legacy JSON: [{id, name, color, guild_ids}] — порядок массива и
+    //    есть порядок рейла: одиночные записи (1 гильдия без id/name) —
+    //    «просто серверы», остальные — папки. Классифицируем каждую запись
+    //    и сохраняем точный interleaving в rail_order.
+    let folders = d
+        .get("guild_folders")
+        .or_else(|| d.get("user_settings").and_then(|s| s.get("guild_folders")))
+        .and_then(|v| v.as_array());
+    if let Some(arr) = folders {
+        let mut norm = Vec::new();
+        let mut order: Vec<Value> = Vec::new();
+        let mut positions: Vec<String> = Vec::new();
+        for f in arr {
+            let Some(ids) = f.get("guild_ids").and_then(|v| v.as_array()).map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            }) else {
+                continue;
+            };
+            let is_folder = ids.len() > 1
+                || f.get("name").and_then(|v| v.as_str()).is_some()
+                || f.get("id").and_then(|v| v.as_str()).is_some();
+            if is_folder {
+                order.push(json!({ "type": "folder", "index": norm.len() }));
+                norm.push(json!({
+                    "id": f.get("id").and_then(|v| v.as_str()),
+                    "name": f.get("name").and_then(|v| v.as_str()),
+                    "color": f.get("color").and_then(|v| v.as_i64()),
+                    "guild_ids": ids,
+                }));
+            } else if let Some(gid) = ids.first() {
+                // Одиночная запись: сервер сам по себе.
+                order.push(json!({ "type": "guild", "id": gid }));
+                positions.push(gid.clone());
+            }
+        }
+        let _ = app.emit(
+            "discord://guild-layout",
+            json!({
+                "folders": norm,
+                "guild_positions": positions,
+                "rail_order": order,
+            }),
+        );
+        tracing::info!(
+            "gateway: раскладка рейла (legacy): {} папок, {} отдельных гильдий",
+            norm.len(),
+            positions.len()
+        );
+    }
+}
+
+/// Прото-раскладка → JSON события (та же схема, что у legacy-пути).
+fn layout_to_json(layout: &crate::settings_proto::GuildLayout) -> Value {
+    let folders: Vec<Value> = layout
+        .folders
+        .iter()
+        .map(|f| {
+            json!({
+                "id": f.id.map(|v| v.to_string()),
+                "name": f.name.clone(),
+                "color": f.color,
+                "guild_ids": f.guild_ids,
+            })
+        })
+        .collect();
+    json!({
+        "folders": folders,
+        "guild_positions": layout.guild_positions,
+    })
 }
 
 /// Разбор merged-массивов READY / READY_SUPPLEMENTAL: `merged_members[i]` и

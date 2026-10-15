@@ -277,6 +277,7 @@ class TauriBackend implements Backend {
         ['discord://status', (d) => handler({ type: 'status', ...(d as object) } as BackendEvent)],
         ['discord://ready', (d) => handler({ type: 'ready', ...(d as object) } as BackendEvent)],
         ['discord://dispatch', (d) => handler({ type: 'dispatch', ...(d as object) } as BackendEvent)],
+        ['discord://guild-layout', (d) => handler({ type: 'guildLayout', ...(d as object) } as BackendEvent)],
         ['discord://voice', (d) => handler({ type: 'voice', ...(d as object) } as BackendEvent)],
         ['discord://warning', (d) => handler({ type: 'warning', ...(d as object) } as BackendEvent)],
         ['discord://qr', (d) => handler({ type: 'qr', ...(d as object) } as BackendEvent)],
