@@ -20,6 +20,7 @@ import type {
   Guild,
   Invite,
   Member,
+  MemberListData,
   Message,
   Presence,
   QrStage,
@@ -131,6 +132,10 @@ export class AppStore {
   membersByGuild = $state<Record<string, Record<string, Member>>>({});
   presencesByGuild = $state<Record<string, Record<string, Presence>>>({});
   voiceByGuild = $state<Record<string, VoiceState[]>>({});
+  /** Ленивые списки участников (guild_id → снапшот GUILD_MEMBER_LIST_UPDATE,
+   *  ответ на op 37 с channels): группы + участники с пресенсами, порядок
+   *  уже собран сервером — 1:1 с сайдбаром официального клиента. */
+  memberLists = $state<Record<string, MemberListData>>({});
   chunksDone = $state<Record<string, boolean>>({});
   messagesByChannel = $state<Record<string, Message[]>>({});
   messagesLoaded = $state<Record<string, boolean>>({});
@@ -559,6 +564,7 @@ export class AppStore {
     this.membersByGuild = {};
     this.presencesByGuild = {};
     this.voiceByGuild = {};
+    this.memberLists = {};
     this.chunksDone = {};
     this.messagesByChannel = {};
     this.messagesLoaded = {};
@@ -612,7 +618,59 @@ export class AppStore {
         // (READY-dispatch обычно уже всё принёс, но после RESUME массив
         // отношений мог не прийти повторно).
         if (!ev.user.bot) void this.syncRelationships();
+        // Переподключение: сервер забывает подписки op 37 (ленивые списки
+        // участников) — переигрываем выбор гильдии/канала, как
+        // CONNECTION_OPEN → flush подписок в официальном клиенте
+        // (Rust параллельно переигрывает свои из кэша member_lists).
+        if (!ev.user.bot && this.activeGuildId && this.mode === 'tauri') {
+          this.selectGuild(this.activeGuildId);
+        }
         break;
+      case 'memberList': {
+        // Снапшот ленивого списка (GUILD_MEMBER_LIST_UPDATE). Помимо рендера
+        // сайдбара — гидратация кэшей: статусы и карточки участников отсюда
+        // видны профиль-карточка, ЛС и «кто в сети» (то, что в официальном
+        // клиенте делают UserStore/PresenceStore из member-list ops).
+        this.memberLists[ev.guild_id] = {
+          channel_id: ev.channel_id,
+          member_count: ev.member_count,
+          online_count: ev.online_count,
+          rows: ev.rows,
+        };
+        const members = this.membersByGuild[ev.guild_id] ?? {};
+        const presences = this.presencesByGuild[ev.guild_id] ?? {};
+        for (const row of ev.rows) {
+          if (row.kind !== 'member') continue;
+          presences[row.user_id] = {
+            user: {
+              id: row.user_id,
+              username: row.username,
+              discriminator: row.discriminator ?? '0',
+              global_name: row.global_name ?? null,
+              avatar: row.avatar ?? null,
+            },
+            status: (row.status as Presence['status']) || 'offline',
+            activities: (row.activities ?? []) as never,
+          };
+          if (!members[row.user_id]) {
+            members[row.user_id] = {
+              user: {
+                id: row.user_id,
+                username: row.username,
+                discriminator: row.discriminator ?? '0',
+                global_name: row.global_name ?? null,
+                avatar: row.avatar ?? null,
+                bot: row.bot ?? false,
+              },
+              nick: row.nick ?? null,
+              roles: row.roles,
+            };
+          }
+        }
+        this.membersByGuild[ev.guild_id] = members;
+        this.presencesByGuild[ev.guild_id] = presences;
+        break;
+      }
       case 'dispatch':
         this.handleDispatch(ev.t, ev.d);
         break;
@@ -862,10 +920,12 @@ export class AppStore {
         this.presencesByGuild[g.id] = pres;
         this.voiceByGuild[g.id] = g.voice_states ?? [];
         // Каналы только что приехали (GUILD_CREATE после op 37-подписки).
-        // Если это активная гильдия — добиваем подписку op 14 (при клике по
-        // стабу каналов ещё не было, subscribe_guild честно ждал этого момента).
+        // Если это активная гильдия и канал ещё не выбран (кликали по стабу
+        // без каналов) — автовыбор теперь возможен; он же подпишет список
+        // участников текущего канала (см. selectChannel → subscribeChannel).
         if (g.id === this.activeGuildId && !this.isBotAccount && this.mode === 'tauri') {
           void this.backend?.subscribeGuild(g.id).catch(() => undefined);
+          if (!this.activeChannelId) this.selectGuild(g.id);
         }
         // Автовыбор первой гильдии — только бот-аккаунтам (демо-режим).
         // Юзер после входа попадает на «Друзья», как в официальном клиенте.
@@ -1370,6 +1430,13 @@ export class AppStore {
 
   selectChannel(id: string | null) {
     this.activeChannelId = id;
+    // Ленивый список участников канала: op 37 с ОДНИМ каналом и диапазоном
+    // [[0,99]] — на каждое переключение, как CHANNEL_SELECT →
+    // subscribeChannel в официальном клиенте. Ответ —
+    // GUILD_MEMBER_LIST_UPDATE (готовый сайдбар с пресенсами).
+    if (id && this.activeGuildId && !this.isBotAccount && this.mode === 'tauri') {
+      void this.backend?.subscribeChannel(this.activeGuildId, id).catch(() => undefined);
+    }
     if (id) {
       delete this.unread[id];
       delete this.mentions[id];

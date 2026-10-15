@@ -49,15 +49,21 @@ pub enum GatewayCommand {
     /// op 37 — bulk guild subscribe (user sessions: presences/typing/threads
     /// для всех гильдий сразу — так делает официальный клиент после READY).
     BulkGuildSubscribe { guild_ids: Vec<String> },
-    /// op 37 — подписка на ОДНУ гильдию вместе с каналами (member-диапазоны
-    /// каналов едут внутри подписки — так делает официальный клиент:
-    /// subscribeChannel кладёт {channels:{cid:[[0,99]]}} в op 37, а НЕ в
-    /// отдельный op 14). Ответ: GUILD_CREATE (если гильдия ещё не прислана)
-    /// + GUILD_MEMBERS_CHUNK по каждому каналу.
-    SubscribeGuildChannels {
+    /// op 37 — подписка на ленивый список участников ОДНОГО канала
+    /// (member-диапазоны едут внутри подписки — как в официальном клиенте:
+    /// subscribeChannel кладёт {channels:{cid:[[0,99]]}} в op 37).
+    /// ВАЖНО: официальный клиент держит LRU максимум из 5 каналов на
+    /// гильдию (ChannelsStore `new LRU({max: 5})` в бандле discord.com) —
+    /// живой шлюз закрывает соединение 4002 «Error while decoding payload»,
+    /// если в одном op 37 прислать больше (v0.9.1 слал 25 и ловил 4002
+    /// на каждый клик по серверу). Поэтому здесь РОВНО ОДИН канал —
+    /// текущий; `None` → псевдоканал "0" (общий список гильдии, так
+    /// делает официальный клиент для member sidebar без канала).
+    /// Ответ: GUILD_MEMBER_LIST_UPDATE (SYNC/INSERT/UPDATE/DELETE ops).
+    SubscribeMemberList {
         guild_id: String,
-        /// Каналы для ленивого списка участников (текст/войс/анонсы/сцена).
-        channel_ids: Vec<String>,
+        /// Канал, чей список участников показать (None → список гильдии).
+        channel_id: Option<String>,
     },
     /// op 4 — join/leave a voice channel or change self mute/deaf.
     /// `guild_id: None` — звонок в ЛС/группе (протокол DM-звонков: op4 уходит
@@ -83,6 +89,54 @@ pub enum GatewayCommand {
     StreamDelete { stream_key: String },
     /// op 22 STREAM_SET_PAUSED — пауза/снятие трансляции.
     StreamSetPaused { stream_key: String, paused: bool },
+}
+
+/// Строка ленивого списка участников (GUILD_MEMBER_LIST_UPDATE).
+/// Сервер присылает УЖЕ собранный сайдбар: заголовки групп и участников
+/// вперемешку, в готовом порядке — рендерим как есть (1:1 с официалом).
+/// Размен размеров вариантов сознателен: строки живут в Vec и уезжают в
+/// JSON-сериализацию, боксовать поля незачем.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MemberListRow {
+    /// Заголовок секции: «В сети», роль или «Оффлайн».
+    Group { id: String, count: u64 },
+    /// Участник (с presence внутри — статусы едут сразу с карточкой).
+    Member {
+        user_id: String,
+        username: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        global_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nick: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        discriminator: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        avatar: Option<String>,
+        #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+        bot: bool,
+        /// online / idle / dnd / offline (offline-строки не приходят —
+        /// сервер держит их за пределами диапазона, но поле на всякий случай).
+        status: String,
+        /// Активности (кастомный статус / игра) — для подписи под ником.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        activities: Vec<serde_json::Value>,
+        #[serde(default)]
+        roles: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hoisted_role: Option<String>,
+    },
+}
+
+/// Снимок ленивого списка участников гильдии (по текущему каналу).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct MemberListState {
+    /// Канал, на который подписаны ("0" — общий список гильдии).
+    pub channel_id: String,
+    pub member_count: u64,
+    pub online_count: u64,
+    pub rows: Vec<MemberListRow>,
 }
 
 /// Per-guild cached state, kept fresh from gateway dispatches.
@@ -201,6 +255,11 @@ pub struct AppState {
     /// Гильдии, на которые уже отправлены op 37 + op 14 (юзер-сессии).
     /// Дедуп: повторное открытие сервера не спамит gateway подписками.
     pub subscribed_guilds: Mutex<HashSet<String>>,
+    /// Ленивые списки участников (guild_id → снимок по текущему каналу).
+    /// Заполняется GUILD_MEMBER_LIST_UPDATE; channel_id хранится и после
+    /// обрыва — после переподключения READY-хендлер переигрывает подписку
+    /// (как CONNECTION_OPEN → flush в официальном клиенте).
+    pub member_lists: Mutex<HashMap<String, MemberListState>>,
 }
 
 impl AppState {
@@ -224,6 +283,7 @@ impl AppState {
             voice_desired: Mutex::new(HashMap::new()),
             voice_notify: tokio::sync::Notify::new(),
             subscribed_guilds: Mutex::new(HashSet::new()),
+            member_lists: Mutex::new(HashMap::new()),
         }
     }
 

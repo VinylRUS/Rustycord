@@ -69,6 +69,11 @@ export interface Backend {
   // v0.6.0: подписки, обновления, файлы
   /** Юзер-сессии: op 37 + op 14 на гильдию (вызывается при её открытии). */
   subscribeGuild(guildId: string): Promise<void>;
+  /** op 37 с ОДНИМ каналом (диапазон [[0,99]]) — ленивый список
+   *  участников текущего канала; channelId = null → список всей гильдии
+   *  (псевдоканал "0"). Вызывается на каждый переключатель канала —
+   *  как CHANNEL_SELECT → subscribeChannel в официальном клиенте. */
+  subscribeChannel(guildId: string, channelId: string | null): Promise<void>;
   /** Проверка релизов на GitHub — null, если проверить не удалось. */
   checkUpdate(): Promise<UpdateInfo | null>;
   /** Загрузка файлов в канал (multipart). paths — абсолютные пути из диалога. */
@@ -251,6 +256,10 @@ class TauriBackend implements Backend {
     await this.invoke('subscribe_guild', { guildId });
   }
 
+  async subscribeChannel(guildId: string, channelId: string | null): Promise<void> {
+    await this.invoke('subscribe_channel', { guildId, channelId });
+  }
+
   async checkUpdate(): Promise<UpdateInfo | null> {
     try {
       return await this.invoke<UpdateInfo>('check_update');
@@ -277,6 +286,7 @@ class TauriBackend implements Backend {
         ['discord://status', (d) => handler({ type: 'status', ...(d as object) } as BackendEvent)],
         ['discord://ready', (d) => handler({ type: 'ready', ...(d as object) } as BackendEvent)],
         ['discord://dispatch', (d) => handler({ type: 'dispatch', ...(d as object) } as BackendEvent)],
+        ['discord://member-list', (d) => handler({ type: 'memberList', ...(d as object) } as BackendEvent)],
         ['discord://guild-layout', (d) => handler({ type: 'guildLayout', ...(d as object) } as BackendEvent)],
         ['discord://voice', (d) => handler({ type: 'voice', ...(d as object) } as BackendEvent)],
         ['discord://warning', (d) => handler({ type: 'warning', ...(d as object) } as BackendEvent)],

@@ -8,7 +8,7 @@ use std::time::Duration;
 use tauri::Emitter;
 
 use crate::rest::models::{Channel, Guild, Member, Presence, Relationship, VoiceState};
-use crate::state::{GuildState, SharedState};
+use crate::state::{GuildState, MemberListRow, SharedState};
 use crate::voice::VoiceControls;
 
 /// Session state accumulated from DISPATCH events. Lives across reconnects
@@ -190,9 +190,23 @@ pub async fn handle_dispatch(
                     });
                 }
             }
+            // После переподключения сервер «забывает» подписки на списки
+            // участников (op 37 с channels) — bulk выше покрывает только
+            // события гильдий. Переигрываем подписки каналов, как
+            // CONNECTION_OPEN → flush в официальном клиенте.
+            replay_member_list_subscriptions(state);
             // Полный READY вперёд как dispatch: фронтенду нужны
             // private_channels (recipient_ids!), users, relationships
             // и presences, которых нет в коротком ready-событии выше.
+            let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            state.emit_status("connected", None);
+        }
+
+        "RESUMED" => {
+            // RESUME прошёл: сессия продолжается, но сервер мог потерять
+            // подписки ленивых списков — официальный клиент делает flush
+            // подписок на CONNECTION_RESUMED ровно как на CONNECTION_OPEN.
+            replay_member_list_subscriptions(state);
             let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
             state.emit_status("connected", None);
         }
@@ -403,6 +417,287 @@ pub async fn handle_dispatch(
                 guild_id
             );
             let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
+        }
+
+        "GUILD_MEMBER_LIST_UPDATE" => {
+            // Ленивый список участников — ответ на op 37 с channels
+            // (subscribe_channel / псевдоканал "0"). Формат сверен с
+            // бандлом discord.com (flux-стор GuildMemberListStore):
+            //   d.id           — id списка (обычно id канала; "0" — общий)
+            //   d.member_count — всего участников
+            //   d.groups       — [{id: "online"|"offline"|role_id, count}]
+            //   d.ops — инкрементальные операции:
+            //     {op:"SYNC", range:[a,b], items:[{group}|{member}, …]}
+            //     {op:"INSERT", index, item}  {op:"UPDATE", index, item}
+            //     {op:"DELETE", index}        {op:"INVALIDATE", range}
+            //   member = {user, roles, presence{status,activities},
+            //             hoisted_role, nick}. Сервер присылает ГОТОВЫЙ
+            // сайдбар: группы и участники уже в правильном порядке —
+            // применяем ops и шлём снапшот в UI (раз в событие, дёшево).
+            let guild_id_opt = d.get("guild_id").and_then(|v| v.as_str()).map(String::from);
+            if let Some(guild_id) = guild_id_opt {
+                let list_id = d
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0")
+                    .to_string();
+                let member_count = d.get("member_count").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                // {group:{id,count}} | {member:{…}} → строка снапшота.
+                let parse_item = |item: &Value| -> Option<MemberListRow> {
+                    if let Some(g) = item.get("group") {
+                        return Some(MemberListRow::Group {
+                            id: g
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            count: g.get("count").and_then(|v| v.as_u64()).unwrap_or(0),
+                        });
+                    }
+                    let m = item.get("member")?;
+                    let user = m.get("user")?;
+                    let uid = user
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    if uid.is_empty() {
+                        return None;
+                    }
+                    let presence = m.get("presence");
+                    Some(MemberListRow::Member {
+                        user_id: uid,
+                        username: user
+                            .get("username")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string(),
+                        global_name: user
+                            .get("global_name")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        nick: m.get("nick").and_then(|v| v.as_str()).map(String::from),
+                        discriminator: user
+                            .get("discriminator")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        avatar: user
+                            .get("avatar")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        bot: user.get("bot").and_then(|v| v.as_bool()).unwrap_or(false),
+                        status: presence
+                            .and_then(|p| p.get("status"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("offline")
+                            .to_string(),
+                        activities: presence
+                            .and_then(|p| p.get("activities"))
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default(),
+                        roles: m
+                            .get("roles")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        hoisted_role: m
+                            .get("hoisted_role")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                    })
+                };
+
+                // Собираем (uid, presence, member) для гидратации кэша —
+                // как eY/eZ в официальном клиенте (UserStore+PresenceStore):
+                // статусы отсюда видят профиль, ЛС и «кто в сети».
+                let mut hydrate: Vec<(String, Value)> = Vec::new();
+                let mut rows_changed = false;
+                {
+                    let mut lists = state.member_lists.lock().unwrap();
+                    let list = lists.entry(guild_id.clone()).or_default();
+                    if list.channel_id != list_id {
+                        // Новый список (переключили канал) — чистый лист:
+                        // первый SYNC привезёт полный снапшот.
+                        list.channel_id = list_id.clone();
+                        list.rows.clear();
+                        rows_changed = true;
+                    }
+                    if list.member_count != member_count {
+                        list.member_count = member_count;
+                        rows_changed = true;
+                    }
+                    if let Some(groups) = d.get("groups").and_then(|v| v.as_array()) {
+                        let online = groups
+                            .iter()
+                            .find(|g| g.get("id").and_then(|v| v.as_str()) == Some("online"))
+                            .and_then(|g| g.get("count").and_then(|v| v.as_u64()))
+                            .unwrap_or(0);
+                        if list.online_count != online {
+                            list.online_count = online;
+                            rows_changed = true;
+                        }
+                    }
+                    if let Some(ops) = d.get("ops").and_then(|v| v.as_array()) {
+                        for op in ops {
+                            let kind = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                            match kind {
+                                "SYNC" => {
+                                    // Мы подписаны на один диапазон [[0,99]] —
+                                    // SYNC привозит его целиком: полная замена.
+                                    let items = op
+                                        .get("items")
+                                        .and_then(|v| v.as_array())
+                                        .map(|arr| arr.iter().filter_map(parse_item).collect())
+                                        .unwrap_or_default();
+                                    list.rows = items;
+                                    rows_changed = true;
+                                }
+                                "INSERT" => {
+                                    let idx = op.get("index").and_then(|v| v.as_u64());
+                                    if let (Some(idx), Some(item)) = (idx, op.get("item")) {
+                                        if let Some(row) = parse_item(item) {
+                                            let idx = (idx as usize).min(list.rows.len());
+                                            list.rows.insert(idx, row);
+                                            rows_changed = true;
+                                        }
+                                    }
+                                }
+                                "UPDATE" => {
+                                    let idx = op.get("index").and_then(|v| v.as_u64());
+                                    if let (Some(idx), Some(item)) = (idx, op.get("item")) {
+                                        let idx = idx as usize;
+                                        if idx < list.rows.len() {
+                                            if let Some(row) = parse_item(item) {
+                                                list.rows[idx] = row;
+                                                rows_changed = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                "DELETE" => {
+                                    if let Some(idx) = op.get("index").and_then(|v| v.as_u64()) {
+                                        let idx = idx as usize;
+                                        if idx < list.rows.len() {
+                                            list.rows.remove(idx);
+                                            rows_changed = true;
+                                        }
+                                    }
+                                }
+                                "INVALIDATE" => {
+                                    // Строки диапазона вышли из зоны подписки.
+                                    if let Some(range) = op.get("range").and_then(|v| v.as_array())
+                                    {
+                                        let start =
+                                            range.first().and_then(|v| v.as_u64()).unwrap_or(0)
+                                                as usize;
+                                        let end = range.get(1).and_then(|v| v.as_u64()).unwrap_or(0)
+                                            as usize;
+                                        if start <= end && start < list.rows.len() {
+                                            let end = (end + 1).min(list.rows.len());
+                                            list.rows.drain(start..end);
+                                            rows_changed = true;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            // Гидратация: member-строки ops несут presence.
+                            let scan = |item: &Value, out: &mut Vec<(String, Value)>| {
+                                if let Some(m) = item.get("member") {
+                                    if let Some(uid) = m
+                                        .get("user")
+                                        .and_then(|u| u.get("id"))
+                                        .and_then(|v| v.as_str())
+                                    {
+                                        out.push((uid.to_string(), m.clone()));
+                                    }
+                                }
+                            };
+                            match kind {
+                                "SYNC" => {
+                                    if let Some(items) = op.get("items").and_then(|v| v.as_array())
+                                    {
+                                        for it in items {
+                                            scan(it, &mut hydrate);
+                                        }
+                                    }
+                                }
+                                "INSERT" | "UPDATE" => {
+                                    if let Some(item) = op.get("item") {
+                                        scan(item, &mut hydrate);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                if !hydrate.is_empty() {
+                    let mut cache = state.cache.write().unwrap();
+                    if let Some(gs) = cache.guilds.get_mut(&guild_id) {
+                        if member_count > 0 {
+                            gs.member_count = member_count;
+                        }
+                        for (uid, m) in hydrate {
+                            // Presence: статус участника — в кэш гильдии
+                            // (профили/ЛС/«кто в сети» берут его отсюда).
+                            let presence_val = json!({
+                                "user": {
+                                    "id": uid,
+                                    "username": m["user"]["username"].clone(),
+                                    "discriminator": m["user"]["discriminator"].clone(),
+                                    "global_name": m["user"]["global_name"].clone(),
+                                    "avatar": m["user"]["avatar"].clone(),
+                                },
+                                "guild_id": guild_id,
+                                "status": m["presence"]["status"].clone(),
+                                "activities": m["presence"]["activities"].clone(),
+                            });
+                            if let Ok(p) = serde_json::from_value::<Presence>(presence_val) {
+                                gs.presences.insert(uid.clone(), p);
+                            }
+                            // Карточку участника не затираем, только добавляем
+                            // отсутствующую (в кэше бывают более полные).
+                            if let Ok(member) = serde_json::from_value::<Member>(m.clone()) {
+                                gs.members.entry(uid.clone()).or_insert(member);
+                            }
+                        }
+                    }
+                }
+                // Снапшот в UI — на каждое событие (строки/счётчики меняются
+                // независимо, а события приходят с человеческой частотой).
+                {
+                    let lists = state.member_lists.lock().unwrap();
+                    if let Some(list) = lists.get(&guild_id) {
+                        let _ = app.emit(
+                            "discord://member-list",
+                            json!({
+                                "guild_id": guild_id,
+                                "channel_id": list.channel_id,
+                                "member_count": list.member_count,
+                                "online_count": list.online_count,
+                                "rows": list.rows,
+                            }),
+                        );
+                        if rows_changed {
+                            tracing::debug!(
+                                "gateway: member list {} — {} строк (канал {}, онлайн {}, всего {})",
+                                guild_id,
+                                list.rows.len(),
+                                list.channel_id,
+                                list.online_count,
+                                list.member_count
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         "GUILD_MEMBER_ADD" => {
@@ -985,5 +1280,52 @@ fn apply_merged(state: &SharedState, d: &Value) {
         tracing::info!(
             "gateway: merged-данные: {friend_n} статусов друзей, {guild_pres_n} гильдейских, {member_n} карточек участников"
         );
+    }
+}
+
+/// Переиграть подписки ленивых списков участников после (RE)подключения.
+/// Сервер держит подписки op 37 только в рамках соединения: после обрыва
+/// и повторного IDENTIFY они пусты. Официальный клиент на CONNECTION_OPEN
+/// и CONNECTION_RESUMED делает flush ВСЕХ подписок (GuildSubscriptionsStore
+/// → updateGuildSubscriptions) — повторяем для каналов, чьи списки у нас
+/// уже были (guild_id → channel_id хранится в state.member_lists).
+fn replay_member_list_subscriptions(state: &SharedState) {
+    if state.is_bot.load(Ordering::SeqCst) {
+        return;
+    }
+    let replay: Vec<(String, Option<String>)> = {
+        let lists = state.member_lists.lock().unwrap();
+        lists
+            .iter()
+            .map(|(gid, l)| {
+                let cid = if l.channel_id == "0" {
+                    None
+                } else {
+                    Some(l.channel_id.clone())
+                };
+                (gid.clone(), cid)
+            })
+            .collect()
+    };
+    if replay.is_empty() {
+        return;
+    }
+    let tx = state.gateway_tx.read().unwrap().clone();
+    if let Some(tx) = tx {
+        tauri::async_runtime::spawn(async move {
+            for (gid, cid) in replay {
+                if tx
+                    .send(crate::state::GatewayCommand::SubscribeMemberList {
+                        guild_id: gid,
+                        channel_id: cid,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        tracing::info!("gateway: переигрываем подписки member-list после переподключения");
     }
 }

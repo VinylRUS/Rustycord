@@ -334,10 +334,48 @@ export type RailOrderItem =
   | { type: 'guild'; id: string }
   | { type: 'folder'; index: number };
 
+/** Строка ленивого списка участников (GUILD_MEMBER_LIST_UPDATE от Rust).
+ *  Сервер присылает сайдбар уже собранным: заголовки групп и участников
+ *  вперемешку в готовом порядке — 1:1 с официальным клиентом. */
+export type MemberListRowData =
+  | { kind: 'group'; id: string; count: number }
+  | {
+      kind: 'member';
+      user_id: string;
+      username: string;
+      global_name?: string | null;
+      nick?: string | null;
+      discriminator?: string | null;
+      avatar?: string | null;
+      bot?: boolean;
+      status: string;
+      activities?: Array<{ type: number; name?: string; state?: string }>;
+      roles: string[];
+      hoisted_role?: string | null;
+    };
+
+/** Снимок ленивого списка участников гильдии (по текущему каналу). */
+export interface MemberListData {
+  channel_id: string;
+  member_count: number;
+  online_count: number;
+  rows: MemberListRowData[];
+}
+
 export type BackendEvent =
   | { type: 'status'; stage: ConnStage; detail?: string }
   | { type: 'ready'; user: User; session_id: string }
   | { type: 'dispatch'; t: string; d: unknown }
+  | {
+      /** Снапшот ленивого списка участников (после op 37 с channels).
+       *  rows — готовый сайдбар: группы + участники с пресенсами. */
+      type: 'memberList';
+      guild_id: string;
+      channel_id: string;
+      member_count: number;
+      online_count: number;
+      rows: MemberListRowData[];
+    }
   | {
       /** Раскладка рейла: папки + порядок отдельных гильдий (Rust декодирует
        *  user_settings_proto/legacy и нормализует в единый формат).

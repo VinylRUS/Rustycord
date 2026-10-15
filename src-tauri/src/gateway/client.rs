@@ -220,6 +220,13 @@ async fn run_session(
     heartbeat.tick().await; // consume the immediate first tick
 
     let mut acked = true;
+    // Команды (op 37/8/…), пришедшие ДО первого DISPATCH (READY), нельзя
+    // слать сразу: сервер отвечает 4002 «Error while decoding payload»
+    // на op 37 до READY (замечено в логе v0.9.1: клик по серверу во время
+    // переподключения). Буферизуем и выливаем после READY — так же
+    // поступает официальный клиент (CONNECTION_OPEN → flush подписок).
+    let mut ready = false;
+    let mut pending_cmds: Vec<GatewayCommand> = Vec::new();
 
     loop {
         tokio::select! {
@@ -229,141 +236,14 @@ async fn run_session(
             }
 
             cmd = rx.recv() => {
-                match cmd {
-                    Some(GatewayCommand::RequestMembers { guild_id }) => {
-                        // op 8: query="" + limit=0 → the server streams every member in chunks
-                        wsutil::send_json(&mut writer, &json!({
-                            "op": 8,
-                            "d": { "guild_id": guild_id, "query": "", "limit": 0 }
-                        })).await?;
-                    }
-                    Some(GatewayCommand::BulkGuildSubscribe { guild_ids }) => {
-                        // op 37 (юзер-сессии): подписка на события всех гильдий
-                        // сразу — presences/typing/threads/member_updates.
-                        // Чанкование как в официальном клиенте
-                        // (updateGuildSubscriptions): сумма JSON-весов пар
-                        // [gid, sub] не должна превышать 15 360 байт на кадр.
-                        let mut frames: Vec<Value> = Vec::new();
-                        let mut subs = serde_json::Map::new();
-                        let mut budget = 0usize;
-                        for gid in &guild_ids {
-                            let sub = json!({
-                                "typing": true, "threads": true,
-                                "activities": true, "member_updates": true
-                            });
-                            let cost = format!("[{gid:?},{sub}]").len();
-                            if budget + cost > 15_360 {
-                                frames.push(json!({ "op": 37, "d": { "subscriptions": subs } }));
-                                subs = serde_json::Map::new();
-                                budget = 0;
-                            }
-                            subs.insert(gid.clone(), sub);
-                            budget += cost;
-                        }
-                        if !subs.is_empty() {
-                            frames.push(json!({ "op": 37, "d": { "subscriptions": subs } }));
-                        }
-                        let n_frames = frames.len();
-                        for frame in &frames {
-                            wsutil::send_json(&mut writer, frame).await?;
-                        }
-                        tracing::info!(
-                            "gateway: op 37 bulk subscribe на {} гильдий ({} кадров)",
-                            guild_ids.len(),
-                            n_frames
-                        );
-                    }
-                    Some(GatewayCommand::SubscribeGuildChannels { guild_id, channel_ids }) => {
-                        // op 37 на ОДНУ гильдию с каналами: официальный клиент
-                        // кладёт member-диапазоны каналов прямо в подписку
-                        // (subscribeChannel → {channels:{cid:[[0,99]]}}), а не
-                        // в отдельный op 14. Наш старый op 14 живой шлюз
-                        // отвергал close 4002 «Error while decoding payload»
-                        // — сейчас формат 1:1 с бандлом discord.com.
-                        let mut chans = serde_json::Map::new();
-                        for cid in &channel_ids {
-                            // [[0, 99]] — стандартный диапазон ленивого списка.
-                            chans.insert(cid.clone(), json!([[0, 99]]));
-                        }
-                        let mut subs = serde_json::Map::new();
-                        subs.insert(
-                            guild_id.clone(),
-                            json!({
-                                "typing": true,
-                                "threads": true,
-                                "activities": true,
-                                "member_updates": true,
-                                "channels": chans
-                            }),
-                        );
-                        wsutil::send_json(
-                            &mut writer,
-                            &json!({
-                                "op": 37,
-                                "d": { "subscriptions": subs }
-                            }),
-                        )
-                        .await?;
-                        tracing::info!(
-                            "gateway: op 37 подписка {} + {} каналов (member-чанки)",
-                            guild_id,
-                            channel_ids.len()
-                        );
-                    }
-                    Some(GatewayCommand::VoiceStateUpdate { guild_id, channel_id, self_mute, self_deaf, self_video }) => {
-                        // op 4: войти/покинуть голосовой канал. Для звонков в
-                        // ЛС/группе guild_id = null — так шлёт официальный
-                        // клиент (voice-сервер идентифицирует по channel_id).
-                        wsutil::send_json(
-                            &mut writer,
-                            &json!({
-                                "op": 4,
-                                "d": {
-                                    "guild_id": guild_id,     // null → звонок в ЛС
-                                    "channel_id": channel_id, // null → покинуть канал
-                                    "self_mute": self_mute,
-                                    "self_deaf": self_deaf,
-                                    "self_video": self_video
-                                }
-                            }),
-                        ).await?;
-                    }
-                    Some(GatewayCommand::StreamCreate { stream_type, guild_id, channel_id }) => {
-                        // op 18 STREAM_CREATE — «показать экран»/«включить
-                        // камеру». Сервер разошлёт dispatch STREAM_CREATE с
-                        // stream_key — по нему останавливаем (op 20) и ставим
-                        // на паузу (op 22).
-                        wsutil::send_json(&mut writer, &json!({
-                            "op": 18,
-                            "d": {
-                                "type": stream_type,
-                                "guild_id": guild_id,
-                                "channel_id": channel_id,
-                                "preferred_region": null
-                            }
-                        })).await?;
-                        tracing::info!("gateway: op 18 STREAM_CREATE отправлен");
-                    }
-                    Some(GatewayCommand::StreamDelete { stream_key }) => {
-                        wsutil::send_json(&mut writer, &json!({
-                            "op": 20,
-                            "d": { "stream_key": stream_key }
-                        })).await?;
-                        tracing::info!("gateway: op 20 STREAM_DELETE {stream_key}");
-                    }
-                    Some(GatewayCommand::StreamSetPaused { stream_key, paused }) => {
-                        wsutil::send_json(&mut writer, &json!({
-                            "op": 22,
-                            "d": { "stream_key": stream_key, "paused": paused }
-                        })).await?;
-                    }
-                    Some(GatewayCommand::SendText(text)) => {
-                        writer.send(Message::Text(text)).await?;
-                    }
-                    None => return Ok(End::Shutdown), // все sender'ы закрыты
+                let Some(cmd) = cmd else { return Ok(End::Shutdown) };
+                if !ready {
+                    // Сессия ещё не READY — копим и отправим после dispatch'а.
+                    pending_cmds.push(cmd);
+                    continue;
                 }
+                send_command(&mut writer, &cmd).await?;
             }
-
             _ = heartbeat.tick() => {
                 if !acked {
                     // Два пульса подряд без ACK → «зомби»-соединение.
@@ -394,6 +274,22 @@ async fn run_session(
                                 }
                                 let d = v["d"].clone();
                                 handle_dispatch(app, state, &t, d, session).await;
+                                // Первый dispatch — это READY (IDENTIFY-сессия):
+                                // шлюз готов принимать команды. Выливаем всё,
+                                // что накопилось за время рукопожатия.
+                                if !ready {
+                                    ready = true;
+                                    let queued = std::mem::take(&mut pending_cmds);
+                                    if !queued.is_empty() {
+                                        tracing::info!(
+                                            "gateway: после READY отправляем {} отложенных команд",
+                                            queued.len()
+                                        );
+                                        for cmd in &queued {
+                                            send_command(&mut writer, cmd).await?;
+                                        }
+                                    }
+                                }
                             }
                             1 => {
                                 // Сервер сам попросил пульс — отвечаем немедленно.
@@ -468,4 +364,171 @@ async fn run_session(
             }
         }
     }
+}
+
+/// Отправка одной gateway-команды как кадра JSON. Вынесено из select-петли,
+/// чтобы один и тот же код обслуживал и live-команды, и отложенные
+/// (накопленные до READY и вылитые после первого dispatch).
+async fn send_command(writer: &mut crate::wsutil::WsWriter, cmd: &GatewayCommand) -> Result<()> {
+    match cmd {
+        GatewayCommand::SendText(text) => {
+            writer.send(Message::Text(text.clone())).await?;
+        }
+        GatewayCommand::RequestMembers { guild_id } => {
+            // op 8: query="" + limit=0 → the server streams every member in chunks
+            wsutil::send_json(
+                writer,
+                &json!({
+                    "op": 8,
+                    "d": { "guild_id": guild_id, "query": "", "limit": 0 }
+                }),
+            )
+            .await?;
+        }
+        GatewayCommand::BulkGuildSubscribe { guild_ids } => {
+            // op 37 (юзер-сессии): подписка на события всех гильдий
+            // сразу — presences/typing/threads/member_updates.
+            // Чанкование как в официальном клиенте
+            // (updateGuildSubscriptions): сумма JSON-весов пар
+            // [gid, sub] не должна превышать 15 360 байт на кадр.
+            let mut frames: Vec<Value> = Vec::new();
+            let mut subs = serde_json::Map::new();
+            let mut budget = 0usize;
+            for gid in guild_ids {
+                let sub = json!({
+                    "typing": true, "threads": true,
+                    "activities": true, "member_updates": true
+                });
+                let cost = format!("[{gid:?},{sub}]").len();
+                if budget + cost > 15_360 {
+                    frames.push(json!({ "op": 37, "d": { "subscriptions": subs } }));
+                    subs = serde_json::Map::new();
+                    budget = 0;
+                }
+                subs.insert(gid.clone(), sub);
+                budget += cost;
+            }
+            if !subs.is_empty() {
+                frames.push(json!({ "op": 37, "d": { "subscriptions": subs } }));
+            }
+            let n_frames = frames.len();
+            for frame in &frames {
+                wsutil::send_json(writer, frame).await?;
+            }
+            tracing::info!(
+                "gateway: op 37 bulk subscribe на {} гильдий ({} кадров)",
+                guild_ids.len(),
+                n_frames
+            );
+        }
+        GatewayCommand::SubscribeMemberList {
+            guild_id,
+            channel_id,
+        } => {
+            // op 37 на ОДНУ гильдию с ОДНИМ каналом — 1:1 с официальным
+            // клиентом (subscribeChannel → {channels:{cid:[[0,99]]}}).
+            // Каналов не больше 5 на гильдию (LRU ChannelsStore в бандле
+            // discord.com) — больше живой шлюз закрывает 4002; v0.9.1 слал
+            // 25 каналов и ловил 4002 на каждый клик по серверу.
+            // channel_id = None → псевдоканал "0": общий список участников
+            // гильдии (member sidebar без выбранного канала).
+            let cid = channel_id.clone().unwrap_or_else(|| "0".to_string());
+            let mut chans = serde_json::Map::new();
+            // [[0, 99]] — стандартный диапазон ленивого списка (константа
+            // LD из бандла, размер диапазона JM = 100 строк).
+            chans.insert(cid.clone(), json!([[0, 99]]));
+            // Полный формат подписки — 1:1 с G.get() официального клиента
+            // (путь replay на CONNECTION_OPEN шлёт ВСЕ поля, включая пустые
+            // members/thread_member_lists — серверная схема строгая и при
+            // наличии channels ждёт их; без них живой шлюз отвечал 4002).
+            let mut subs = serde_json::Map::new();
+            subs.insert(
+                guild_id.clone(),
+                json!({
+                    "typing": true,
+                    "threads": true,
+                    "activities": true,
+                    "member_updates": true,
+                    "members": [],
+                    "thread_member_lists": [],
+                    "channels": chans
+                }),
+            );
+            wsutil::send_json(
+                writer,
+                &json!({
+                    "op": 37,
+                    "d": { "subscriptions": subs }
+                }),
+            )
+            .await?;
+            tracing::info!(
+                "gateway: op 37 список участников {guild_id} · канал {cid} · диапазон [0,99]"
+            );
+        }
+        GatewayCommand::VoiceStateUpdate {
+            guild_id,
+            channel_id,
+            self_mute,
+            self_deaf,
+            self_video,
+        } => {
+            // op 4: войти/покинуть голосовой канал. Для звонков в ЛС/группе
+            // guild_id = null — так шлёт официальный клиент (voice-сервер
+            // идентифицирует сессию по channel_id).
+            wsutil::send_json(
+                writer,
+                &json!({
+                    "op": 4,
+                    "d": {
+                        "guild_id": guild_id,     // null → звонок в ЛС
+                        "channel_id": channel_id, // null → покинуть канал
+                        "self_mute": self_mute,
+                        "self_deaf": self_deaf,
+                        "self_video": self_video
+                    }
+                }),
+            )
+            .await?;
+        }
+        GatewayCommand::StreamCreate {
+            stream_type,
+            guild_id,
+            channel_id,
+        } => {
+            // op 18 STREAM_CREATE — «показать экран»/«включить камеру».
+            // Сервер разошлёт dispatch STREAM_CREATE с stream_key — по нему
+            // останавливаем (op 20) и ставим на паузу (op 22).
+            wsutil::send_json(
+                writer,
+                &json!({
+                    "op": 18,
+                    "d": {
+                        "type": stream_type,
+                        "guild_id": guild_id,
+                        "channel_id": channel_id,
+                        "preferred_region": null
+                    }
+                }),
+            )
+            .await?;
+            tracing::info!("gateway: op 18 STREAM_CREATE отправлен");
+        }
+        GatewayCommand::StreamDelete { stream_key } => {
+            wsutil::send_json(
+                writer,
+                &json!({ "op": 20, "d": { "stream_key": stream_key } }),
+            )
+            .await?;
+            tracing::info!("gateway: op 20 STREAM_DELETE {stream_key}");
+        }
+        GatewayCommand::StreamSetPaused { stream_key, paused } => {
+            wsutil::send_json(
+                writer,
+                &json!({ "op": 22, "d": { "stream_key": stream_key, "paused": paused } }),
+            )
+            .await?;
+        }
+    }
+    Ok(())
 }

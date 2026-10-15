@@ -853,16 +853,16 @@ pub async fn parse_snowflake(id: String) -> Result<snowflake::SnowflakeInfo, Str
 
 /* ==================== v0.6.0: подписки / апдейты / файлы ==================== */
 
-/// Подписаться на события гильдии (юзер-сессии): op 37 с каналами —
-/// пресенсы/typing/threads/member_updates + ленивые списки участников
-/// (member-диапазоны каналов едут ВНУТРИ op 37, как в официальном клиенте;
-/// отдельный op 14 живой шлюз отвергал close 4002).
+/// Подписаться на события гильдии (юзер-сессии): op 37 БЕЗ каналов —
+/// пресенсы/typing/threads/member_updates (как bulk-подписка после
+/// READY в официальном клиенте). На эту подписку сервер присылает
+/// GUILD_CREATE — по ней приезжают и каналы.
 ///
-/// Если каналов в кэше ещё нет (гильдия-стаб из READY или REST-union),
-/// уходит «голая» подписка без каналов — GUILD_CREATE подвезёт каналы,
-/// фронтенд повторит вызов и доошлёт их (раньше здесь был deadlock:
-/// ранний return БЕЗ подписки → GUILD_CREATE никогда не приезжал →
-/// сервер оставался пустым навсегда).
+/// ВАЖНО: каналы здесь НЕ подписываются — до v0.9.1 сюда влезали 25
+/// каналов, а живой шлюз отвечает 4002 «Error while decoding payload»
+/// на больше чем 5 каналов за раз (официальный клиент держит LRU-5,
+/// см. ChannelsStore в бандле discord.com). Список участников
+/// подписывается отдельно — `subscribe_channel`.
 #[tauri::command]
 pub async fn subscribe_guild(
     state: State<'_, Arc<AppState>>,
@@ -877,43 +877,62 @@ pub async fn subscribe_guild(
         .unwrap()
         .clone()
         .ok_or("Gateway не подключён")?;
-    // Каналы для ленивого списка: текст/войс/анонсы/сцена, до 25 штук —
-    // диапазон [0, 99] на каждый (в op 37 это {cid: [[0,99]]}).
-    let channel_ids: Vec<String> = {
-        let cache = state.cache.read().unwrap();
-        cache
-            .guilds
-            .get(&guild_id)
-            .map(|gs| {
-                gs.channels
-                    .iter()
-                    .filter(|c| matches!(c.kind, 0 | 2 | 5 | 13))
-                    .take(25)
-                    .map(|c| c.id.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
     {
         let mut subs = state.subscribed_guilds.lock().unwrap();
         if subs.contains(&guild_id) {
-            // Полная подписка (с каналами) уже была — повтор не нужен.
+            // Гильдия уже подписана (bulk после READY или прошлый клик).
             return Ok(());
         }
-        // Помечаем ТОЛЬКО подписку с каналами: «голая» подписка стаба не
-        // считается выполненной — после GUILD_CREATE фронтенд повторит
-        // вызов и доошлёт каналы (иначе guard съел бы ретрай навсегда).
-        if !channel_ids.is_empty() {
-            subs.insert(guild_id.clone());
-        }
+        subs.insert(guild_id.clone());
     }
-    tx.send(GatewayCommand::SubscribeGuildChannels {
-        guild_id: guild_id.clone(),
-        channel_ids,
+    tx.send(GatewayCommand::BulkGuildSubscribe {
+        guild_ids: vec![guild_id.clone()],
     })
     .await
     .map_err(es)?;
     tracing::info!("subscribe_guild: op 37 для {guild_id}");
+    Ok(())
+}
+
+/// Подписаться на ленивый список участников канала (юзер-сессии):
+/// op 37 с ОДНИМ каналом и диапазоном [[0, 99]] — ровно как
+/// subscribeChannel в официальном клиенте. Ответ приезжает событием
+/// GUILD_MEMBER_LIST_UPDATE (SYNC → готовый сайдбар: группы + участники
+/// с пресенсами). `channel_id = null` → псевдоканал "0" (общий список
+/// участников гильдии, так делает официал без выбранного канала).
+/// Вызывается при КАЖДОМ переключении канала (дедупа нет — сервер
+/// просто присылает свежий SYNC, это и есть самовосстановление).
+#[tauri::command]
+pub async fn subscribe_channel(
+    state: State<'_, Arc<AppState>>,
+    guild_id: String,
+    channel_id: Option<String>,
+) -> Result<(), String> {
+    if state.is_bot.load(Ordering::SeqCst) {
+        return Ok(()); // боты получают список через op 8
+    }
+    let tx = state
+        .gateway_tx
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or("Gateway не подключён")?;
+    // Сменился канал — обнуляем старый снимок списка (придёт новый SYNC).
+    {
+        let mut lists = state.member_lists.lock().unwrap();
+        if let Some(list) = lists.get_mut(&guild_id) {
+            let cid = channel_id.clone().unwrap_or_else(|| "0".to_string());
+            if list.channel_id != cid {
+                list.rows.clear();
+            }
+        }
+    }
+    tx.send(GatewayCommand::SubscribeMemberList {
+        guild_id: guild_id.clone(),
+        channel_id,
+    })
+    .await
+    .map_err(es)?;
     Ok(())
 }
 

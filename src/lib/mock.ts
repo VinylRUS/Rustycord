@@ -541,6 +541,10 @@ export class MockBackend implements Backend {
     /* демо-режим: все события и так приходят из локальной симуляции */
   }
 
+  async subscribeChannel(_guildId: string, _channelId: string | null): Promise<void> {
+    /* демо-режим: список участников приходит из локальной симуляции */
+  }
+
   async checkUpdate(): Promise<UpdateInfo | null> {
     // В демо обновлений нет — как в самой свежей сборке ;)
     return {

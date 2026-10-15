@@ -108,6 +108,7 @@ pub fn run() {
             commands::api_request,
             // v0.6.0: подписки на гильдию, обновления, файлы, логи
             commands::subscribe_guild,
+            commands::subscribe_channel,
             commands::check_update,
             commands::upload_files,
             commands::get_log_path,

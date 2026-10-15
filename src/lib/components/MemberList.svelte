@@ -1,14 +1,65 @@
 <script lang="ts">
   import { app } from '../stores/app.svelte';
-  import type { Member, Role } from '../types';
+  import type { Member, MemberListRowData, Role } from '../types';
   import Avatar from './Avatar.svelte';
 
   const guild = $derived(app.activeGuild);
   const guildId = $derived(guild?.id ?? '');
 
-  /** Строка списка: полноценный участник либо presence-only юзер
-   *  (merged_presences/op 14 дают статусы людей, чья карточка участника
-   *  ещё не приехала — оригинал показывает их так же). */
+  /* ================= ленивый список (GUILD_MEMBER_LIST_UPDATE) =================
+   * Сервер присылает сайдбар УЖЕ собранным: заголовки групп и участников
+   * с пресенсами вперемешку, в готовом порядке (ответ на op 37 с channels,
+   * диапазон [[0,99]]). Рендерим как есть — 1:1 с официальным клиентом. */
+
+  type LazyMember = Extract<MemberListRowData, { kind: 'member' }>;
+
+  const lazy = $derived(app.memberLists[guildId]);
+  /** Снапшот соответствует текущему каналу → рендерим его, иначе фолбэк. */
+  const lazyActive = $derived(
+    !!lazy && lazy.rows.length > 0 && lazy.channel_id === (app.activeChannelId ?? '0'),
+  );
+
+  function groupTitle(id: string): string {
+    if (id === 'online') return 'В СЕТИ';
+    if (id === 'offline') return 'ОФЛАЙН';
+    if (id === 'unknown') return 'УЧАСТНИКИ';
+    const role = guild?.roles.find((r) => r.id === id);
+    return (role?.name ?? '…').toUpperCase();
+  }
+
+  function rowName(r: LazyMember): string {
+    return r.nick || r.global_name || r.username;
+  }
+
+  function rowActivity(r: LazyMember): string | null {
+    const custom = r.activities?.find((a) => a.type === 4);
+    if (custom?.state) return custom.state;
+    const game = r.activities?.find((a) => a.type === 0);
+    return game?.name ?? null;
+  }
+
+  /** Цвет ника — по высшей цветной роли участника (как в официале). */
+  function rowColor(r: LazyMember): string {
+    const top = (guild?.roles ?? [])
+      .filter((role) => role.color && r.roles.includes(role.id))
+      .sort((a, b) => b.position - a.position)[0];
+    return top ? `#${top.color.toString(16).padStart(6, '0')}` : 'var(--header-primary)';
+  }
+
+  function rowUser(r: LazyMember) {
+    return {
+      id: r.user_id,
+      username: r.username,
+      global_name: r.global_name ?? null,
+      avatar: r.avatar ?? null,
+      bot: r.bot ?? false,
+    };
+  }
+
+  /* ================= фолбэк: union карточек и пресенсов =================
+   * Бот-аккаунты (op 8 → GUILD_MEMBERS_CHUNK) и мгновение до первого SYNC. */
+
+  /** Строка списка: полноценный участник либо presence-only юзер. */
   interface Row {
     id: string;
     member: Member | null;
@@ -101,59 +152,103 @@
     if (game) return game.name;
     return null;
   }
+
+  /** Юзер-аккаунты ждут первый SYNC ленивого списка, боты — чанки op 8. */
+  const loading = $derived(
+    !!guild && (app.isBotAccount ? !app.chunksDone[guildId] : !lazyActive),
+  );
+
+  const shownOnline = $derived(lazyActive && lazy ? lazy.online_count : onlineCount);
+  const shownTotal = $derived(lazyActive && lazy ? lazy.member_count : guild?.member_count);
 </script>
 
 <aside class="members">
-  {#if !app.chunksDone[guildId] && guild}
+  {#if loading}
     <div class="chunk-hint muted">
       Загружаем участников…
     </div>
   {/if}
 
   <div class="member-stats muted">
-    В сети — {onlineCount}
-    {#if guild?.member_count}
-      · всего {guild.member_count}
+    В сети — {shownOnline}
+    {#if shownTotal}
+      · всего {shownTotal}
     {/if}
   </div>
 
-  {#each groups as g (g.role?.id ?? 'offline')}
-    <div class="group">
-      <div class="group-title muted">
-        {g.role ? g.role.name.toUpperCase() : 'ОФЛАЙН'} — {g.members.length}
-      </div>
-      {#each g.role === null ? g.members.slice(0, OFFLINE_CAP) : g.members as m (m.id)}
+  {#if lazyActive && lazy}
+    {#each lazy.rows as row (row.kind === 'member' ? `m:${row.user_id}` : `g:${row.id}`)}
+      {#if row.kind === 'group'}
+        <div class="group-title lazy muted">
+          {groupTitle(row.id)} — {row.count}
+        </div>
+      {:else}
         <button
           class="member"
-          class:offline={g.role === null}
-          onclick={() => (app.profileCard = { userId: m.id, guildId })}
+          class:offline={row.status === 'offline'}
+          onclick={() => (app.profileCard = { userId: row.user_id, guildId })}
           oncontextmenu={(e) => {
             e.preventDefault();
-            app.profileCard = { userId: m.id, guildId };
+            app.profileCard = { userId: row.user_id, guildId };
           }}
         >
           <Avatar
-            user={(m.member?.user ?? m.presenceUser) as never}
+            user={rowUser(row) as never}
             size={32}
-            status={g.role === null ? 'offline' : m.status}
+            status={row.status}
             ringColor="var(--bg-secondary)"
           />
           <div class="meta">
-            <span class="name truncate" style="color: {colorOf(m)}">
-              {m.name}
-              {#if m.member?.user?.bot}<span class="bot">APP</span>{/if}
+            <span class="name truncate" style="color: {rowColor(row)}">
+              {rowName(row)}
+              {#if row.bot}<span class="bot">APP</span>{/if}
             </span>
-            {#if activity(m)}
-              <span class="activity truncate muted">{activity(m)}</span>
+            {#if rowActivity(row)}
+              <span class="activity truncate muted">{rowActivity(row)}</span>
             {/if}
           </div>
         </button>
-      {/each}
-      {#if g.role === null && offlineHidden > 0}
-        <div class="offline-more muted">…и ещё {offlineHidden} не в сети</div>
       {/if}
-    </div>
-  {/each}
+    {/each}
+  {:else}
+    {#each groups as g (g.role?.id ?? 'offline')}
+      <div class="group">
+        <div class="group-title muted">
+          {g.role ? g.role.name.toUpperCase() : 'ОФЛАЙН'} — {g.members.length}
+        </div>
+        {#each g.role === null ? g.members.slice(0, OFFLINE_CAP) : g.members as m (m.id)}
+          <button
+            class="member"
+            class:offline={g.role === null}
+            onclick={() => (app.profileCard = { userId: m.id, guildId })}
+            oncontextmenu={(e) => {
+              e.preventDefault();
+              app.profileCard = { userId: m.id, guildId };
+            }}
+          >
+            <Avatar
+              user={(m.member?.user ?? m.presenceUser) as never}
+              size={32}
+              status={g.role === null ? 'offline' : m.status}
+              ringColor="var(--bg-secondary)"
+            />
+            <div class="meta">
+              <span class="name truncate" style="color: {colorOf(m)}">
+                {m.name}
+                {#if m.member?.user?.bot}<span class="bot">APP</span>{/if}
+              </span>
+              {#if activity(m)}
+                <span class="activity truncate muted">{activity(m)}</span>
+              {/if}
+            </div>
+          </button>
+        {/each}
+        {#if g.role === null && offlineHidden > 0}
+          <div class="offline-more muted">…и ещё {offlineHidden} не в сети</div>
+        {/if}
+      </div>
+    {/each}
+  {/if}
   <div class="pad"></div>
 </aside>
 
@@ -183,6 +278,8 @@
     padding: 8px 16px 4px;
     letter-spacing: 0.02em;
   }
+  /* Ленивый режим: группы и участники — плоский список в серверном порядке. */
+  .group-title.lazy { margin-top: 16px; }
   .member {
     display: flex;
     align-items: center;
