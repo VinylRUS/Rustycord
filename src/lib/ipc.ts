@@ -83,6 +83,9 @@ export interface Backend {
   uploadFiles(channelId: string, paths: string[], content?: string): Promise<Message>;
   /** Путь к файлу логов (для баг-репортов). */
   getLogPath(): Promise<string>;
+  /** Запись ошибки/предупреждения фронтенда в файловый лог Rust
+   *  (ошибки разбора dispatch'ей и пр. — иначе видны только в devtools). */
+  logError(message: string, level?: 'error' | 'warn' | 'info'): Promise<void>;
 
   // друзья и личные беседы (v0.4.0)
   /** Открыть (или создать) DM с пользователем — POST /users/@me/channels. */
@@ -290,6 +293,10 @@ class TauriBackend implements Backend {
 
   async getLogPath(): Promise<string> {
     return this.invoke<string>('get_log_path');
+  }
+
+  async logError(message: string, level: 'error' | 'warn' | 'info' = 'error'): Promise<void> {
+    await this.invoke('frontend_log', { level, message });
   }
 
   onEvent(handler: (ev: BackendEvent) => void): () => void {

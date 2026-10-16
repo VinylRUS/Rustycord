@@ -108,6 +108,7 @@ pub fn run() {
             commands::auth_cancel_qr,
             // универсальный REST-прокси + управление сервером
             commands::api_request,
+            commands::frontend_log,
             // v0.6.0: подписки на гильдию, обновления, файлы, логи
             commands::subscribe_guild,
             commands::subscribe_channel,

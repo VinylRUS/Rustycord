@@ -746,6 +746,10 @@ export class MockBackend implements Backend {
     return 'демо-режим: логи пишутся только в приложении';
   }
 
+  async logError(message: string, _level: 'error' | 'warn' | 'info' = 'error'): Promise<void> {
+    console.error('[mock:log]', message);
+  }
+
   async gatewaySendRaw(frame: string): Promise<void> {
     // В демо-режиме настоящего websocket нет — валидируем JSON и «отправляем»
     // обратно как dispatch, чтобы UI-консоль протокола была живой.

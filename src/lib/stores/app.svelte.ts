@@ -22,6 +22,7 @@ import type {
   Member,
   MemberListData,
   Message,
+  MergedPresence,
   Presence,
   QrStage,
   RailOrderItem,
@@ -760,7 +761,16 @@ export class AppStore {
         break;
       }
       case 'dispatch':
-        this.handleDispatch(ev.t, ev.d);
+        try {
+          this.handleDispatch(ev.t, ev.d);
+        } catch (e) {
+          // Ошибка разбора одного события не должна обрывать цепочку
+          // (v0.9.7: TypeError в applyMerged молча убил fetchUserGuilds —
+          // рейл без имён/иконок). Пишем в консоль и в файловый лог Rust.
+          const msg = e instanceof Error ? `${e.message}\n${e.stack ?? ''}` : String(e);
+          console.error(`[dispatch ${ev.t}]`, e);
+          void this.backend?.logError(`dispatch ${ev.t}: ${msg}`).catch(() => undefined);
+        }
         break;
       case 'guildLayout':
         this.applyGuildLayout(ev.folders, ev.guild_positions, ev.rail_order ?? []);
@@ -906,9 +916,21 @@ export class AppStore {
           private_channels?: Channel[];
           relationships?: Relationship[];
           presences?: Presence[];
-          guilds?: { id: string; name?: string; icon?: string | null }[];
+          guilds?: {
+            id: string;
+            name?: string;
+            icon?: string | null;
+            banner?: string | null;
+            owner_id?: string;
+            member_count?: number;
+            roles?: Role[];
+            channels?: Channel[];
+            threads?: Channel[];
+            /** CLIENT_STATE_V2: display-данные гильдии — в properties. */
+            properties?: { name?: string; icon?: string | null };
+          }[];
           guild_folders?: { guild_ids?: string[] }[];
-          merged_presences?: { friends?: Presence[]; guilds?: Presence[][] };
+          merged_presences?: { friends?: MergedPresence[]; guilds?: MergedPresence[][] };
           merged_members?: Member[][];
         };
         this.user = p.user;
@@ -946,20 +968,26 @@ export class AppStore {
           }
           this.friendPresences = map;
         }
-        // Гильдии-стабы из READY (id+name+icon): рейл серверов рисуется
-        // СРАЗУ — GUILD_CREATE (после op 37-подписки) наполнит каналы
-        // и участников, заменив стабы. Так ведёт себя официальный клиент.
+        // Гильдии из READY (id+name+icon+каналы): рейл серверов рисуется
+        // СРАЗУ — и некрупные гильдии приезжают из READY ПОЛНЫМИ объектами
+        // (каналы/роли прямо здесь; v0.9.7 их выбрасывал — без GUILD_CREATE
+        // сервер оставался «мёртвым» при клике), крупные — ленивыми
+        // стабами (GUILD_CREATE подтянет полноту). Display-имя/иконка —
+        // в верхнем уровне ИЛИ в properties (CLIENT_STATE_V2).
         if (p.guilds) {
           const known = new Set(this.guilds.map((g) => g.id));
           for (const g of p.guilds) {
             if (g?.id && !known.has(g.id)) {
               this.guilds.push({
                 id: g.id,
-                name: g.name ?? '…',
-                icon: g.icon ?? null,
-                owner_id: '',
-                roles: [],
-                channels: [],
+                name: g.name ?? g.properties?.name ?? '…',
+                icon: g.icon ?? g.properties?.icon ?? null,
+                banner: g.banner ?? null,
+                owner_id: g.owner_id ?? '',
+                member_count: g.member_count ?? 0,
+                roles: g.roles ?? [],
+                channels: g.channels ?? [],
+                threads: g.threads ?? [],
               } as Guild);
             }
           }
@@ -987,7 +1015,7 @@ export class AppStore {
         // гильдий + merged-массивы (статусы друзей и участников).
         const p = d as {
           guilds?: { id: string; voice_states?: VoiceState[] }[];
-          merged_presences?: { friends?: Presence[]; guilds?: Presence[][] };
+          merged_presences?: { friends?: MergedPresence[]; guilds?: MergedPresence[][] };
           merged_members?: Member[][];
         };
         for (const g of p.guilds ?? []) {
@@ -1001,13 +1029,13 @@ export class AppStore {
         // верхнеуровневого name/icon — если затирать стаб из READY,
         // гильдия останется безымянной (а ServerRail рисует инициалы
         // из name — undefined ронял весь рейл серверов целиком).
-        const raw = d as Partial<Guild> & { id: string };
+        const raw = d as Partial<Guild> & { id: string; properties?: { name?: string; icon?: string | null } };
         const existing = this.guilds.find((x) => x.id === raw.id);
         const g = {
           ...existing,
           ...raw,
-          name: raw.name ?? existing?.name ?? 'Без названия',
-          icon: raw.icon ?? existing?.icon ?? null,
+          name: raw.name ?? raw.properties?.name ?? existing?.name ?? 'Без названия',
+          icon: raw.icon ?? raw.properties?.icon ?? existing?.icon ?? null,
         } as Guild;
         // Замена НА МЕСТЕ (а не в конец): порядок рейла задаётся guild_folders
         // из READY — перенос гильдии в хвост ломал бы сортировку на каждом
@@ -1476,17 +1504,41 @@ export class AppStore {
     }
   }
 
+  /** Нормализация merged-пресенса: записи приходят как {user_id, status}
+   *  (дедупликация DEDUPE_USER_OBJECTS), а не со встроенным user.
+   *  Прямое pr.user.id вало TypeError на первом же друге и обрывало
+   *  boot-цепочку READY (v0.9.8). Имя/аватар добираем из usersById. */
+  private mergedPresence(pr: MergedPresence): Presence | null {
+    const uid = pr.user?.id ?? pr.user_id;
+    if (!uid) return null;
+    const known = this.usersById[uid];
+    return {
+      user: {
+        id: uid,
+        username: pr.user?.username ?? known?.username,
+        discriminator: pr.user?.discriminator ?? known?.discriminator,
+        global_name: pr.user?.global_name ?? known?.global_name ?? null,
+        avatar: pr.user?.avatar ?? known?.avatar ?? null,
+      },
+      status: pr.status ?? 'offline',
+      activities: pr.activities ?? [],
+    };
+  }
+
   /** merged-массивы из READY / READY_SUPPLEMENTAL: статусы друзей и
    *  участников по гильдиям + собственные карточки участников.
    *  merged_presences.guilds[i] и merged_members[i] параллельны guilds[i]. */
   private applyMerged(
     guilds: { id: string }[],
-    mergedPresences?: { friends?: Presence[]; guilds?: Presence[][] },
+    mergedPresences?: { friends?: MergedPresence[]; guilds?: MergedPresence[][] },
     mergedMembers?: Member[][],
   ) {
     if (mergedPresences?.friends?.length) {
       const map = { ...this.friendPresences };
-      for (const pr of mergedPresences.friends) map[pr.user.id] = pr;
+      for (const raw of mergedPresences.friends) {
+        const pr = this.mergedPresence(raw);
+        if (pr) map[pr.user.id] = pr;
+      }
       this.friendPresences = map;
     }
     if (mergedPresences?.guilds) {
@@ -1495,7 +1547,10 @@ export class AppStore {
         const list = mergedPresences.guilds[i];
         if (!gid || !list?.length) continue;
         const map = { ...(this.presencesByGuild[gid] ?? {}) };
-        for (const pr of list) map[pr.user.id] = pr;
+        for (const raw of list) {
+          const pr = this.mergedPresence(raw);
+          if (pr) map[pr.user.id] = pr;
+        }
         this.presencesByGuild[gid] = map;
       }
     }

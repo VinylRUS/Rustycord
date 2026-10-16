@@ -410,7 +410,7 @@ pub struct Activity {
 }
 
 /// Partial user embedded in PRESENCE_UPDATE.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PresenceUser {
     pub id: String,
     #[serde(default)]

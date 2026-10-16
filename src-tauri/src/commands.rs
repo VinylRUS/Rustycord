@@ -989,12 +989,21 @@ pub async fn subscribe_channel(
         if list.channel_id != cid {
             list.channel_id = cid.clone();
             // Выученный id списка канала (из прошлого SYNC) точнее
-            // overwrites. Серверный id списка ≠ id канала (обычные
-            // каналы — "everyone", приватные — вычисленный).
+            // overwrites; за ним — выученный id списка ГИЛЬДИИ (скрытые
+            // списки: один вычисленный id на все каналы, повторный SYNC
+            // не приедет — пара уже подписана). Серверный id списка ≠
+            // id канала (обычные каналы — "everyone", приватные —
+            // вычисленный).
             let known = list.channel_lists.get(&cid).cloned();
+            let guild_list = list.guild_list.clone();
             let privacy = channel_list_private(&state, &guild_id, &cid);
-            let target = crate::state::target_list_for_switch(known.as_deref(), privacy);
-            list.tracker = crate::state::tracker_for_switch(known.as_deref(), privacy);
+            let target = crate::state::target_list_for_switch(
+                known.as_deref(),
+                privacy,
+                guild_list.as_deref(),
+            );
+            list.tracker =
+                crate::state::tracker_for_switch(known.as_deref(), privacy, guild_list.as_deref());
             // УРОК v0.9.6: сервер шлёт SYNC только для НОВЫХ пар
             // (список, диапазон) — обычные каналы делят один 'everyone',
             // и при переключении новый SYNC НЕ приедет. Строки НЕ стираем:
@@ -1006,7 +1015,7 @@ pub async fn subscribe_channel(
             }
             tracing::info!(
                 "member-list: подписка {guild_id}/{cid}: known={known:?} \
-                 privacy={privacy:?} target={target:?}"
+                 guild={guild_list:?} privacy={privacy:?} target={target:?}"
             );
         }
         list.ranges = ranges.clone();
@@ -1019,6 +1028,20 @@ pub async fn subscribe_channel(
     .await
     .map_err(es)?;
     Ok(())
+}
+
+/// Запись из фронтенда в файловый лог (ошибки разбора dispatch'ей и
+/// прочее, что в webview видно только в devtools). Ошибка JS больше не
+/// может «молча» оборвать boot-цепочку — v0.9.7: падение applyMerged на
+/// merged_presences убивало REST-union имён/иконок, и половина рейла
+/// оставалась безымянными кружками без единой строчки в логе.
+#[tauri::command]
+pub fn frontend_log(level: String, message: String) {
+    match level.as_str() {
+        "error" => tracing::error!("[frontend] {message}"),
+        "warn" => tracing::warn!("[frontend] {message}"),
+        _ => tracing::info!("[frontend] {message}"),
+    }
 }
 
 /// Проверить обновление на GitHub Releases. Текущая версия — из пакета

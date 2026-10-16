@@ -188,19 +188,37 @@ impl ActiveListTracker {
     }
 }
 
-/// Целевой список для подписки канала: выученный id (из прошлого SYNC)
-/// точнее overwrites; иначе «everyone» для доказуемо обычного канала;
-/// None — id знает только сервер (приватный/неизвестный).
+/// Целевой список для подписки канала. Цепочка точности (каждое звено
+/// точнее следующего):
+/// 1. Выученный id канала (channel_lists из прошлого SYNC) — точный.
+/// 2. Выученный id списка ГИЛЬДИИ (guild_list из последнего принятого
+///    события) — серверы со скрытым списком участников вычисляют ОДИН
+///    id для всех каналов; без этого предсеяния смена канала = пустой
+///    сайдбар навсегда (пара уже подписана, SYNC повторно не приедет —
+///    регресс v0.9.7, лог 22:37:44).
+/// 3. «everyone» для доказуемо обычного канала (@everyone не запрещён
+///    VIEW_CHANNEL).
+/// 4. None — id знает только сервер (приватный/неизвестный канал):
+///    трекер примет первое событие.
 pub fn target_list_for_switch(
     known_list: Option<&str>,
     channel_private: Option<bool>,
+    guild_list: Option<&str>,
 ) -> Option<String> {
     match known_list {
         Some(t) => Some(t.to_string()),
-        // Обычный канал — список 'everyone' (предсеем: SYNC не обязан
-        // прийти повторно, если 'everyone'-диапазоны уже подписаны).
-        None if channel_private == Some(false) => Some("everyone".to_string()),
-        None => None,
+        None => match guild_list {
+            Some(g) => Some(g.to_string()),
+            None => {
+                // Обычный канал — список 'everyone' (предсеем: SYNC не обязан
+                // прийти повторно, если 'everyone'-диапазоны уже подписаны).
+                if channel_private == Some(false) {
+                    Some("everyone".to_string())
+                } else {
+                    None
+                }
+            }
+        },
     }
 }
 
@@ -208,8 +226,9 @@ pub fn target_list_for_switch(
 pub fn tracker_for_switch(
     known_list: Option<&str>,
     channel_private: Option<bool>,
+    guild_list: Option<&str>,
 ) -> ActiveListTracker {
-    match target_list_for_switch(known_list, channel_private) {
+    match target_list_for_switch(known_list, channel_private, guild_list) {
         Some(t) => ActiveListTracker {
             expect_private: t != "everyone",
             active: Some(t),
@@ -254,6 +273,13 @@ pub struct MemberListState {
     /// повторные визиты канала предсеиваются мгновенно, без ожидания SYNC.
     #[serde(skip)]
     pub channel_lists: HashMap<String, String>,
+    /// Выученный id списка ГИЛЬДИИ (последний принятый сервером
+    /// подтверждённый id): серверы со скрытым списком вычисляют один id
+    /// для всех каналов — предсеивание при смене канала, когда
+    /// channel_lists ещё пуст. Обновляется ТОЛЬКО серверными событиями
+    /// (не предсеяниями трекера — иначе гадание стало бы «фактом»).
+    #[serde(skip)]
+    pub guild_list: Option<String>,
     /// Мини-кэш строк по list id — как GuildMemberListStore официала:
     /// сервер шлёт SYNC только для НОВЫХ пар (список, диапазон), поэтому
     /// при переключении каналов строки прячу/восстанавливаю, а не качаю

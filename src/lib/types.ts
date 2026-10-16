@@ -44,6 +44,16 @@ export interface Presence {
   activities?: Activity[];
 }
 
+/** merged_presences из READY / READY_SUPPLEMENTAL: дедупликация
+ *  DEDUPE_USER_OBJECTS выносит юзера в отдельный справочник, поэтому
+ *  записи несут user_id (а не встроенный user, как обычные пресенсы). */
+export interface MergedPresence {
+  user_id?: string;
+  user?: Presence['user'];
+  status?: Presence['status'];
+  activities?: Activity[];
+}
+
 export interface Member {
   user?: User | null;
   nick: string | null;
