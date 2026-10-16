@@ -961,6 +961,22 @@ pub async fn check_update(app: tauri::AppHandle) -> Result<Value, String> {
     Ok(updater::to_value(&info))
 }
 
+/// Поддерживает ли текущая платформа установку «на месте»
+/// (tauri-plugin-updater): Windows (NSIS/MSI), macOS (.app.tar.gz) и
+/// Linux — только AppImage. deb/rpm-установки обновляются вручную —
+/// им остаётся баннер со ссылкой на релиз.
+#[tauri::command]
+pub fn can_auto_update() -> bool {
+    if cfg!(target_os = "windows") || cfg!(target_os = "macos") {
+        true
+    } else if cfg!(target_os = "linux") {
+        // AppImage экспортирует APPIMAGE (и APPDIR) в окружение процесса.
+        std::env::var("APPIMAGE").is_ok()
+    } else {
+        false
+    }
+}
+
 /// Загрузить файлы в канал: multipart POST /channels/{id}/messages.
 /// `paths` — абсолютные пути (их отдаёт файловый диалог Tauri).
 #[tauri::command]

@@ -132,9 +132,10 @@
 </script>
 
 {#if app.showQuickSwitcher}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="qs-backdrop" onclick={() => (app.showQuickSwitcher = false)}>
-    <div class="qs" role="dialog" aria-label="Быстрый переход" onclick={(e) => e.stopPropagation()}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div class="qs-backdrop" onmousedown={() => (app.showQuickSwitcher = false)}>
+    <div class="qs" role="dialog" aria-label="Быстрый переход" tabindex="-1" onmousedown={(e) => e.stopPropagation()}>
       <div class="qs-input-row">
         <span class="qs-hint">Куда бы вы хотели перейти?</span>
         <input

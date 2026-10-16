@@ -94,17 +94,17 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Подпись апдейтер-артефактов (minisign): createUpdaterArtifacts
+          # в tauri.conf.json генерирует .sig/.tar.gz-пары, этот ключ их
+          # подписывает, а includeUpdaterJson кладёт latest.json в релиз —
+          # его читает tauri-plugin-updater в приложении.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'RustyCord ${{ github.ref_name }}'
           releaseBody: 'Полный список изменений — в [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md). Ниже — готовые установщики для вашей платформы.'
           releaseDraft: true
           prerelease: false
+          includeUpdaterJson: true
           args: ${{ matrix.args }}
-
-      # Опционально: автообновления. Раскомментируйте, если настроите ключи
-      # (см. README, раздел «Автообновления») и включите createUpdaterArtifacts
-      # в src-tauri/tauri.conf.json.
-      # env:
-      #   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

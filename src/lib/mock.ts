@@ -733,6 +733,11 @@ export class MockBackend implements Backend {
     };
   }
 
+  async canAutoUpdate(): Promise<boolean> {
+    // Демо-режим в браузере — автоустановка недоступна.
+    return false;
+  }
+
   async uploadFiles(_channelId: string, _paths: string[], _content?: string): Promise<Message> {
     throw new Error('В демо-режиме загрузка файлов недоступна — запусти приложение');
   }

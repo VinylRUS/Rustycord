@@ -77,6 +77,8 @@ export interface Backend {
   subscribeChannel(guildId: string, channelId: string | null, ranges?: [number, number][]): Promise<void>;
   /** Проверка релизов на GitHub — null, если проверить не удалось. */
   checkUpdate(): Promise<UpdateInfo | null>;
+  /** Платформа поддерживает установку обновления «на месте». */
+  canAutoUpdate(): Promise<boolean>;
   /** Загрузка файлов в канал (multipart). paths — абсолютные пути из диалога. */
   uploadFiles(channelId: string, paths: string[], content?: string): Promise<Message>;
   /** Путь к файлу логов (для баг-репортов). */
@@ -270,6 +272,15 @@ class TauriBackend implements Backend {
       return await this.invoke<UpdateInfo>('check_update');
     } catch {
       return null; // без сети/на дев-сборке — молча
+    }
+  }
+
+  /** Платформа поддерживает установку обновления «на месте». */
+  async canAutoUpdate(): Promise<boolean> {
+    try {
+      return await this.invoke<boolean>('can_auto_update');
+    } catch {
+      return false;
     }
   }
 

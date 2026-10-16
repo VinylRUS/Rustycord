@@ -214,7 +214,7 @@ export interface UserProfile {
   user?: User;
 }
 
-/** Результат проверки обновлений (Rust check_update). */
+/** Результат проверки обновлений (Rust check_update / plugin-updater). */
 export interface UpdateInfo {
   current: string;
   latest: string;
@@ -223,6 +223,10 @@ export interface UpdateInfo {
   notes: string;
   published_at: string;
   no_releases: boolean;
+  /** Платформа умеет ставить обновление «на месте» (Windows/macOS/AppImage). */
+  can_auto?: boolean;
+  /** Откуда пришла информация: подписанный latest.json или GitHub API. */
+  source?: 'updater' | 'github';
 }
 
 /* ---------- Our own IPC payload types ---------- */

@@ -40,6 +40,10 @@ const SPEAKING_TTL = 2500;
 const RECENT_EMOJI_KEY = 'rustycord.recentEmoji';
 const RECENT_EMOJI_MAX = 24;
 
+/** Объект обновления из plugin-updater (держим для installUpdate;
+ *  сознательно вне $state — в рендере не участвует). */
+let pendingUpdate: import('@tauri-apps/plugin-updater').Update | null = null;
+
 /** Элемент рейла серверов: отдельная гильдия или папка (index в
  *  guildFolders — раскладка декодируется в Rust и приходит событием). */
 export type RailItem = RailOrderItem;
@@ -170,6 +174,12 @@ export class AppStore {
   profiles = $state<Record<string, UserProfile>>({});
   /** Проверка обновлений: не-null → есть свежий релиз на GitHub. */
   updateInfo = $state<UpdateInfo | null>(null);
+  /** Стадия автообновления (для карточки внизу справа). */
+  updatePhase = $state<'idle' | 'downloading' | 'ready' | 'error'>('idle');
+  /** Прогресс загрузки 0..1 (0 = неизвестно/крутится полоска). */
+  updateProgress = $state(0);
+  /** Текст ошибки автообновления (updatePhase === 'error'). */
+  updateError = $state('');
   /** Боковые панели чата: закреплённые / поиск. */
   showPins = $state(false);
   showSearch = $state(false);
@@ -379,21 +389,99 @@ export class AppStore {
     }
   }
 
-  /** Спросить Rust-слой про последний релиз; показать плашку, если новее. */
+  /** Проверить обновление: сначала подписанный latest.json (plugin-updater,
+   *  умеет ставить «на место»), при неудаче — GitHub API (баннер со ссылкой).
+   *  Не блокирует загрузку и молчит при проблемах сети. */
   async checkForUpdate() {
     if (!detectTauri()) return;
     const seenKey = 'rustycord.seenUpdate';
+    const backend = await createBackend('tauri');
+    const canAuto = await backend.canAutoUpdate();
+    let resolved = false;
+    // 1) Основной путь: tauri-plugin-updater (latest.json из релиза,
+    //    подпись проверяется против pubkey в tauri.conf.json).
     try {
-      const info = await (await createBackend('tauri')).checkUpdate();
+      const { check } = await import('@tauri-apps/plugin-updater');
+      const upd = await check();
+      if (upd?.available) {
+        resolved = true;
+        pendingUpdate = upd;
+        this.updateInfo = {
+          current: upd.currentVersion,
+          latest: upd.version,
+          is_newer: true,
+          url: 'https://github.com/VinylRUS/Rustycord/releases/latest',
+          notes: (upd.body ?? '').slice(0, 400),
+          published_at: upd.date ? new Date(upd.date).toISOString() : '',
+          no_releases: false,
+          can_auto: canAuto,
+          source: 'updater',
+        };
+        if (localStorage.getItem(seenKey) !== upd.version) {
+          this.toast(`Доступна версия ${upd.version} — карточка внизу справа`, 'info');
+        }
+      }
+    } catch {
+      /* манифеста нет (старые релизы / нет сети) — пробуем API ниже */
+    }
+    if (resolved) return;
+    // 2) Фолбэк: GitHub API. Баннер без авто-установки — так обновляются
+    //    deb/rpm-сборки и клиенты на релизах без latest.json.
+    try {
+      const info = await backend.checkUpdate();
       if (!info || !info.is_newer) return;
-      this.updateInfo = info;
-      // Показываем плашку один раз на версию — иначе при каждом старте надоедает.
+      this.updateInfo = { ...info, can_auto: false, source: 'github' };
       if (localStorage.getItem(seenKey) !== info.latest) {
-        this.toast(`Доступна версия ${info.latest} — плашка внизу справа`, 'info');
+        this.toast(`Доступна версия ${info.latest} — карточка внизу справа`, 'info');
       }
     } catch {
       /* тихо — проверка обновлений не критична */
     }
+  }
+
+  /** Скачать и установить обновление «на место» (plugin-updater). */
+  async installUpdate() {
+    if (!pendingUpdate) return;
+    this.updatePhase = 'downloading';
+    this.updateProgress = 0;
+    this.updateError = '';
+    try {
+      let total = 0;
+      let downloaded = 0;
+      await pendingUpdate.downloadAndInstall((ev) => {
+        switch (ev.event) {
+          case 'Started':
+            total = ev.data.contentLength ?? 0;
+            break;
+          case 'Progress':
+            downloaded += ev.data.chunkLength;
+            if (total > 0) this.updateProgress = Math.min(1, downloaded / total);
+            break;
+          case 'Finished':
+            this.updateProgress = 1;
+            break;
+        }
+      });
+      // На Windows NSIS-установщик может перезапустить приложение сам —
+      // если процесс пережил установку, предлагаем кнопку «Перезапустить».
+      this.updatePhase = 'ready';
+    } catch (e) {
+      this.updatePhase = 'error';
+      this.updateError = String(e);
+    }
+  }
+
+  /** Перезапустить приложение после установки обновления. */
+  async relaunchApp() {
+    const { relaunch } = await import('@tauri-apps/plugin-process');
+    await relaunch();
+  }
+
+  /** Скрыть карточку обновления (тост для этой версии больше не покажем). */
+  dismissUpdate() {
+    this.markUpdateSeen();
+    this.updateInfo = null;
+    this.updatePhase = 'idle';
   }
 
   async login(token: string, silent = false) {

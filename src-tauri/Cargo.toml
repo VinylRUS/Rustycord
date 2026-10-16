@@ -1,6 +1,6 @@
 [package]
 name = "rustycord"
-version = "0.9.4"
+version = "0.9.5"
 description = "RustyCord — an unofficial Discord client built with Tauri, reverse-engineered architecture, native performance"
 authors = ["RustyCord contributors"]
 edition = "2021"
@@ -39,6 +39,10 @@ tauri = { version = "2", features = [] }
 # (страница релиза при проверке обновлений).
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+# Автообновления: подписанный манифест latest.json (updater) и перезапуск
+# приложения после установки (process::restart).
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }

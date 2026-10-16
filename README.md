@@ -443,15 +443,29 @@ flowchart LR
 - **windows-latest** — NSIS `-setup.exe` + `.msi` (WebView2 подхватывается автоматически)
 
 <details>
-<summary><b>Хочу автообновления приложения</b></summary>
+<summary><b>Автообновления приложения (настроено с v0.9.5)</b></summary>
 
-Tauri 2 умеет подписанные дельта-обновления, но для них нужны ключи. Включается тремя шагами:
+Начиная с v0.9.5 приложение обновляется само: при старте клиент читает
+подписанный `latest.json` из последнего релиза (`tauri-plugin-updater`),
+проверяет minisign-подпись против pubkey в `tauri.conf.json` и предлагает
+«Обновить автоматически» — скачивает, ставит и перезапускается.
 
-1. Сгенерируй пару ключей: `npx @tauri-apps/cli signer generate -w ~/.tauri/rustycord.key`
-2. Добавь секреты репозитория `TAURI_SIGNING_PRIVATE_KEY` и `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
-3. В `src-tauri/tauri.conf.json` включи `"bundle": { "createUpdaterArtifacts": true }` и раскомментируй блок `env` в `release.yml`
+Что где лежит:
 
-Без этого приложение просто «тупое» — обновляться будет через скачивание нового установщика со страницы Releases, как у большинства десктоп-приложений.
+1. **Публичный ключ** уже вшит в `src-tauri/tauri.conf.json`
+   (`plugins.updater.pubkey`) — им клиент проверяет подпись `latest.json`.
+2. **Приватный ключ** — секрет репозитория `TAURI_SIGNING_PRIVATE_KEY`
+   (сгенерирован командой `npx tauri signer generate -w rustycord-updater.key`,
+   без пароля). `release.yml` подписывает им апдейтер-артефакты
+   (`.tar.gz` + `.sig`) и через `includeUpdaterJson: true` прикладывает
+   `latest.json` к релизу.
+3. **Платформы**: Windows (NSIS/MSI), macOS (universal) и Linux
+   (только AppImage) обновляются на месте; `deb`/`rpm` — баннер со
+   ссылкой на релиз (пакетный менеджер так не умеет).
+
+Потеря приватного ключа = обновления перестанут проходить проверку
+подписи — придётся выпускать версию с новым pubkey и раздавать её
+вручную. Храни ключ бережно.
 </details>
 
 ---
