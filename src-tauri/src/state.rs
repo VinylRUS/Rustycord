@@ -151,22 +151,13 @@ pub enum MemberListRow {
 ///   (какой именно id — знает только сервер).
 /// * `active = None, !expect_private` — канал неизвестен кэшу: принимаем
 ///   первый пришедший SYNC любого id (самокорректируется).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct ActiveListTracker {
     /// Серверный id активного списка (None — ждём первый SYNC).
     pub active: Option<String>,
     /// Подписанный канал приватный (@everyone deny VIEW_CHANNEL) — его
     /// список не `everyone`.
     pub expect_private: bool,
-}
-
-impl Default for ActiveListTracker {
-    fn default() -> Self {
-        Self {
-            active: None,
-            expect_private: false,
-        }
-    }
 }
 
 impl ActiveListTracker {

@@ -915,10 +915,7 @@ fn channel_list_private(state: &Arc<AppState>, guild_id: &str, channel_id: &str)
             .iter()
             // @everyone: id перезаписи == id гильдии.
             .any(|o| {
-                o.id == guild_id
-                    && o.deny
-                        .parse::<u64>()
-                        .map_or(false, |d| d & VIEW_CHANNEL != 0)
+                o.id == guild_id && o.deny.parse::<u64>().is_ok_and(|d| d & VIEW_CHANNEL != 0)
             }),
     )
 }
