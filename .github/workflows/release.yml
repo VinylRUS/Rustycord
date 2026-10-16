@@ -88,6 +88,24 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # Режим подписи апдейтер-артефактов: если секрет
+      # TAURI_SIGNING_PRIVATE_KEY ещё не добавлен, собираем БЕЗ них
+      # (оверрайд createUpdaterArtifacts=false) — релиз не падает, просто
+      # latest.json не появится. Добавь секрет — и все следующие релизы
+      # будут подписанными (клиенты v0.9.5+ обновляются сами).
+      - name: Updater signing mode
+        id: updsign
+        env:
+          HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_SIGNING_KEY" = "true" ]; then
+            echo 'extra_args=' >> "$GITHUB_OUTPUT"
+            echo 'mode=signed (latest.json будет приложен)' >> "$GITHUB_OUTPUT"
+          else
+            echo 'extra_args=--config {"bundle":{"createUpdaterArtifacts":false}}' >> "$GITHUB_OUTPUT"
+            echo 'mode=unsigned — добавь секрет TAURI_SIGNING_PRIVATE_KEY' >> "$GITHUB_OUTPUT"
+          fi
+
       # tauri-action: соберёт бандлы, создаст draft-релиз и приложит все файлы.
       # Раздел CHANGELOG.md с версией попадёт в тело релиза (см. шаг ниже).
       - name: Build and upload to GitHub Release
@@ -107,4 +125,4 @@ jobs:
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} ${{ steps.updsign.outputs.extra_args }}
