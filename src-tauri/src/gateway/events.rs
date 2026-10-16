@@ -349,8 +349,9 @@ pub async fn handle_dispatch(
                     cache.guilds.insert(g.id.clone(), gs);
                 }
                 tracing::info!(
-                    "gateway: GUILD_CREATE «{}» ({} каналов)",
+                    "gateway: GUILD_CREATE «{}» {} ({} каналов)",
                     name,
+                    g.id,
                     g.channels.as_ref().map(Vec::len).unwrap_or(0)
                 );
                 // op 14-подписка на список участников — ТОЛЬКО по запросу
@@ -448,6 +449,13 @@ pub async fn handle_dispatch(
                     .unwrap_or("0")
                     .to_string();
                 let member_count = d.get("member_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                // SYNC-op в событии — авторитетный снимок сервера (для
+                // escape-hatch трекера: ошибочное предсеяние 'everyone' у
+                // роль-deny каналов самолечится перелокизацией).
+                let has_sync = d.get("ops").and_then(|v| v.as_array()).is_some_and(|ops| {
+                    ops.iter()
+                        .any(|op| op.get("op").and_then(|x| x.as_str()) == Some("SYNC"))
+                });
 
                 // {group:{id,count}} | {member:{…}} → строка снапшота.
                 let parse_item = |item: &Value| -> Option<MemberListRow> {
@@ -573,12 +581,30 @@ pub async fn handle_dispatch(
                     // УРОК v0.9.5: серверный id списка (d.id) — НЕ id канала.
                     // Обычные каналы (без @everyone-deny VIEW_CHANNEL) делят
                     // общий список "everyone", приватные получают вычисленный
-                    // id. Раньше сравнивали с channel_id напрямую → is_current
-                    // всегда false → сайдбар участников вечно пуст (кроме себя).
-                    // Теперь трекер (предсеянный в subscribe_channel по
-                    // overwrites) матчит события и глушит хвосты старых
-                    // подписок (сервер держит до 5 каналов на гильдию).
-                    is_current = list.tracker.accept(&list_id);
+                    // id. Трекер (предсеянный в subscribe_channel по overwrites
+                    // или выученной карте канал→список) матчит события и глушит
+                    // хвосты старых подписок (сервер держит до 5 каналов).
+                    is_current = list.tracker.accept(&list_id, has_sync);
+                    if is_current {
+                        // Выучить id списка канала: повторные визиты — без
+                        // ожидания SYNC (карта переживает переключения).
+                        if !list.channel_id.is_empty() {
+                            list.channel_lists
+                                .insert(list.channel_id.clone(), list_id.clone());
+                        }
+                        // Строки чужого списка (переключение канала) —
+                        // спрятать/восстановить из мини-кэша per-list.
+                        if list.rows_list.as_deref() != Some(list_id.as_str()) {
+                            let prev = list.rows_list.clone();
+                            list.switch_to_list(Some(list_id.as_str()));
+                            if prev.is_some() {
+                                tracing::info!(
+                                    "member-list: {guild_id} сменили список \
+                                     {prev:?} → {list_id} (SYNC={has_sync})"
+                                );
+                            }
+                        }
+                    }
                     if is_current {
                         if list.member_count != member_count {
                             list.member_count = member_count;

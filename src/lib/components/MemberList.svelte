@@ -14,10 +14,11 @@
   type LazyMember = Extract<MemberListRowData, { kind: 'member' }>;
 
   const lazy = $derived(app.memberLists[guildId]);
-  /** Снапшот соответствует текущему каналу → рендерим его, иначе фолбэк. */
-  const lazyActive = $derived(
-    !!lazy && lazy.rows.length > 0 && lazy.channel_id === (app.activeChannelId ?? '0'),
-  );
+  /** Строки в стейте Rust уже гарантированно принадлежат текущей
+   *  подписке (трекер + мини-кэш per-list в state.rs): достаточно
+   *  непустого снапшота. Старая проверка channel_id ломалась о
+   *  серверный id списка ('everyone' ≠ id канала). */
+  const lazyActive = $derived(!!lazy && lazy.rows.length > 0);
 
   function groupTitle(id: string): string {
     if (id === 'online') return 'В СЕТИ';

@@ -268,6 +268,7 @@ pub async fn api_request(
         format!("/{path}")
     };
     let method = method.to_uppercase();
+    let started = std::time::Instant::now();
     let result: Result<Value, _> = match method.as_str() {
         "GET" => rest.get_json::<Value>(&path).await,
         "POST" => {
@@ -285,6 +286,16 @@ pub async fn api_request(
         "DELETE" => rest.delete::<Value>(&path).await,
         other => return Err(format!("Неизвестный метод: {other}")),
     };
+    // Диагностика в файловый лог: каждый REST-вызов фронтенда (в т.ч.
+    // union /users/@me/guilds) — по нему видно, дошли ли имена/иконки
+    // серверов и что ответили на ошибки.
+    match &result {
+        Ok(_) => tracing::info!("REST {method} {path} ok ({:?})", started.elapsed()),
+        Err(e) => tracing::warn!(
+            "REST {method} {path} → ошибка ({:?}): {e}",
+            started.elapsed()
+        ),
+    }
     result.map_err(|e| humanize_api_error(&e.to_string()))
 }
 
@@ -880,8 +891,24 @@ pub async fn subscribe_guild(
     {
         let mut subs = state.subscribed_guilds.lock().unwrap();
         if subs.contains(&guild_id) {
-            // Гильдия уже подписана (bulk после READY или прошлый клик).
-            return Ok(());
+            // Уже подписаны — но если каналов в кэше так и нет, GUILD_CREATE
+            // потерялся (буря событий при старте/реконнект), а дедуп
+            // блокировал бы повтор навсегда. Переподписываем (самолечение):
+            // сервер относится к повторной подписке идемпотентно.
+            let has_channels = state
+                .cache
+                .read()
+                .ok()
+                .and_then(|c| c.guilds.get(&guild_id).map(|g| !g.channels.is_empty()))
+                .unwrap_or(false);
+            if has_channels {
+                return Ok(());
+            }
+            subs.remove(&guild_id);
+            tracing::warn!(
+                "subscribe_guild: {guild_id} помечена подписанной, но каналов \
+                 в кэше нет — переподписка (GUILD_CREATE потерян?)"
+            );
         }
         subs.insert(guild_id.clone());
     }
@@ -952,24 +979,35 @@ pub async fn subscribe_channel(
         .ok_or("Gateway не подключён")?;
     let ranges = ranges.unwrap_or_else(|| vec![(0, 99)]);
     // Атомарно фиксируем целевое состояние подписки: канал + диапазоны.
-    // Сменился канал — обнуляем старый снимок (придёт новый SYNC);
-    // channel_id ставим СРАЗУ: пока SYNC нового канала едет, события
-    // старого (сервер держит его подписку до LRU-вытеснения) обязаны
-    // игнорироваться снапшотом, иначе список мерцает между каналами.
+    // Сменился канал — channel_id ставим СРАЗУ: пока события нового
+    // канала едут, хвосты старого (сервер держит его подписку до
+    // LRU-вытеснения) обязаны игнорироваться, иначе список мерцает.
     {
         let mut lists = state.member_lists.lock().unwrap();
         let list = lists.entry(guild_id.clone()).or_default();
         let cid = channel_id.clone().unwrap_or_else(|| "0".to_string());
         if list.channel_id != cid {
             list.channel_id = cid.clone();
-            list.rows.clear();
-            list.member_count = 0;
-            list.online_count = 0;
-            // Серверный id списка ≠ id канала (обычные каналы — "everyone",
-            // приватные — вычисленный). Трекер решает, чьи события наши.
-            list.tracker = crate::state::ActiveListTracker::for_channel(channel_list_private(
-                &state, &guild_id, &cid,
-            ));
+            // Выученный id списка канала (из прошлого SYNC) точнее
+            // overwrites. Серверный id списка ≠ id канала (обычные
+            // каналы — "everyone", приватные — вычисленный).
+            let known = list.channel_lists.get(&cid).cloned();
+            let privacy = channel_list_private(&state, &guild_id, &cid);
+            let target = crate::state::target_list_for_switch(known.as_deref(), privacy);
+            list.tracker = crate::state::tracker_for_switch(known.as_deref(), privacy);
+            // УРОК v0.9.6: сервер шлёт SYNC только для НОВЫХ пар
+            // (список, диапазон) — обычные каналы делят один 'everyone',
+            // и при переключении новый SYNC НЕ приедет. Строки НЕ стираем:
+            // тот же список — остаются (мгновенный сайдбар), другой —
+            // stash/restore из мини-кэша; неизвестный — SYNC/первое
+            // событие разберётся (escape-hatch в accept).
+            if let Some(t) = &target {
+                list.switch_to_list(Some(t.as_str()));
+            }
+            tracing::info!(
+                "member-list: подписка {guild_id}/{cid}: known={known:?} \
+                 privacy={privacy:?} target={target:?}"
+            );
         }
         list.ranges = ranges.clone();
     }

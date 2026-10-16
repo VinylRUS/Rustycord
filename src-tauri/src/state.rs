@@ -144,13 +144,16 @@ pub enum MemberListRow {
 /// список от хвостов прошлых подписок.
 ///
 /// Семантика состояний:
-/// * `active = Some("everyone")` — канал обычный: принимаем только
-///   `everyone`-события, вычисленные id (хвост приватного канала) — мимо.
-/// * `active = None, expect_private` — канал приватный: `everyone`-хвост
-///   отбрасываем, первый не-`everyone` SYNC фиксируется как активный
-///   (какой именно id — знает только сервер).
+/// * `active = Some(id)` — список известен (предсеян или выучен из SYNC):
+///   события чужих id — хвосты, мимо. Исключение — SYNC с чужим id
+///   (escape-hatch): серверный снимок авторитетнее нашего предсеяния,
+///   перелокируемся (роль-deny каналы выглядят «обычными», а список у
+///   них вычисленный — ошибка предсеяния обязана самолечиться, иначе
+///   сайдбар пуст навсегда).
+/// * `active = None, expect_private` — канал приватный (@everyone-deny):
+///   ждём только SYNC (id знает только сервер), хвосты — мимо.
 /// * `active = None, !expect_private` — канал неизвестен кэшу: принимаем
-///   первый пришедший SYNC любого id (самокорректируется).
+///   первое пришедшее событие любого id (самокорректируется).
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct ActiveListTracker {
     /// Серверный id активного списка (None — ждём первый SYNC).
@@ -161,39 +164,70 @@ pub struct ActiveListTracker {
 }
 
 impl ActiveListTracker {
-    /// Трекер для свежей подписки канала. `channel_private`: Some(true/false)
-    /// — приватность канала известна по overwrites; None — канала нет в кэше.
-    pub fn for_channel(channel_private: Option<bool>) -> Self {
-        match channel_private {
-            // Обычный канал — список 'everyone' (предсеем: SYNC не обязан
-            // прийти повторно, если 'everyone'-диапазоны уже подписаны).
-            Some(false) => Self {
-                active: Some("everyone".to_string()),
-                expect_private: false,
-            },
-            // Приватный — id вычислит сервер, ждём первый SYNC.
-            Some(true) => Self {
-                active: None,
-                expect_private: true,
-            },
-            // Неизвестный канал — не предсеиваем ничего.
-            None => Self::default(),
-        }
-    }
-
     /// Принять событие с серверным id `list_id` как текущий список?
-    /// При `active = None` первый подходящий SYNC фиксируется.
-    pub fn accept(&mut self, list_id: &str) -> bool {
+    /// `has_sync` — есть ли в событии SYNC-op (авторитетный снимок).
+    pub fn accept(&mut self, list_id: &str, has_sync: bool) -> bool {
         if let Some(active) = &self.active {
-            return active == list_id;
+            if active == list_id {
+                return true;
+            }
+            // SYNC с чужим id: предсеяние было ошибочным (роль-deny) или
+            // список сменился — сервер знает лучше. Перелокируемся.
+            if has_sync {
+                self.active = Some(list_id.to_string());
+                self.expect_private = false;
+                return true;
+            }
+            return false; // хвост прежней подписки (LRU-5)
         }
-        if self.expect_private && list_id == "everyone" {
-            // Хвост подписки прежнего обычного канала (LRU-5) — не наш.
-            return false;
+        if self.expect_private && !has_sync {
+            return false; // приватный список: ждём его SYNC, хвосты — мимо
         }
         self.active = Some(list_id.to_string());
         true
     }
+}
+
+/// Целевой список для подписки канала: выученный id (из прошлого SYNC)
+/// точнее overwrites; иначе «everyone» для доказуемо обычного канала;
+/// None — id знает только сервер (приватный/неизвестный).
+pub fn target_list_for_switch(
+    known_list: Option<&str>,
+    channel_private: Option<bool>,
+) -> Option<String> {
+    match known_list {
+        Some(t) => Some(t.to_string()),
+        // Обычный канал — список 'everyone' (предсеем: SYNC не обязан
+        // прийти повторно, если 'everyone'-диапазоны уже подписаны).
+        None if channel_private == Some(false) => Some("everyone".to_string()),
+        None => None,
+    }
+}
+
+/// Политика трекера для подписки канала (см. target_list_for_switch).
+pub fn tracker_for_switch(
+    known_list: Option<&str>,
+    channel_private: Option<bool>,
+) -> ActiveListTracker {
+    match target_list_for_switch(known_list, channel_private) {
+        Some(t) => ActiveListTracker {
+            expect_private: t != "everyone",
+            active: Some(t),
+        },
+        None if channel_private == Some(true) => ActiveListTracker {
+            active: None,
+            expect_private: true,
+        },
+        None => ActiveListTracker::default(),
+    }
+}
+
+/// Снимок строк одного списка (для мини-кэша per-list).
+#[derive(Debug, Clone, Default)]
+pub struct ListSnapshot {
+    pub rows: Vec<MemberListRow>,
+    pub member_count: u64,
+    pub online_count: u64,
 }
 
 /// Снимок ленивого списка участников гильдии (по текущему каналу).
@@ -212,6 +246,62 @@ pub struct MemberListState {
     /// GUILD_MEMBER_LIST_UPDATE.d.id (см. ActiveListTracker).
     #[serde(skip)]
     pub tracker: ActiveListTracker,
+    /// Какому списку принадлежат текущие rows (provenance): protects от
+    /// чужих строк и управляет stash/restore.
+    #[serde(skip)]
+    pub rows_list: Option<String>,
+    /// Выученные id списков по каналам (канал → list id первого SYNC):
+    /// повторные визиты канала предсеиваются мгновенно, без ожидания SYNC.
+    #[serde(skip)]
+    pub channel_lists: HashMap<String, String>,
+    /// Мини-кэш строк по list id — как GuildMemberListStore официала:
+    /// сервер шлёт SYNC только для НОВЫХ пар (список, диапазон), поэтому
+    /// при переключении каналов строки прячу/восстанавливаю, а не качаю
+    /// заново (стирание = пустой сайдбар — регресс v0.9.6).
+    #[serde(skip)]
+    pub list_cache: HashMap<String, ListSnapshot>,
+}
+
+impl MemberListState {
+    /// Переключить данные на список `target` (None — неизвестен: обнулить).
+    /// Текущие строки прячутся в кэш (для возврата), целевые — из кэша.
+    pub fn switch_to_list(&mut self, target: Option<&str>) {
+        // Тот же список — ничего не делаем (главный случай: обычные
+        // каналы сервера делят один 'everyone', SYNC повторно не приедет).
+        if self.rows_list.as_deref() == target && target.is_some() {
+            return;
+        }
+        // Спрятать текущие строки под их списком.
+        if let Some(cur) = self.rows_list.clone() {
+            if !self.rows.is_empty() {
+                self.list_cache.insert(
+                    cur,
+                    ListSnapshot {
+                        rows: std::mem::take(&mut self.rows),
+                        member_count: self.member_count,
+                        online_count: self.online_count,
+                    },
+                );
+                // Сервер держит ≤5 списков на гильдию — кэшу хватит 6.
+                while self.list_cache.len() > 6 {
+                    if let Some(oldest) = self.list_cache.keys().next().cloned() {
+                        self.list_cache.remove(&oldest);
+                    }
+                }
+            }
+        }
+        self.member_count = 0;
+        self.online_count = 0;
+        // Восстановить целевые (если кэшированы).
+        if let Some(snap) = target.and_then(|t| self.list_cache.get(t).cloned()) {
+            self.rows = snap.rows;
+            self.member_count = snap.member_count;
+            self.online_count = snap.online_count;
+        } else {
+            self.rows.clear();
+        }
+        self.rows_list = target.map(String::from);
+    }
 }
 
 /// Per-guild cached state, kept fresh from gateway dispatches.
