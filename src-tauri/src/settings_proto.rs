@@ -167,7 +167,20 @@ fn parse_guild_folder(buf: &[u8]) -> Option<GuildFolderInfo> {
             _ => r.skip(wire)?,
         }
     }
+    // Реальные блобы настроек содержат дубликаты (прото допускает mixed
+    // packed/unpacked, плюс мусор от многолетних инкрементальных записей).
+    // Дубликат в keyed-each Svelte роняет весь рендер рейла — режем здесь.
+    info.guild_ids = dedup_keep_order(info.guild_ids);
     Some(info)
+}
+
+/// Дедупликация с сохранением порядка первого вхождения.
+fn dedup_keep_order(items: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .into_iter()
+        .filter(|x| seen.insert(x.clone()))
+        .collect()
 }
 
 fn parse_guild_folders(buf: &[u8]) -> Option<GuildLayout> {
@@ -192,6 +205,7 @@ fn parse_guild_folders(buf: &[u8]) -> Option<GuildLayout> {
             _ => r.skip(wire)?,
         }
     }
+    layout.guild_positions = dedup_keep_order(layout.guild_positions);
     Some(layout)
 }
 
@@ -299,6 +313,31 @@ mod tests {
         assert_eq!(layout.folders[0].color, Some(5_786_610));
         assert_eq!(layout.folders[0].id, Some(7));
         assert_eq!(layout.guild_positions, vec!["333", "444"]);
+    }
+
+    #[test]
+    fn mixed_duplicates_are_deduped() {
+        // Реальный кейс с живого аккаунта: guild_ids и packed-чанком, и
+        // поштучно, с повторами; guild_positions тоже задублированы.
+        // Дубликат в keyed-each Svelte замораживает весь рейл — декодер
+        // обязан отдавать уникальные id.
+        let mut folder = W::new();
+        let mut packed = W::new();
+        packed.varint(111);
+        packed.varint(222);
+        folder.ld(1, &packed.0); // packed [111, 222]
+        folder.vint(1, 222); // поштучный дубль
+        folder.vint(1, 333); // поштучный новый
+        let mut folders = W::new();
+        folders.ld(1, &folder.0);
+        folders.vint(2, 555);
+        folders.vint(2, 555); // дубль позиции
+        let mut settings = W::new();
+        settings.ld(14, &folders.0);
+
+        let layout = decode_layout(&b64(&settings.0)).expect("layout");
+        assert_eq!(layout.folders[0].guild_ids, vec!["111", "222", "333"]);
+        assert_eq!(layout.guild_positions, vec!["555"]);
     }
 
     #[test]

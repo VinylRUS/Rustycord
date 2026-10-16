@@ -5,6 +5,7 @@
 //! op 6 RESUME · op 7 RECONNECT · op 8 REQUEST_GUILD_MEMBERS
 //! op 9 INVALID_SESSION · op 10 HELLO · op 11 HEARTBEAT_ACK
 
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -25,6 +26,135 @@ use crate::wsutil;
 /// которую шлёт официальный веб-клиент (без интентов). Значение из
 /// discord-client-rs: «лучшее, если нужны все события».
 const USER_CAPABILITIES: u32 = 53_607_934;
+
+/// Сколько последних исходящих кадров держим для дампа при close 4002.
+const FRAME_LOG_CAP: usize = 10;
+/// Лимит команд шлюза: 120 за скользящие 60 секунд (close 4008 сверх него).
+const CMD_LIMIT: usize = 120;
+const CMD_WINDOW: Duration = Duration::from_secs(60);
+
+/* ---------- диагностика исходящих кадров (кольцевой буфер) ---------- */
+
+/// Кольцевой буфер последних исходящих кадров (секреты скрыты). На close
+/// 4002/4005 вываливается в лог одним блоком — «какой кадр сломал
+/// декодирование» становится восстановимым и без verbose-логов. Пульсы
+/// op 1 не пишутся (шум): они не бывают причиной 4002.
+struct FrameLog {
+    entries: VecDeque<String>,
+    next_no: u64,
+    started: std::time::Instant,
+}
+
+impl FrameLog {
+    fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            next_no: 0,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    /// Записать кадр: номер, возраст сессии, метка, размер, JSON без секретов.
+    fn record(&mut self, label: &str, payload: &Value) {
+        self.next_no = self.next_no.wrapping_add(1);
+        let size = serde_json::to_vec(payload).map(|v| v.len()).unwrap_or(0);
+        let mut body = redact(payload);
+        if body.len() > 400 {
+            body.truncate(400);
+            body.push('…');
+        }
+        let age_ms = self.started.elapsed().as_millis();
+        self.entries.push_back(format!(
+            "  #{:<4} {:>7} мс  {:<26} {:>6} B  {}",
+            self.next_no, age_ms, label, size, body
+        ));
+        while self.entries.len() > FRAME_LOG_CAP {
+            self.entries.pop_front();
+        }
+    }
+
+    /// Дамп буфера для лога/ошибки.
+    fn dump(&self) -> String {
+        let mut s =
+            String::from("последние исходящие кадры (секреты скрыты; пульсы op 1 не пишутся):");
+        for e in &self.entries {
+            s.push('\n');
+            s.push_str(e);
+        }
+        s
+    }
+}
+
+/// Копия payload, в которой значения ключей `token`/`session_id` заменены
+/// на `<redacted>` на любой глубине. Остальные кадры секретов не несут
+/// (guild/channel id — не секрет в контексте локального лога).
+fn redact(v: &Value) -> String {
+    fn walk(v: &Value) -> Value {
+        match v {
+            Value::Object(map) => {
+                let mut out = serde_json::Map::new();
+                for (k, val) in map {
+                    if k == "token" || k == "session_id" {
+                        out.insert(k.clone(), Value::String("<redacted>".into()));
+                    } else {
+                        out.insert(k.clone(), walk(val));
+                    }
+                }
+                Value::Object(out)
+            }
+            Value::Array(a) => Value::Array(a.iter().map(walk).collect()),
+            other => other.clone(),
+        }
+    }
+    walk(v).to_string()
+}
+
+/* ---------- лимит команд шлюза 120/60с ---------- */
+
+/// Скользящее окно отправок: шлюз закрывает соединение (4008) сверх 120
+/// команд за 60 секунд. Реальный трафик клиента далёк от лимита (десятки
+/// в минуту при активном скролле) — бакет нужен как страховка от шторма
+/// подписок, а не как ретрай-механика.
+struct CmdBucket {
+    window: VecDeque<std::time::Instant>,
+}
+
+impl CmdBucket {
+    fn new() -> Self {
+        Self {
+            window: VecDeque::new(),
+        }
+    }
+
+    /// Выкинуть протухшие слоты, вернуть число свободных (синхронная часть
+    /// — тестируется без рантайма).
+    fn prune(&mut self, now: std::time::Instant) -> usize {
+        while let Some(&t) = self.window.front() {
+            if now.duration_since(t) >= CMD_WINDOW {
+                self.window.pop_front();
+            } else {
+                break;
+            }
+        }
+        CMD_LIMIT.saturating_sub(self.window.len())
+    }
+
+    /// Занять слот; при переполнении — пауза до самого старого слота
+    /// (соединение сами не рвём: пауза безопаснее реконнекта).
+    async fn acquire(&mut self) {
+        loop {
+            let now = std::time::Instant::now();
+            if self.prune(now) > 0 {
+                self.window.push_back(now);
+                return;
+            }
+            let oldest = self.window.front().copied().unwrap_or(now);
+            let wait = CMD_WINDOW.saturating_sub(now.duration_since(oldest));
+            tracing::warn!("gateway: лимит команд {CMD_LIMIT}/60с — пауза {wait:?}");
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
 
 /// Properties-набор как у браузерного клиента discord.com/app — совпадает
 /// с нашим X-Super-Properties, чтобы сессия выглядела консистентно.
@@ -54,6 +184,9 @@ enum End {
     Shutdown,
     /// Connection dropped / server asked to reconnect — try to RESUME.
     Reconnect,
+    /// Сессию убил close 4002/4005 — сервер не смог декодировать наш кадр.
+    /// Несёт дамп последних кадров; вызывающий считает подряд идущие.
+    ProtocolError(String),
     /// Unrecoverable error (bad token, etc.) — stop the loop.
     Fatal(String),
 }
@@ -68,6 +201,10 @@ pub async fn run_gateway(
 ) {
     let mut session = SessionData::default();
     let mut backoff = 1u64;
+    // Подряд идущие 4002/4005: детерминированно плохой кадр будет валить
+    // каждую новую сессию — после трёх останавливаемся (серия частых
+    // IDENTIFY на юзер-токене ещё и антифрод-риск), не молотя вечно.
+    let mut protocol_errors = 0u32;
     loop {
         if shutdown.is_cancelled() {
             break;
@@ -77,13 +214,45 @@ pub async fn run_gateway(
         } else {
             state.emit_status("connecting", None);
         }
-        match run_session(&app, &state, &mut rx, &mut session, &shutdown).await {
+        let mut ready_seen = false;
+        let end = run_session(
+            &app,
+            &state,
+            &mut rx,
+            &mut session,
+            &shutdown,
+            &mut ready_seen,
+        )
+        .await;
+        if ready_seen {
+            // Сессия дошла до READY и работала — обрыв не «серия»: и backoff,
+            // и счётчик протокольных ошибок начинаем заново.
+            backoff = 1;
+            protocol_errors = 0;
+        }
+        match end {
             Ok(End::Shutdown) => break,
             Ok(End::Reconnect) => {
                 tracing::info!(
                     "gateway: сессия прервана, возобновляем (resume={})",
                     session.id.is_some()
                 );
+            }
+            Ok(End::ProtocolError(dump)) => {
+                protocol_errors += 1;
+                tracing::error!("gateway: close 4002/4005 (подряд: {protocol_errors})\n{dump}");
+                if protocol_errors >= 3 {
+                    let msg = "Шлюз трижды подряд отклонил наш кадр (close 4002). \
+                               Сессия остановлена, чтобы не спамить IDENTIFY — \
+                               детали последних кадров в лог-файле.";
+                    tracing::error!("gateway: {msg}\n{dump}");
+                    let _ = app.emit(
+                        "discord://warning",
+                        json!({ "message": format!("{msg} Путь к логу: Настройки → Логи.") }),
+                    );
+                    state.emit_status("disconnected", Some(msg.to_string()));
+                    break;
+                }
             }
             Ok(End::Fatal(msg)) => {
                 tracing::error!("gateway: фатальная ошибка: {msg}");
@@ -114,6 +283,7 @@ async fn run_session(
     rx: &mut mpsc::Receiver<GatewayCommand>,
     session: &mut SessionData,
     shutdown: &CancellationToken,
+    ready_seen: &mut bool,
 ) -> Result<End> {
     let base = state
         .gateway_url
@@ -141,6 +311,8 @@ async fn run_session(
         .await
         .context("не удалось открыть WebSocket до gateway.discord.gg")?;
     let (mut writer, mut reader) = wsutil::split(ws);
+    let mut frames = FrameLog::new();
+    let mut bucket = CmdBucket::new();
 
     // ---- HELLO (op 10): the server dictates our heartbeat cadence ----
     let hello = wsutil::next_json(&mut reader).await?;
@@ -162,14 +334,12 @@ async fn run_session(
         .ok_or_else(|| anyhow!("нет токена"))?;
     if let (Some(id), Some(seq)) = (&session.id, session.seq) {
         tracing::info!("gateway: RESUME сессии {id} с seq={seq}");
-        wsutil::send_json(
-            &mut writer,
-            &json!({
-                "op": 6,
-                "d": { "token": token, "session_id": id, "seq": seq }
-            }),
-        )
-        .await?;
+        let payload = json!({
+            "op": 6,
+            "d": { "token": token, "session_id": id, "seq": seq }
+        });
+        frames.record("RESUME (op 6)", &payload);
+        wsutil::send_json(&mut writer, &payload).await?;
     } else {
         let is_bot = state.is_bot.load(Ordering::SeqCst);
         let build = state.build_number.load(Ordering::SeqCst);
@@ -212,6 +382,7 @@ async fn run_session(
                 "client_state": { "guild_versions": {} }
             })
         };
+        frames.record("IDENTIFY (op 2)", &json!({ "op": 2, "d": d }));
         wsutil::send_json(&mut writer, &json!({ "op": 2, "d": d })).await?;
     }
 
@@ -225,6 +396,8 @@ async fn run_session(
     // на op 37 до READY (замечено в логе v0.9.1: клик по серверу во время
     // переподключения). Буферизуем и выливаем после READY — так же
     // поступает официальный клиент (CONNECTION_OPEN → flush подписок).
+    // NOTE: при обрыве до READY накопленное теряется — это компенсирует
+    // replay подписок в events.rs (READY/RESUMED → flush из кэша).
     let mut ready = false;
     let mut pending_cmds: Vec<GatewayCommand> = Vec::new();
 
@@ -242,11 +415,12 @@ async fn run_session(
                     pending_cmds.push(cmd);
                     continue;
                 }
-                send_command(&mut writer, &cmd).await?;
+                send_command(app, &mut writer, &cmd, &mut frames, &mut bucket).await?;
             }
             _ = heartbeat.tick() => {
                 if !acked {
-                    // Два пульса подряд без ACK → «зомби»-соединение.
+                    // Пульс отправлен, ACK не пришёл → «зомби»-соединение
+                    // (по документации достаточно одного пропущенного ACK).
                     tracing::warn!("gateway: нет HEARTBEAT_ACK — соединение протухло");
                     return Ok(End::Reconnect);
                 }
@@ -279,6 +453,7 @@ async fn run_session(
                                 // что накопилось за время рукопожатия.
                                 if !ready {
                                     ready = true;
+                                    *ready_seen = true;
                                     let queued = std::mem::take(&mut pending_cmds);
                                     if !queued.is_empty() {
                                         tracing::info!(
@@ -286,7 +461,7 @@ async fn run_session(
                                             queued.len()
                                         );
                                         for cmd in &queued {
-                                            send_command(&mut writer, cmd).await?;
+                                            send_command(app, &mut writer, cmd, &mut frames, &mut bucket).await?;
                                         }
                                     }
                                 }
@@ -305,6 +480,9 @@ async fn run_session(
                                 if !resumable {
                                     session.id = None;
                                     session.resume_url = None;
+                                    // Без session_id новый heartbeat обязан идти
+                                    // с d=null, а не со seq прошлой сессии.
+                                    session.seq = None;
                                 }
                                 // документированная пауза 1–5 c перед повтором
                                 let jitter = 1000 + (std::time::SystemTime::now()
@@ -339,8 +517,26 @@ async fn run_session(
                                 // повторный IDENTIFY. Сессия недееспособна:
                                 // RESUME на неё всегда ответит INVALID_SESSION —
                                 // сразу чистим и идём на свежий IDENTIFY.
+                                // Дамп последних кадров уходит в лог: какой
+                                // кадр сломал декодирование, видно без
+                                // verbose-режима (секреты скрыты в redact).
                                 session.id = None;
                                 session.resume_url = None;
+                                session.seq = None;
+                                state.emit_status(
+                                    "reconnecting",
+                                    Some(format!("close {code}: {}", cf.reason)),
+                                );
+                                return Ok(End::ProtocolError(frames.dump()));
+                            }
+                            4007 | 4009 => {
+                                // Неверный seq при RESUME / сессия истекла на
+                                // сервере — RESUME по этим кодам бесполезен,
+                                // сразу свежий IDENTIFY (раньше попадали в
+                                // ветку _ → лишний круг INVALID_SESSION).
+                                session.id = None;
+                                session.resume_url = None;
+                                session.seq = None;
                                 state.emit_status(
                                     "reconnecting",
                                     Some(format!("close {code}: {}", cf.reason)),
@@ -366,18 +562,54 @@ async fn run_session(
     }
 }
 
-/// Отправка одной gateway-команды как кадра JSON. Вынесено из select-петли,
+/// Отправка одного gateway-команды как кадра JSON. Вынесено из select-петли,
 /// чтобы один и тот же код обслуживал и live-команды, и отложенные
-/// (накопленные до READY и вылитые после первого dispatch).
-async fn send_command(writer: &mut crate::wsutil::WsWriter, cmd: &GatewayCommand) -> Result<()> {
+/// (накопленные до READY и вылитые после первого dispatch). Каждый кадр
+/// проходит через лимит 120/60с и попадает в кольцевый буфер (дамп при 4002).
+async fn send_command(
+    app: &tauri::AppHandle,
+    writer: &mut crate::wsutil::WsWriter,
+    cmd: &GatewayCommand,
+    frames: &mut FrameLog,
+    bucket: &mut CmdBucket,
+) -> Result<()> {
+    /// Занять слот лимита, записать кадр в буфер, отправить.
+    async fn send_frame(
+        writer: &mut crate::wsutil::WsWriter,
+        frames: &mut FrameLog,
+        bucket: &mut CmdBucket,
+        label: &str,
+        payload: &Value,
+    ) -> Result<()> {
+        bucket.acquire().await;
+        frames.record(label, payload);
+        wsutil::send_json(writer, payload).await
+    }
     match cmd {
         GatewayCommand::SendText(text) => {
-            writer.send(Message::Text(text.clone())).await?;
+            // Консоль протокола: сырой текст. Невалидный JSON — верный
+            // способ получить 4002 и убить сессию, поэтому валидируем
+            // ДО отправки и ругаемся в UI, не трогая соединение.
+            match serde_json::from_str::<Value>(text) {
+                Ok(v) => {
+                    send_frame(writer, frames, bucket, "SendText (консоль)", &v).await?;
+                }
+                Err(e) => {
+                    tracing::warn!("gateway: SendText отклонён — не JSON: {e}");
+                    let _ = app.emit(
+                        "discord://warning",
+                        json!({ "message": format!("Протокол-консоль: кадр не отправлен — это не JSON ({e}).") }),
+                    );
+                }
+            }
         }
         GatewayCommand::RequestMembers { guild_id } => {
             // op 8: query="" + limit=0 → the server streams every member in chunks
-            wsutil::send_json(
+            send_frame(
                 writer,
+                frames,
+                bucket,
+                "op 8 RequestMembers",
                 &json!({
                     "op": 8,
                     "d": { "guild_id": guild_id, "query": "", "limit": 0 }
@@ -391,7 +623,7 @@ async fn send_command(writer: &mut crate::wsutil::WsWriter, cmd: &GatewayCommand
             // Чанкование как в официальном клиенте
             // (updateGuildSubscriptions): сумма JSON-весов пар
             // [gid, sub] не должна превышать 15 360 байт на кадр.
-            let mut frames: Vec<Value> = Vec::new();
+            let mut out_frames: Vec<Value> = Vec::new();
             let mut subs = serde_json::Map::new();
             let mut budget = 0usize;
             for gid in guild_ids {
@@ -401,7 +633,7 @@ async fn send_command(writer: &mut crate::wsutil::WsWriter, cmd: &GatewayCommand
                 });
                 let cost = format!("[{gid:?},{sub}]").len();
                 if budget + cost > 15_360 {
-                    frames.push(json!({ "op": 37, "d": { "subscriptions": subs } }));
+                    out_frames.push(json!({ "op": 37, "d": { "subscriptions": subs } }));
                     subs = serde_json::Map::new();
                     budget = 0;
                 }
@@ -409,11 +641,18 @@ async fn send_command(writer: &mut crate::wsutil::WsWriter, cmd: &GatewayCommand
                 budget += cost;
             }
             if !subs.is_empty() {
-                frames.push(json!({ "op": 37, "d": { "subscriptions": subs } }));
+                out_frames.push(json!({ "op": 37, "d": { "subscriptions": subs } }));
             }
-            let n_frames = frames.len();
-            for frame in &frames {
-                wsutil::send_json(writer, frame).await?;
+            let n_frames = out_frames.len();
+            for (i, frame) in out_frames.iter().enumerate() {
+                send_frame(
+                    writer,
+                    frames,
+                    bucket,
+                    &format!("op 37 bulk [{}/{}]", i + 1, n_frames),
+                    frame,
+                )
+                .await?;
             }
             tracing::info!(
                 "gateway: op 37 bulk subscribe на {} гильдий ({} кадров)",
@@ -463,14 +702,11 @@ async fn send_command(writer: &mut crate::wsutil::WsWriter, cmd: &GatewayCommand
                     "channels": chans
                 }),
             );
-            wsutil::send_json(
-                writer,
-                &json!({
-                    "op": 37,
-                    "d": { "subscriptions": subs }
-                }),
-            )
-            .await?;
+            let payload = json!({
+                "op": 37,
+                "d": { "subscriptions": subs }
+            });
+            send_frame(writer, frames, bucket, "op 37 member-list", &payload).await?;
             let last = ranges.last().map(|(_, b)| b + 1).unwrap_or(0);
             tracing::info!(
                 "gateway: op 37 список участников {guild_id} · канал {cid} · {} диапазон(ов), строк до {last}",
@@ -487,8 +723,11 @@ async fn send_command(writer: &mut crate::wsutil::WsWriter, cmd: &GatewayCommand
             // op 4: войти/покинуть голосовой канал. Для звонков в ЛС/группе
             // guild_id = null — так шлёт официальный клиент (voice-сервер
             // идентифицирует сессию по channel_id).
-            wsutil::send_json(
+            send_frame(
                 writer,
+                frames,
+                bucket,
+                "op 4 VoiceStateUpdate",
                 &json!({
                     "op": 4,
                     "d": {
@@ -510,8 +749,11 @@ async fn send_command(writer: &mut crate::wsutil::WsWriter, cmd: &GatewayCommand
             // op 18 STREAM_CREATE — «показать экран»/«включить камеру».
             // Сервер разошлёт dispatch STREAM_CREATE с stream_key — по нему
             // останавливаем (op 20) и ставим на паузу (op 22).
-            wsutil::send_json(
+            send_frame(
                 writer,
+                frames,
+                bucket,
+                "op 18 StreamCreate",
                 &json!({
                     "op": 18,
                     "d": {
@@ -526,20 +768,89 @@ async fn send_command(writer: &mut crate::wsutil::WsWriter, cmd: &GatewayCommand
             tracing::info!("gateway: op 18 STREAM_CREATE отправлен");
         }
         GatewayCommand::StreamDelete { stream_key } => {
-            wsutil::send_json(
+            send_frame(
                 writer,
+                frames,
+                bucket,
+                "op 20 StreamDelete",
                 &json!({ "op": 20, "d": { "stream_key": stream_key } }),
             )
             .await?;
             tracing::info!("gateway: op 20 STREAM_DELETE {stream_key}");
         }
         GatewayCommand::StreamSetPaused { stream_key, paused } => {
-            wsutil::send_json(
+            send_frame(
                 writer,
+                frames,
+                bucket,
+                "op 22 StreamSetPaused",
                 &json!({ "op": 22, "d": { "stream_key": stream_key, "paused": paused } }),
             )
             .await?;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_hides_secrets_at_any_depth() {
+        let frame = json!({
+            "op": 2,
+            "d": {
+                "token": "MTIzNDU2Nzg5MEdFVVMK",
+                "session_id": "abc",
+                "properties": { "browser": "Chrome", "nested": { "session_id": "deep" } },
+                "list": [ { "token": "in-array" }, { "ok": 1 } ]
+            }
+        });
+        let out = redact(&frame);
+        assert!(!out.contains("MTIzNDU2Nzg5MEdFVVMK"));
+        assert!(!out.contains("\"abc\""));
+        assert!(!out.contains("deep"));
+        assert!(!out.contains("in-array"));
+        assert!(out.contains("<redacted>"));
+        assert!(out.contains("Chrome")); // не-секреты не трогаем
+        assert!(out.contains("\"ok\":1"));
+    }
+
+    #[test]
+    fn frame_log_keeps_cap_and_formats() {
+        let mut fl = FrameLog::new();
+        for i in 0..(FRAME_LOG_CAP + 5) {
+            fl.record(&format!("op {i}"), &json!({ "op": i }));
+        }
+        let dump = fl.dump();
+        assert!(dump.lines().count() >= FRAME_LOG_CAP); // заголовок + кадры
+                                                        // Самый старый кадр вытеснен, самый новый на месте.
+        assert!(!dump.contains("#1 "));
+        assert!(dump.contains(&format!("#{}", FRAME_LOG_CAP + 5)));
+    }
+
+    #[test]
+    fn cmd_bucket_window_frees_with_age() {
+        let mut b = CmdBucket::new();
+        let now = std::time::Instant::now();
+        // 120 свежих слотов — свободных нет.
+        for _ in 0..CMD_LIMIT {
+            b.window.push_back(now);
+        }
+        assert_eq!(b.prune(now), 0);
+        // Через 61с все слоты протухли — окно свободно.
+        let later = now + CMD_WINDOW + Duration::from_secs(1);
+        assert_eq!(b.prune(later), CMD_LIMIT);
+        assert!(b.window.is_empty());
+        // Частичное старение: первая половина старая, вторая свежая
+        // (реальные метки всегда хронологичны — окно отсортировано).
+        for _ in 0..CMD_LIMIT / 2 {
+            b.window.push_back(now); // старые
+        }
+        for _ in 0..CMD_LIMIT / 2 {
+            b.window.push_back(later); // свежие
+        }
+        assert_eq!(b.prune(later), CMD_LIMIT / 2);
+    }
 }

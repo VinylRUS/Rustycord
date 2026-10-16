@@ -19,6 +19,8 @@
   // В браузерной разработке без Tauri не перехватываем (DevTools и адресная
   // строка браузера важнее), в приложении — глобальный хоткей.
   const isTauri = '__TAURI_INTERNALS__' in globalThis;
+  // DEV-хук: живой стор в консоли браузера (window.__app.guilds и т.д.)
+  if (import.meta.env.DEV) (window as never as { __app: unknown }).__app = app;
   function onGlobalKey(e: KeyboardEvent) {
     if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
       e.preventDefault();

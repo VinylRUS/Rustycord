@@ -389,7 +389,7 @@ export class AppStore {
       this.updateInfo = info;
       // Показываем плашку один раз на версию — иначе при каждом старте надоедает.
       if (localStorage.getItem(seenKey) !== info.latest) {
-        this.toast(`Доступна версия ${info.latest} — открой «Что нового» рядом с профилем`, 'info');
+        this.toast(`Доступна версия ${info.latest} — плашка внизу справа`, 'info');
       }
     } catch {
       /* тихо — проверка обновлений не критична */
@@ -699,8 +699,25 @@ export class AppStore {
     guildPositions: string[],
     railOrder: RailOrderItem[],
   ) {
-    this.guildFolders = folders;
-    this.railOrder = railOrder;
+    // Нормализация: дубликаты id внутри папки и в rail_order роняют
+    // keyed-each в ServerRail (each_key_duplicate замораживает DOM —
+    // клик по папке «не работает»). Дедупим с сохранением порядка.
+    const seenFolderIds = new Set<string>();
+    this.guildFolders = folders.map((f) => ({
+      ...f,
+      guild_ids: f.guild_ids.filter((gid) => {
+        if (seenFolderIds.has(`${f.id ?? '_'}:${gid}`)) return false;
+        seenFolderIds.add(`${f.id ?? '_'}:${gid}`);
+        return true;
+      }),
+    }));
+    const seenRail = new Set<string>();
+    this.railOrder = railOrder.filter((item) => {
+      const key = item.type === 'folder' ? `f${item.index}` : item.id;
+      if (seenRail.has(key)) return false;
+      seenRail.add(key);
+      return true;
+    });
     // Плоский порядок: сначала отдельные гильдии из railOrder, затем
     // гильдии папок (папки хранят порядок внутри себя).
     const order: Record<string, number> = {};

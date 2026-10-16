@@ -154,7 +154,7 @@
               </button>
               <span class="pill pill-head visible"></span>
             </div>
-            {#each f.guild_ids as gid (gid)}
+            {#each [...new Set(f.guild_ids)] as gid (gid)}
               {@const g = app.guilds.find((x) => x.id === gid)}
               {#if g}
                 {@const icon = iconFailed[gid] ? null : guildIconUrl(g)}
@@ -186,6 +186,9 @@
                 </div>
               {/if}
             {/each}
+            {#if !f.guild_ids.some((gid) => app.guilds.some((x) => x.id === gid))}
+              <div class="folder-empty muted">серверы ещё грузятся…</div>
+            {/if}
           </div>
         {:else}
           <div class="pill-container">
@@ -199,26 +202,28 @@
               <span class="folder-body">
                 {#each f.guild_ids.slice(0, 4) as gid, j}
                   {@const g = app.guilds.find((x) => x.id === gid)}
-                  {#if g}
-                    <span class="mini" data-pos={j}>
-                      {#if iconFailed[gid]}
-                        <span class="mini-initial" style="background: {defaultAvatarColor(gid)}">
-                          {initials(g.name)}
-                        </span>
-                      {:else if guildIconUrl(g)}
-                        <img
-                          src={guildIconUrl(g) ?? ''}
-                          alt={g.name ?? ''}
-                          loading="lazy"
-                          onerror={() => (iconFailed[gid] = true)}
-                        />
-                      {:else}
-                        <span class="mini-initial" style="background: {defaultAvatarColor(gid)}">
-                          {initials(g.name)}
-                        </span>
-                      {/if}
-                    </span>
-                  {/if}
+                  <span class="mini" data-pos={j}>
+                    {#if !g}
+                      <!-- гильдия ещё не в кэше (раскладка приехала раньше
+                           стабов/REST) — плейсхолдер, кружок не пустой -->
+                      <span class="mini-ghost"></span>
+                    {:else if iconFailed[gid]}
+                      <span class="mini-initial" style="background: {defaultAvatarColor(gid)}">
+                        {initials(g.name)}
+                      </span>
+                    {:else if guildIconUrl(g)}
+                      <img
+                        src={guildIconUrl(g) ?? ''}
+                        alt={g.name ?? ''}
+                        loading="lazy"
+                        onerror={() => (iconFailed[gid] = true)}
+                      />
+                    {:else}
+                      <span class="mini-initial" style="background: {defaultAvatarColor(gid)}">
+                        {initials(g.name)}
+                      </span>
+                    {/if}
+                  </span>
                 {/each}
                 {#if f.guild_ids.length > 4}<span class="mini-more">+{f.guild_ids.length - 4}</span>{/if}
               </span>
@@ -493,6 +498,18 @@
     color: #fff;
     font-size: 8px;
     font-weight: 700;
+  }
+  .mini-ghost {
+    width: 100%;
+    height: 100%;
+    background: #35363c;
+  }
+  .folder-empty {
+    font-size: 9px;
+    padding: 4px 2px 2px;
+    text-align: center;
+    max-width: 48px;
+    line-height: 1.3;
   }
 
   /* раскрытая папка: цветной столбик с шапкой и серверами — как в официале */
