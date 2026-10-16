@@ -61,8 +61,24 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # Как в release.yml: без секрета TAURI_SIGNING_PRIVATE_KEY tauri build
+      # падает («A public key has been found, but no private key») —
+      # собираем без апдейтер-артефактов. Добавь секрет — и dev-сборки
+      # станут подписанными автоматически.
       - name: Build RustyCord
-        run: npx tauri build ${{ matrix.args }}
+        shell: bash   # windows-latest по умолчанию PowerShell
+        env:
+          HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          ARGS='${{ matrix.args }}'
+          if [ "$HAS_SIGNING_KEY" = "true" ]; then
+            npx tauri build $ARGS
+          else
+            echo '::warning::Секрета TAURI_SIGNING_PRIVATE_KEY нет — собираем без апдейтер-артефактов (createUpdaterArtifacts=false)'
+            npx tauri build $ARGS --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          fi
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
