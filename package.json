@@ -1,7 +1,7 @@
 {
   "name": "rustycord",
   "private": true,
-  "version": "0.9.5",
+  "version": "0.9.6",
   "description": "Unofficial Discord client built with Rust + Tauri + Svelte 5 (reverse-engineered architecture)",
   "repository": {
     "type": "git",

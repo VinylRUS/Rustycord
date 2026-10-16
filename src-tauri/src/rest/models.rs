@@ -217,6 +217,22 @@ impl Guild {
             .map(String::from)
     }
 
+    /// Иконка гильдии из сырого payload: верхнеуровневый `icon` или
+    /// `properties.icon` (юзер-GUILD_CREATE прячет display-данные в
+    /// properties — как name; скрин v0.9.5: активная гильдия с каналами
+    /// рендерилась инициалами, потому что icon никто не смотрел там).
+    pub fn icon_from_payload(v: &serde_json::Value) -> Option<String> {
+        v.get("icon")
+            .and_then(|x| x.as_str())
+            .or_else(|| {
+                v.get("properties")
+                    .and_then(|p| p.get("icon"))
+                    .and_then(|x| x.as_str())
+            })
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    }
+
     /// Salvage-разбор GUILD_CREATE из сырого JSON: оболочка гильдии
     /// вытягивается толерантно, а коллекции (каналы/роли/участники/
     /// пресенсы/войс-состояния/эмодзи) разбираются ПОЭЛЕМЕНТНО — битая
@@ -603,6 +619,32 @@ mod tests {
         assert!(Guild::name_from_payload(&v).is_none());
         let s = Guild::salvage_from_value(&v).expect("salvage");
         assert_eq!(s.name, "…");
+    }
+
+    /// v0.9.6 (скрин юзера): активная гильдия с каналами рендерилась в рейле
+    /// инициалами — юзер-GUILD_CREATE держит иконку в properties.icon, как
+    /// и имя в properties.name. Проверяем фолбэк и приоритет верхнеуровневой.
+    #[test]
+    fn guild_icon_falls_back_to_properties() {
+        let mut v = realistic_guild_create();
+        v["properties"] = json!({"name": "WoW Secrets", "icon": "a_abc123"});
+        v.as_object_mut().unwrap().remove("icon");
+        // Верхнеуровневого icon нет — берём из properties.
+        assert_eq!(Guild::icon_from_payload(&v).as_deref(), Some("a_abc123"));
+        // Верхнеуровневый icon приоритетнее.
+        v["icon"] = json!("top_level_hash");
+        assert_eq!(
+            Guild::icon_from_payload(&v).as_deref(),
+            Some("top_level_hash")
+        );
+        // Нигде нет — None; пустая строка — тоже None (не затираем кэш).
+        v.as_object_mut().unwrap().remove("icon");
+        v["properties"]["icon"] = json!("");
+        assert!(Guild::icon_from_payload(&v).is_none());
+        let mut bare = json!({"id": "123"});
+        assert!(Guild::icon_from_payload(&bare).is_none());
+        bare["icon"] = json!(null);
+        assert!(Guild::icon_from_payload(&bare).is_none());
     }
 
     /// v0.9.0: каналы несут permission_overwrites — скрытые для роли каналы

@@ -894,6 +894,35 @@ pub async fn subscribe_guild(
     Ok(())
 }
 
+/// VIEW_CHANNEL (бит 10) — единственное право, влияющее на id списка
+/// участников: @everyone-deny на него делает канал «приватным», и его
+/// список получает вычисленный id (не "everyone").
+const VIEW_CHANNEL: u64 = 1 << 10;
+
+/// Приватность канала для ленивого списка: Some(true) — @everyone
+/// запрещён VIEW_CHANNEL (список с вычисленным id), Some(false) — обычный
+/// (список "everyone"), None — гильдии/канала нет в кэше (id неизвестен).
+fn channel_list_private(state: &Arc<AppState>, guild_id: &str, channel_id: &str) -> Option<bool> {
+    if channel_id == "0" {
+        // Общий список гильдии — всегда "everyone".
+        return Some(false);
+    }
+    let cache = state.cache.read().ok()?;
+    let gs = cache.guilds.get(guild_id)?;
+    let ch = gs.channels.iter().find(|c| c.id == channel_id)?;
+    Some(
+        ch.permission_overwrites
+            .iter()
+            // @everyone: id перезаписи == id гильдии.
+            .any(|o| {
+                o.id == guild_id
+                    && o.deny
+                        .parse::<u64>()
+                        .map_or(false, |d| d & VIEW_CHANNEL != 0)
+            }),
+    )
+}
+
 /// Подписаться на ленивый список участников канала (юзер-сессии):
 /// op 37 с ОДНИМ каналом и диапазонами строк — ровно как
 /// subscribeChannel в официальном клиенте. Ответ приезжает событием
@@ -939,6 +968,11 @@ pub async fn subscribe_channel(
             list.rows.clear();
             list.member_count = 0;
             list.online_count = 0;
+            // Серверный id списка ≠ id канала (обычные каналы — "everyone",
+            // приватные — вычисленный). Трекер решает, чьи события наши.
+            list.tracker = crate::state::ActiveListTracker::for_channel(channel_list_private(
+                &state, &guild_id, &cid,
+            ));
         }
         list.ranges = ranges.clone();
     }

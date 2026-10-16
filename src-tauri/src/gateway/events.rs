@@ -296,7 +296,10 @@ pub async fn handle_dispatch(
                 } else {
                     g.name.clone()
                 };
-                let mut icon = g.icon.clone();
+                // Иконка — та же логика, что и имя: юзер-GUILD_CREATE
+                // может держать её в properties.icon; пустую не пишем
+                // поверх существующей, иначе рейл теряет картинки.
+                let mut icon = g.icon.clone().or_else(|| Guild::icon_from_payload(&d));
                 {
                     let mut cache = state.cache.write().unwrap();
                     if let Some(old) = cache.guilds.get(&g.id) {
@@ -423,7 +426,10 @@ pub async fn handle_dispatch(
             // Ленивый список участников — ответ на op 37 с channels
             // (subscribe_channel / псевдоканал "0"). Формат сверен с
             // бандлом discord.com (flux-стор GuildMemberListStore):
-            //   d.id           — id списка (обычно id канала; "0" — общий)
+            //   d.id           — СЕРВЕРНЫЙ id списка: "everyone" для
+            //                   обычных каналов (без @everyone-deny на
+            //                   VIEW_CHANNEL), вычисленный — для приватных;
+            //                   это НЕ id канала (урок v0.9.5)
             //   d.member_count — всего участников
             //   d.groups       — [{id: "online"|"offline"|role_id, count}]
             //   d.ops — инкрементальные операции:
@@ -564,7 +570,15 @@ pub async fn handle_dispatch(
                         // гильдии после старта) — принимаем как текущий.
                         list.channel_id = list_id.clone();
                     }
-                    is_current = list.channel_id == list_id;
+                    // УРОК v0.9.5: серверный id списка (d.id) — НЕ id канала.
+                    // Обычные каналы (без @everyone-deny VIEW_CHANNEL) делят
+                    // общий список "everyone", приватные получают вычисленный
+                    // id. Раньше сравнивали с channel_id напрямую → is_current
+                    // всегда false → сайдбар участников вечно пуст (кроме себя).
+                    // Теперь трекер (предсеянный в subscribe_channel по
+                    // overwrites) матчит события и глушит хвосты старых
+                    // подписок (сервер держит до 5 каналов на гильдию).
+                    is_current = list.tracker.accept(&list_id);
                     if is_current {
                         if list.member_count != member_count {
                             list.member_count = member_count;

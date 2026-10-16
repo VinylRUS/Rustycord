@@ -134,6 +134,77 @@ pub enum MemberListRow {
     },
 }
 
+/// Трекер серверного id ленивого списка (урок v0.9.5: `d.id` в
+/// GUILD_MEMBER_LIST_UPDATE — НЕ id канала). Идентификатор списка
+/// вычисляется сервером из permission overwrites канала (list_id
+/// официального клиента): у каналов без @everyone-deny на VIEW_CHANNEL
+/// (подавляющее большинство) список общий — `"everyone"`, у приватных —
+/// вычисленное значение. Сервер держит подписки до 5 каналов на гильдию
+/// и присылает события ВСЕХ активных списков — трекер отличает «наш»
+/// список от хвостов прошлых подписок.
+///
+/// Семантика состояний:
+/// * `active = Some("everyone")` — канал обычный: принимаем только
+///   `everyone`-события, вычисленные id (хвост приватного канала) — мимо.
+/// * `active = None, expect_private` — канал приватный: `everyone`-хвост
+///   отбрасываем, первый не-`everyone` SYNC фиксируется как активный
+///   (какой именно id — знает только сервер).
+/// * `active = None, !expect_private` — канал неизвестен кэшу: принимаем
+///   первый пришедший SYNC любого id (самокорректируется).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActiveListTracker {
+    /// Серверный id активного списка (None — ждём первый SYNC).
+    pub active: Option<String>,
+    /// Подписанный канал приватный (@everyone deny VIEW_CHANNEL) — его
+    /// список не `everyone`.
+    pub expect_private: bool,
+}
+
+impl Default for ActiveListTracker {
+    fn default() -> Self {
+        Self {
+            active: None,
+            expect_private: false,
+        }
+    }
+}
+
+impl ActiveListTracker {
+    /// Трекер для свежей подписки канала. `channel_private`: Some(true/false)
+    /// — приватность канала известна по overwrites; None — канала нет в кэше.
+    pub fn for_channel(channel_private: Option<bool>) -> Self {
+        match channel_private {
+            // Обычный канал — список 'everyone' (предсеем: SYNC не обязан
+            // прийти повторно, если 'everyone'-диапазоны уже подписаны).
+            Some(false) => Self {
+                active: Some("everyone".to_string()),
+                expect_private: false,
+            },
+            // Приватный — id вычислит сервер, ждём первый SYNC.
+            Some(true) => Self {
+                active: None,
+                expect_private: true,
+            },
+            // Неизвестный канал — не предсеиваем ничего.
+            None => Self::default(),
+        }
+    }
+
+    /// Принять событие с серверным id `list_id` как текущий список?
+    /// При `active = None` первый подходящий SYNC фиксируется.
+    pub fn accept(&mut self, list_id: &str) -> bool {
+        if let Some(active) = &self.active {
+            return active == list_id;
+        }
+        if self.expect_private && list_id == "everyone" {
+            // Хвост подписки прежнего обычного канала (LRU-5) — не наш.
+            return false;
+        }
+        self.active = Some(list_id.to_string());
+        true
+    }
+}
+
 /// Снимок ленивого списка участников гильдии (по текущему каналу).
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct MemberListState {
@@ -146,6 +217,10 @@ pub struct MemberListState {
     #[serde(skip)]
     pub ranges: Vec<(u64, u64)>,
     pub rows: Vec<MemberListRow>,
+    /// Серверный id активного списка ('everyone'/вычисленный) — матчит
+    /// GUILD_MEMBER_LIST_UPDATE.d.id (см. ActiveListTracker).
+    #[serde(skip)]
+    pub tracker: ActiveListTracker,
 }
 
 /// Per-guild cached state, kept fresh from gateway dispatches.

@@ -1422,49 +1422,57 @@ export class AppStore {
    *  подписываемся op 37 — GUILD_CREATE подвезёт каналы. */
   private async fetchUserGuilds(): Promise<void> {
     if (this.mode !== 'tauri' || this.isBotAccount) return;
-    try {
-      const res = await this.backend?.apiRequest('GET', '/users/@me/guilds?limit=200');
-      const list = res as
-        | { id: string; name?: string; icon?: string | null; owner?: boolean }[]
-        | undefined;
-      if (!Array.isArray(list)) return;
-      const fresh: string[] = [];
-      for (const u of list) {
-        if (!u?.id) continue;
-        const idx = this.guilds.findIndex((g) => g.id === u.id);
-        if (idx >= 0) {
-          this.guilds[idx] = {
-            ...this.guilds[idx],
-            name: u.name || this.guilds[idx].name,
-            icon: u.icon ?? this.guilds[idx].icon ?? null,
-          };
-        } else {
-          // Сервер есть в аккаунте, но стаба READY не было — добавляем.
-          this.guilds.push({
-            id: u.id,
-            name: u.name || '…',
-            icon: u.icon ?? null,
-            owner_id: '',
-            roles: [],
-            channels: [],
-          } as Guild);
-          fresh.push(u.id);
+    // До двух попыток с паузой: на старте сессии REST бывает занят/зарейт-
+    // лимичен — без иконок и имён половина рейла повисает инициалами
+    // («S», «WS» на скрине v0.9.5), а молчаливый catch это скрывал.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const res = await this.backend?.apiRequest('GET', '/users/@me/guilds?limit=200');
+        const list = res as
+          | { id: string; name?: string; icon?: string | null; owner?: boolean }[]
+          | undefined;
+        if (!Array.isArray(list)) return;
+        const fresh: string[] = [];
+        for (const u of list) {
+          if (!u?.id) continue;
+          const idx = this.guilds.findIndex((g) => g.id === u.id);
+          if (idx >= 0) {
+            this.guilds[idx] = {
+              ...this.guilds[idx],
+              name: u.name || this.guilds[idx].name,
+              icon: u.icon ?? this.guilds[idx].icon ?? null,
+            };
+          } else {
+            // Сервер есть в аккаунте, но стаба READY не было — добавляем.
+            this.guilds.push({
+              id: u.id,
+              name: u.name || '…',
+              icon: u.icon ?? null,
+              owner_id: '',
+              roles: [],
+              channels: [],
+            } as Guild);
+            fresh.push(u.id);
+          }
         }
+        // Порядок из guild_folders сохраняем, новинки — в конец.
+        if (Object.keys(this.guildOrder).length) {
+          this.guilds = [...this.guilds].sort(
+            (a, b) => (this.guildOrder[a.id] ?? 1e9) - (this.guildOrder[b.id] ?? 1e9),
+          );
+        }
+        // Только что добавленные гильдии без каналов: подписка op 37 —
+        // по наблюдениям v0.5.0 юзер-сессии получают GUILD_CREATE на
+        // подписанные гильдии.
+        for (const gid of fresh) {
+          void this.backend?.subscribeGuild(gid).catch(() => undefined);
+        }
+        return;
+      } catch {
+        // Не критично: имена доберутся из GUILD_CREATE (properties.name),
+        // но даём REST второй шанс через паузу.
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 6000));
       }
-      // Порядок из guild_folders сохраняем, новинки — в конец.
-      if (Object.keys(this.guildOrder).length) {
-        this.guilds = [...this.guilds].sort(
-          (a, b) => (this.guildOrder[a.id] ?? 1e9) - (this.guildOrder[b.id] ?? 1e9),
-        );
-      }
-      // Только что добавленные гильдии без каналов: подписка op 37 —
-      // по наблюдениям v0.5.0 юзер-сессии получают GUILD_CREATE на
-      // подписанные гильдии.
-      for (const gid of fresh) {
-        void this.backend?.subscribeGuild(gid).catch(() => undefined);
-      }
-    } catch {
-      // Не критично: имена доберутся из GUILD_CREATE (properties.name).
     }
   }
 
