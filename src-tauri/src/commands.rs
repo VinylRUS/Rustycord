@@ -964,7 +964,7 @@ pub async fn subscribe_channel(
         let list = lists.entry(guild_id.clone()).or_default();
         let cid = channel_id.clone().unwrap_or_else(|| "0".to_string());
         if list.channel_id != cid {
-            list.channel_id = cid;
+            list.channel_id = cid.clone();
             list.rows.clear();
             list.member_count = 0;
             list.online_count = 0;
