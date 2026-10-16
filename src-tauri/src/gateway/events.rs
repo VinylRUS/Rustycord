@@ -187,6 +187,40 @@ pub async fn handle_dispatch(
                 .and_then(|v| v.as_array())
                 .map(Vec::len)
                 .unwrap_or(0);
+            // Состав payload, ушедшего во фронтенд (v0.9.9): по логу
+            // видно, откуда UI берёт имена/статусы — users/presences
+            // верхнего уровня против merged-массивов. Путь ["key", ""]
+            // читает d["key"], иначе — d[key0][key1].
+            let get_path = |path: [&str; 2]| -> Option<&Value> {
+                let m = d.get(path[0])?;
+                if path[1].is_empty() {
+                    Some(m)
+                } else {
+                    m.get(path[1])
+                }
+            };
+            let flat_len = |path: [&str; 2]| {
+                get_path(path)
+                    .and_then(|v| v.as_array())
+                    .map_or(0, Vec::len)
+            };
+            let total_len = |path: [&str; 2]| {
+                get_path(path).and_then(|v| v.as_array()).map_or(0, |a| {
+                    a.iter()
+                        .filter_map(|x| x.as_array())
+                        .map(Vec::len)
+                        .sum::<usize>()
+                })
+            };
+            tracing::info!(
+                "gateway: READY payload → UI: users={}, presences={}, \
+                 merged_presences: друзей={} гильдейских={}, merged_members={} (карточек)",
+                flat_len(["users", ""]),
+                flat_len(["presences", ""]),
+                flat_len(["merged_presences", "friends"]),
+                total_len(["merged_presences", "guilds"]),
+                total_len(["merged_members", ""]),
+            );
             tracing::info!(
                 "gateway: READY — {username} ({user_id}), session {session_id}, {guild_n} гильдий, {rel_count} отношений, {dm_count} ЛС",
                 guild_n = stub_ids.len(),
@@ -776,11 +810,14 @@ pub async fn handle_dispatch(
                 // Диагностика (v0.9.8): SYNC — авторитетный снимок сервера;
                 // каждый логируем в файл — «список не грузится» теперь
                 // разбирается по логу (пришёл ли SYNC, принят ли, сколько
-                // строк получилось), без угадываний.
+                // строк получилось), без угадываний. v0.9.9: + сколько
+                // карточек участников гидратируется в кэш гильдии (имена/
+                // статусы для профиля и «кто в сети»).
                 if has_sync {
                     tracing::info!(
                         "member-list: {guild_id} SYNC список={list_id} принято={is_current} \
-                         строк={rows_after}"
+                         строк={rows_after} карточек={}",
+                        hydrate.len()
                     );
                 } else if !is_current {
                     tracing::debug!("member-list: {guild_id} хвост списка {list_id} пропущен");

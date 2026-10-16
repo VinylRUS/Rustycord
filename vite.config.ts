@@ -28,6 +28,9 @@ export default defineConfig({
   build: {
     target: 'es2022',
     minify: 'esbuild',
-    sourcemap: false,
+    // Стектрейсы ошибок в релизе ссылаются на исходники (app.svelte.ts:N),
+    // а не на index-DAxKo1_2.js:6:2308 — без карт диагностика по логу
+    // невозможна (крэши v0.9.8 ловили вслепую).
+    sourcemap: true,
   },
 });

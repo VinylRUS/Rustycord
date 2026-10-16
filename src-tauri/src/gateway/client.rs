@@ -430,6 +430,13 @@ async fn run_session(
     // обновлений диапазонов в минуту) схлопывается до последнего набора.
     let mut deferred: VecDeque<GatewayCommand> = VecDeque::new();
     let mut wake = tokio::time::Instant::now();
+    // Счётчики dispatch-событий по типам (v0.9.9): одна INFO-строка
+    // раз в 60 секунд — сколько событий каждого типа реально пришло и
+    // ушло во фронтенд. Раньше поток PRESENCE_UPDATE/GUILD_MEMBER_UPDATE
+    // был невидим в логе (info-уровень молчал о них) — «пустые статусы»
+    // приходилось диагностировать вслепую.
+    let mut ev_counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut ev_flush_at = std::time::Instant::now() + Duration::from_secs(60);
 
     loop {
         tokio::select! {
@@ -494,6 +501,31 @@ async fn run_session(
                                     session.seq = Some(s);
                                 }
                                 let d = v["d"].clone();
+                                // Диагностика потока: считаем по типам и раз
+                                // в минуту вываливаем одной строкой (топ-12).
+                                *ev_counts.entry(t.clone()).or_insert(0) += 1;
+                                if std::time::Instant::now() >= ev_flush_at {
+                                    ev_flush_at = std::time::Instant::now() + Duration::from_secs(60);
+                                    let mut items: Vec<(String, u64)> = ev_counts.drain().collect();
+                                    items.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                                    let shown: Vec<String> = items
+                                        .iter()
+                                        .take(12)
+                                        .map(|(t, n)| format!("{t}={n}"))
+                                        .collect();
+                                    let rest = items.len().saturating_sub(12);
+                                    if !shown.is_empty() {
+                                        tracing::info!(
+                                            "gateway: dispatch-события за 60с: {}{}",
+                                            shown.join(", "),
+                                            if rest > 0 {
+                                                format!(", ещё {rest} типов")
+                                            } else {
+                                                String::new()
+                                            }
+                                        );
+                                    }
+                                }
                                 handle_dispatch(app, state, &t, d, session).await;
                                 // Первый dispatch — это READY (IDENTIFY-сессия):
                                 // шлюз готов принимать команды. Выливаем всё,

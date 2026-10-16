@@ -766,10 +766,12 @@ export class AppStore {
         } catch (e) {
           // Ошибка разбора одного события не должна обрывать цепочку
           // (v0.9.7: TypeError в applyMerged молча убил fetchUserGuilds —
-          // рейл без имён/иконок). Пишем в консоль и в файловый лог Rust.
+          // рейл без имён/иконок). Пишем в консоль и в файловый лог Rust
+          // с ограничением частоты — шторм одинаковых ошибок больше
+          // не глушит остальной лог (v0.9.9).
           const msg = e instanceof Error ? `${e.message}\n${e.stack ?? ''}` : String(e);
           console.error(`[dispatch ${ev.t}]`, e);
-          void this.backend?.logError(`dispatch ${ev.t}: ${msg}`).catch(() => undefined);
+          this.reportDispatchError(ev.t, ev.d, msg);
         }
         break;
       case 'guildLayout':
@@ -915,7 +917,10 @@ export class AppStore {
           users?: User[];
           private_channels?: Channel[];
           relationships?: Relationship[];
-          presences?: Presence[];
+          /** Оба формата: встроенный user (бот-READY) и merged
+           *  {user_id, status} без user (юзер-READY) — нормализуем
+           *  через mergedPresence. */
+          presences?: MergedPresence[];
           guilds?: {
             id: string;
             name?: string;
@@ -955,16 +960,23 @@ export class AppStore {
         }
         if (p.relationships) {
           const map = { ...this.relationships };
-          for (const r of p.relationships) map[r.user.id] = r;
+          // user бывает не вложен (битые записи) — не роняем обработчик.
+          for (const r of p.relationships) {
+            if (r?.user?.id) map[r.user.id] = r;
+          }
           this.relationships = map;
         }
         if (p.presences) {
-          // В READY это статусы друзей — без guild_id.
+          // В READY это статусы друзей — без guild_id. Юзер-READY шлёт
+          // их в merged-формате {user_id, status} (DEDUPE_USER_OBJECTS):
+          // прямое pr.user.id вало TypeError на первой записи и ОБРЫВАЛО
+          // обработчик READY до стабов гильдий — рейл без имён/иконок и
+          // мёртвый fetchUserGuilds (лог 23:40:12, v0.9.8).
           const map = { ...this.friendPresences };
-          for (const pr of p.presences) {
-            if (!('guild_id' in pr) || (pr as { guild_id?: string }).guild_id == null) {
-              map[pr.user.id] = pr;
-            }
+          for (const raw of p.presences) {
+            if ((raw as { guild_id?: string }).guild_id != null) continue;
+            const pr = this.mergedPresence(raw);
+            if (pr) map[pr.user.id] = pr;
           }
           this.friendPresences = map;
         }
@@ -1101,43 +1113,61 @@ export class AppStore {
           members: Member[];
           chunk_index: number;
           chunk_count: number;
-          presences?: Presence[];
+          presences?: MergedPresence[];
         };
         const map = { ...(this.membersByGuild[p.guild_id] ?? {}) };
         for (const m of p.members) if (m.user) map[m.user.id] = m;
         this.membersByGuild[p.guild_id] = map;
         // Ответ на op 14 несёт и пресенсы (activities: true) — без них
-        // список участников выглядит «все офлайн».
+        // список участников выглядит «все офлайн». Формат бывает merged
+        // ({user_id, status}) — нормализуем без риска TypeError.
         if (p.presences?.length) {
           const pmap = { ...(this.presencesByGuild[p.guild_id] ?? {}) };
-          for (const pr of p.presences) pmap[pr.user.id] = pr;
+          for (const raw of p.presences) {
+            const pr = this.mergedPresence(raw);
+            if (pr) pmap[pr.user.id] = pr;
+          }
           this.presencesByGuild[p.guild_id] = pmap;
         }
         if (p.chunk_index + 1 >= p.chunk_count) this.chunksDone[p.guild_id] = true;
         break;
       }
       case 'GUILD_MEMBER_ADD': {
-        const p = d as { guild_id: string; member: Member };
-        if (p.member.user) {
+        // Боты: {guild_id, member:{…}}. Юзер-сессии — поля участника
+        // РАЗВЁРНУТЫ на верхнем уровне (serde(flatten) в референсе
+        // discord-client-rs: GuildMemberAddEvent) — обёртки member нет,
+        // p.member.user валил TypeError на каждый вход (v0.9.8).
+        const p = d as { guild_id: string; member?: Member } & Partial<Member>;
+        const m = p.member ?? p;
+        if (m?.user?.id) {
           const map = { ...(this.membersByGuild[p.guild_id] ?? {}) };
-          map[p.member.user.id] = p.member;
+          map[m.user.id] = m as Member;
           this.membersByGuild[p.guild_id] = map;
         }
         break;
       }
       case 'GUILD_MEMBER_UPDATE': {
-        const p = d as { guild_id: string; member: Member };
-        if (p.member.user) {
+        // Поля участника — на ВЕРХНЕМ уровне d (и боты, и юзеры;
+        // GuildMemberUpdateEvent референса без обёртки member):
+        // p.member.user валило TypeError 517 раз за вечер (v0.9.8).
+        // Бот-форма с обёрткой — на всякий случай тоже принимается.
+        const p = d as { guild_id: string; member?: Member } & Partial<Member>;
+        const m = p.member ?? p;
+        if (m?.user?.id) {
           const map = { ...(this.membersByGuild[p.guild_id] ?? {}) };
-          map[p.member.user.id] = { ...map[p.member.user.id], ...p.member };
+          map[m.user.id] = { ...map[m.user.id], ...m } as Member;
           this.membersByGuild[p.guild_id] = map;
         }
         break;
       }
       case 'GUILD_MEMBER_REMOVE': {
-        const p = d as { guild_id: string; user: { id: string } };
+        // Юзер-сессии: user может отсутствовать — надёжен user_id
+        // (GuildMemberRemoveEvent референса: user_id + Option<User>).
+        const p = d as { guild_id: string; user?: { id: string }; user_id?: string };
+        const uid = p.user?.id ?? p.user_id;
+        if (!uid) break;
         const map = { ...(this.membersByGuild[p.guild_id] ?? {}) };
-        delete map[p.user.id];
+        delete map[uid];
         this.membersByGuild[p.guild_id] = map;
         break;
       }
@@ -1304,15 +1334,20 @@ export class AppStore {
         break;
       }
       case 'PRESENCE_UPDATE': {
-        const p = d as Presence;
-        if ((p as { guild_id?: string }).guild_id == null) {
+        // Формат бывает со встроенным user и merged ({user_id, status}) —
+        // нормализуем оба (урок READY-крэша v0.9.9), дальше единый путь.
+        const raw = d as MergedPresence & { guild_id?: string };
+        const pr = this.mergedPresence(raw);
+        if (!pr) break;
+        const uid = pr.user.id;
+        if (raw.guild_id == null) {
           // Статус друга (вне гильдии) — обновляем карту друзей.
-          this.friendPresences = { ...this.friendPresences, [p.user.id]: p };
+          this.friendPresences = { ...this.friendPresences, [uid]: pr };
         }
         for (const gid of Object.keys(this.presencesByGuild)) {
           const map = this.presencesByGuild[gid];
-          if (map[p.user.id] || this.membersByGuild[gid]?.[p.user.id]) {
-            map[p.user.id] = p;
+          if (map[uid] || this.membersByGuild[gid]?.[uid]) {
+            map[uid] = pr;
           }
         }
         break;
@@ -1500,6 +1535,45 @@ export class AppStore {
         // Не критично: имена доберутся из GUILD_CREATE (properties.name),
         // но даём REST второй шанс через паузу.
         if (attempt < 2) await new Promise((r) => setTimeout(r, 6000));
+      }
+    }
+  }
+
+  /* ---------- пересылка ошибок dispatch в файловый лог (rate-limit) ---------- */
+
+  /** Сколько полных записей (со стеком) уже отправили. */
+  private errFullSent = 0;
+  /** Подавленные ошибки: сигнатура → счётчик (сбрасывается при флеше). */
+  private errSuppressed = new Map<string, number>();
+  /** Timestamp последнего флеша агрегата (мс). */
+  private errLastFlush = 0;
+
+  /** Ретрансляция ошибки dispatch в файловый лог Rust с ограничением
+   *  частоты: первые 5 — с полным стеком и ключами payload (сразу видно,
+   *  какой формы приехало событие), дальше — агрегат раз в 10 секунд
+   *  одной строкой. Без лимита шторм GUILD_MEMBER_UPDATE × 3/с
+   *  заглушал весь остальной лог (v0.9.9). */
+  private reportDispatchError(t: string, d: unknown, msg: string) {
+    if (this.errFullSent < 5) {
+      this.errFullSent++;
+      const keys =
+        d && typeof d === 'object' ? Object.keys(d as Record<string, unknown>).join(',') : String(d);
+      void this.backend
+        ?.logError(`dispatch ${t} (ключи d: ${keys}): ${msg}`)
+        .catch(() => undefined);
+      return;
+    }
+    const sig = `${t}: ${msg.split('\n')[0]}`;
+    this.errSuppressed.set(sig, (this.errSuppressed.get(sig) ?? 0) + 1);
+    const now = Date.now();
+    if (now - this.errLastFlush >= 10_000) {
+      this.errLastFlush = now;
+      const summary = [...this.errSuppressed.entries()].map(([s, n]) => `${s} ×${n}`).join('; ');
+      this.errSuppressed.clear();
+      if (summary) {
+        void this.backend?.logError(`dispatch: подавленные ошибки — ${summary}`, 'warn').catch(
+          () => undefined,
+        );
       }
     }
   }
