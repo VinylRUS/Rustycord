@@ -95,6 +95,7 @@ jobs:
       # будут подписанными (клиенты v0.9.5+ обновляются сами).
       - name: Updater signing mode
         id: updsign
+        shell: bash   # windows-latest по умолчанию PowerShell — синтаксис ниже bash
         env:
           HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
         run: |
