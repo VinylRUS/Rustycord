@@ -1171,6 +1171,9 @@ pub async fn handle_dispatch(
                                             json!({ "kind": "disconnected", "data": { "guild_id": k, "dm": true } }),
                                         );
                                     }
+                                    // Цель автовосстановления больше неактуальна.
+                                    state.voice_target.lock().unwrap().take();
+                                    state.voice_rejoin_at.lock().unwrap().take();
                                 }
                             }
                         }
@@ -1226,6 +1229,9 @@ pub async fn handle_dispatch(
                                 state.voice_handshake.lock().unwrap().remove(&gid);
                                 state.voice_sessions.lock().unwrap().remove(&gid);
                                 state.voice_desired.lock().unwrap().remove(&gid);
+                                // Цель автовосстановления больше неактуальна.
+                                state.voice_target.lock().unwrap().take();
+                                state.voice_rejoin_at.lock().unwrap().take();
                                 let mut tasks = state.voice_tasks.lock().await;
                                 if let Some((handle, token)) = tasks.remove(&gid) {
                                     token.cancel();
@@ -1273,6 +1279,39 @@ pub async fn handle_dispatch(
                 }
             }
             state.voice_notify.notify_one();
+            let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
+        }
+
+        // Go Live-стрим создан (нами или соседом по каналу). Payload несёт
+        // только stream_key/rtc_*/viewer_ids — гильдию, канал и владельца
+        // даёт только сам ключ:
+        //   guild:{guild_id}:{channel_id}:{owner_id}
+        //   call:{channel_id}:{owner_id}
+        // (формат discord.py-self, StreamKey.__str__). Парсим и досылаем
+        // отдельными полями — без них UI не понимает, чей стрим и где он
+        // (user_id в payload не приходит, а ключ кончается на userId
+        // без двоеточия — includes(":uid:") его не находил).
+        "STREAM_CREATE" => {
+            let mut d = d;
+            if let Some(key) = d["stream_key"].as_str().map(str::to_string) {
+                let parts: Vec<&str> = key.split(':').collect();
+                let parsed: (Option<&str>, Option<&str>, Option<&str>) = match parts.as_slice() {
+                    ["guild", g, c, u] => (Some(g), Some(c), Some(u)),
+                    ["call", c, u] => (None, Some(c), Some(u)),
+                    _ => (None, None, None),
+                };
+                if let (Some(c), Some(u)) = (parsed.1, parsed.2) {
+                    if let Some(obj) = d.as_object_mut() {
+                        if let Some(g) = parsed.0 {
+                            obj.insert("guild_id".into(), json!(g));
+                        }
+                        obj.insert("channel_id".into(), json!(c));
+                        obj.insert("user_id".into(), json!(u));
+                        obj.insert("type".into(), json!("screen"));
+                        tracing::info!("gateway: STREAM_CREATE {key} (владелец {u}, канал {c})");
+                    }
+                }
+            }
             let _ = app.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 

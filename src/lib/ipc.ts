@@ -61,9 +61,9 @@ export interface Backend {
   /** op 4 — войти/выйти из войс-канала; guildId = null → звонок в ЛС/группе;
    *  channelId = null → покинуть. selfVideo — флаг камеры. */
   joinVoice(guildId: string | null, channelId: string | null, selfMute: boolean, selfDeaf: boolean, selfVideo?: boolean): Promise<void>;
-  /** op 18 — начать трансляцию экрана/камеры (экспериментально). */
-  startStream(streamType: 'screen' | 'camera', guildId: string, channelId: string): Promise<void>;
-  /** op 20 — прекратить трансляцию. */
+  /** op 18 — начать Go Live-трансляцию экрана (type guild/call — бэкенд). */
+  startStream(guildId: string | null, channelId: string): Promise<void>;
+  /** op 19 — прекратить трансляцию. */
   stopStream(streamKey: string): Promise<void>;
   /** op 22 — пауза трансляции. */
   pauseStream(streamKey: string, paused: boolean): Promise<void>;
@@ -259,8 +259,8 @@ class TauriBackend implements Backend {
     await this.invoke('voice_loopback', { enabled });
   }
 
-  async startStream(streamType: 'screen' | 'camera', guildId: string, channelId: string): Promise<void> {
-    await this.invoke('start_stream', { streamType, guildId, channelId });
+  async startStream(guildId: string | null, channelId: string): Promise<void> {
+    await this.invoke('start_stream', { guildId, channelId });
   }
 
   async stopStream(streamKey: string): Promise<void> {

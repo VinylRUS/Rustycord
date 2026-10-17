@@ -786,6 +786,24 @@ pub async fn join_voice(
             .unwrap()
             .insert(key.clone(), desired);
     }
+    // Помним «где мы должны быть»: автовосстановление голоса после
+    // внешней смерти медиа-WS (смена gateway-сессии, миграция сервера)
+    // повторяет op4 по этой цели. Выход (channel_id = None) цель снимает.
+    {
+        let mut target = state.voice_target.lock().unwrap();
+        match (&guild_id, &channel_id) {
+            (g, Some(c)) => {
+                *target = Some(crate::state::VoiceTarget {
+                    guild_id: g.clone(),
+                    channel_id: c.clone(),
+                    self_mute,
+                    self_deaf,
+                    self_video,
+                })
+            }
+            _ => *target = None,
+        }
+    }
     tx.send(GatewayCommand::VoiceStateUpdate {
         guild_id,
         channel_id,
@@ -852,19 +870,20 @@ pub fn get_voice_dsp_status(state: State<'_, Arc<AppState>>) -> DspStatus {
     }
 }
 
-/// op 18 — начать трансляцию экрана/камеры в голосовом канале.
-/// Экспериментально: сервер создаст стрим (dispatch STREAM_CREATE с ключом),
-/// передача видео-потока появится в следующем релизе.
+/// op 18 — начать Go Live-трансляцию ЭКРАНА в голосовом канале/звонке.
+/// Сервер создаст стрим и разошлёт dispatch STREAM_CREATE с stream_key;
+/// передача самого видео-потока появится с RTP-стеком (ближайшие релизы),
+/// пока — корректный сигналинг + индикатор для участников.
 #[tauri::command]
 pub async fn start_stream(
     state: State<'_, Arc<AppState>>,
-    stream_type: String,
-    guild_id: String,
+    guild_id: Option<String>,
     channel_id: String,
 ) -> Result<(), String> {
-    if stream_type != "screen" && stream_type != "camera" {
-        return Err("stream_type должен быть screen или camera".into());
-    }
+    // op 18: type = "guild" (гильдия) | "call" (ЛС/группа) — выводит
+    // бэкенд по наличию guild_id. Сервер разошлёт dispatch STREAM_CREATE
+    // с stream_key — по нему останавливаем (op 19) и ставим на паузу (op 22).
+    // Камера сюда НЕ относится: она живёт в op 4 (self_video).
     let tx = state
         .gateway_tx
         .read()
@@ -872,7 +891,6 @@ pub async fn start_stream(
         .clone()
         .ok_or("Gateway не подключён")?;
     tx.send(GatewayCommand::StreamCreate {
-        stream_type,
         guild_id,
         channel_id,
     })
@@ -881,7 +899,9 @@ pub async fn start_stream(
     Ok(())
 }
 
-/// op 20 — прекратить трансляцию по stream_key (формат guild:channel:user).
+/// op 19 — прекратить трансляцию по stream_key
+/// (guild:{guild_id}:{channel_id}:{user_id} для гильдий,
+/// call:{channel_id}:{user_id} для звонков ЛС).
 #[tauri::command]
 pub async fn stop_stream(
     state: State<'_, Arc<AppState>>,

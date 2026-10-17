@@ -853,13 +853,16 @@ export class MockBackend implements Backend {
   /** Демо-ключи активных трансляций (для экспериментального UI стримов). */
   private demoStreams: string[] = [];
 
-  async startStream(streamType: 'screen' | 'camera', guildId: string, channelId: string): Promise<void> {
-    const key = `guild:${guildId}:${ME.id}:${channelId}:${streamType}`;
+  async startStream(guildId: string | null, channelId: string): Promise<void> {
+    // Ключ — как у реального Discord: guild:{gid}:{cid}:{uid} | call:{cid}:{uid}
+    const key = guildId
+      ? `guild:${guildId}:${channelId}:${ME.id}`
+      : `call:${channelId}:${ME.id}`;
     this.demoStreams.push(key);
     this.emit({
       type: 'dispatch',
       t: 'STREAM_CREATE',
-      d: { stream_key: key, guild_id: guildId, channel_id: channelId, user_id: ME.id, type: streamType, viewer_count: 0, paused: false },
+      d: { stream_key: key, guild_id: guildId ?? '', channel_id: channelId, user_id: ME.id, type: 'screen', viewer_count: 0, paused: false },
     });
   }
 

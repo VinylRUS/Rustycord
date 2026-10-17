@@ -2139,7 +2139,10 @@ export class AppStore {
         this.myVoice?.selfDeaf ?? false,
         this.myVoice?.selfVideo ?? false,
       );
-      if (joined) await this.stopLocalPreview(); // выход из войса гасит превью
+      if (joined) {
+        await this.stopMyStreams(); // выход из войса гасит Go Live
+        await this.stopLocalPreview();
+      }
     } catch (e) {
       this.toast(`Ошибка войса: ${errMsg(e)}`, 'error');
     }
@@ -2149,6 +2152,7 @@ export class AppStore {
     if (!this.backend || !this.myVoice) return;
     try {
       await this.stopLocalPreview();
+      await this.stopMyStreams(); // сервер тоже рвёт стрим с войс-сессией — но чище сразу
       await this.backend.joinVoice(
         this.myVoice.guildId || null,
         null,
@@ -2204,9 +2208,9 @@ export class AppStore {
     }
   }
 
-  /* ---------- трансляции: экран и камера (эксперимент) ---------- */
+  /* ---------- трансляции: экран (Go Live, op 18) и камера (op 4) ---------- */
 
-  /** Свои стримы — по владельцу ключа (guild:channel:user[:type]). */
+  /** Свои Go Live-стримы — по владельцу ключа (guild:{gid}:{cid}:{uid}). */
   get myStreams(): StreamInfo[] {
     return Object.values(this.streams).filter(
       (s) => s.userId === this.user?.id || s.streamKey.includes(`:${this.user?.id}:`),
@@ -2222,12 +2226,25 @@ export class AppStore {
     );
   }
 
-  /** Включить/выключить показ экрана или камеры.
-   *  Локальное превью — через media-захват webview (getDisplayMedia для
-   *  экрана, getUserMedia для камеры); сигналинг — op 18/20 на gateway.
-   *  Передача видео-потока другим участникам — в разработке (RTP-стек
-   *  следующего релиза), пока это превью + стрим-индикатор для остальных. */
-  async toggleStream(kind: 'screen' | 'camera') {
+  /** Погасить свои Go Live-стримы (op 19) — при выходе из войса. */
+  private async stopMyStreams() {
+    for (const s of this.myStreams) {
+      try {
+        await this.backend?.stopStream(s.streamKey);
+      } catch {
+        /* silent */
+      }
+    }
+  }
+
+  /** Включить/выключить показ ЭКРАНА (Go Live).
+   *  Сигналинг — op 18 STREAM_CREATE (type guild/call выводит бэкенд по
+   *  guild_id) + op 19 на выключение по stream_key из dispatch STREAM_CREATE.
+   *  Локальное превью — getDisplayMedia webview. Передача видео другим
+   *  участникам появится с RTP-стеком — пока превью + LIVE-индикатор.
+   *  ВАЖНО (урок v0.10.3): экран — ЕДИНСТВЕННЫЙ потребитель op 18;
+   *  неверный type в payload рвал gateway (close 4002) и убивал звонок. */
+  async toggleStream(kind: 'screen') {
     if (!this.backend || !this.myVoice) {
       this.toast('Сначала войди в голосовой канал', 'error');
       return;
@@ -2235,19 +2252,16 @@ export class AppStore {
     const own = this.myStreams.find((s) => (s.type ?? 'screen') === kind);
     try {
       if (own) {
-        // Стоп: гасим стрим на сервере и локальный захват.
+        // Стоп: гасим стрим на сервере (op 19) и локальный захват.
         await this.backend.stopStream(own.streamKey);
         await this.stopLocalPreview();
-        this.toast(kind === 'screen' ? 'Показ экрана остановлен' : 'Камера выключена', 'info');
+        this.toast('Показ экрана остановлен', 'info');
         return;
       }
-      // Сначала локальный захват (юзер выбирает окно/экран или разрешает камеру)…
-      const stream =
-        kind === 'screen'
-          ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
-          : await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });
-      // …затем заявляем стрим на сервер (op 18).
-      await this.backend.startStream(kind, this.myVoice.guildId, this.myVoice.channelId);
+      // Сначала локальный захват (юзер выбирает окно/экран)…
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      // …затем заявляем стрим на сервере (op 18).
+      await this.backend.startStream(this.myVoice.guildId || null, this.myVoice.channelId);
       this.localPreview = stream;
       this.localPreviewKind = kind;
       // Юзер нажал «Стоп» в нативной полосе браузера — гасим и стрим.
@@ -2255,20 +2269,67 @@ export class AppStore {
         void this.stopStreamByKind(kind);
       });
       this.toast(
-        kind === 'screen'
-          ? 'Показ экрана включён (превью локальное; передача — в следующем обновлении)'
-          : 'Камера включена (превью локальное; передача — в следующем обновлении)',
+        'Показ экрана включён (превью локальное; передача — в следующем обновлении)',
         'info',
       );
     } catch (e) {
-      this.toast(
-        `Не удалось включить ${kind === 'screen' ? 'показ экрана' : 'камеру'}: ${errMsg(e)}`,
-        'error',
+      await this.stopLocalPreview();
+      this.toast(`Не удалось включить показ экрана: ${errMsg(e)}`, 'error');
+    }
+  }
+
+  /** Включить/выключить КАМЕРУ — как в оригинале: op 4 self_video,
+   *  БЕЗ op 18 (стримы — только экран; камера живёт в voice-сессии).
+   *  myVoice.selfVideo подтягивается из эха VOICE_STATE_UPDATE. */
+  async toggleCamera() {
+    if (!this.backend || !this.myVoice) {
+      this.toast('Сначала войди в голосовой канал', 'error');
+      return;
+    }
+    try {
+      if (this.myVoice.selfVideo) {
+        await this.stopLocalPreview();
+        await this.backend.joinVoice(
+          this.myVoice.guildId || null,
+          this.myVoice.channelId,
+          this.myVoice.selfMute,
+          this.myVoice.selfDeaf,
+          false,
+        );
+        this.toast('Камера выключена', 'info');
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 1280, height: 720 },
+        audio: false,
+      });
+      await this.backend.joinVoice(
+        this.myVoice.guildId || null,
+        this.myVoice.channelId,
+        this.myVoice.selfMute,
+        this.myVoice.selfDeaf,
+        true,
       );
+      this.localPreview = stream;
+      this.localPreviewKind = 'camera';
+      // Юзер нажал «Стоп» в нативной полосе — выключаем камеру (op 4).
+      stream.getVideoTracks()[0]?.addEventListener('ended', () => {
+        if (this.localPreview === stream) void this.toggleCamera();
+      });
+      this.toast('Камера включена (превью локальное; передача — в следующем обновлении)', 'info');
+    } catch (e) {
+      await this.stopLocalPreview();
+      this.toast(`Не удалось включить камеру: ${errMsg(e)}`, 'error');
     }
   }
 
   private async stopStreamByKind(kind: 'screen' | 'camera') {
+    if (kind === 'camera') {
+      // Камера гасится через op 4 — стримов для неё нет.
+      if (this.myVoice?.selfVideo) await this.toggleCamera();
+      else await this.stopLocalPreview();
+      return;
+    }
     const own = this.myStreams.find((s) => (s.type ?? 'screen') === kind);
     if (own) {
       try {

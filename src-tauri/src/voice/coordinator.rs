@@ -17,7 +17,7 @@ use songbird::{Config, ConnectionInfo};
 use tauri::Emitter;
 use tokio_util::sync::CancellationToken;
 
-use crate::state::{SharedState, VoiceHandshake, VoiceSessionHandle};
+use crate::state::{GatewayCommand, SharedState, VoiceHandshake, VoiceSessionHandle};
 use crate::voice::jitter::Mixer;
 // mic нужен в любой сборке: MicStats — телеметрия монитор-таски (в headless
 // просто не пишется никем, но тип доступен).
@@ -66,7 +66,10 @@ async fn poll_and_dial(app: &tauri::AppHandle, state: &SharedState) {
                 handle.abort();
             }
         }
-        // 3. Поднимаем новую.
+        // 3. Поднимаем новую. Поколение растёт на каждый spawn: старые
+        // DisconnectedHandler-ы по нему понимают, что их уже заменили
+        // (переход в другой канал), и не запускают авто-реджойн.
+        let gen = state.voice_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let token = CancellationToken::new();
         let guild_id = hs.guild_id.clone();
         let task = tauri::async_runtime::spawn(run_session(
@@ -74,6 +77,7 @@ async fn poll_and_dial(app: &tauri::AppHandle, state: &SharedState) {
             Arc::clone(state),
             hs,
             token.clone(),
+            gen,
         ));
         state
             .voice_tasks
@@ -89,6 +93,7 @@ async fn run_session(
     state: SharedState,
     hs: VoiceHandshake,
     cancel: CancellationToken,
+    gen: u64,
 ) {
     let guild_id = hs.guild_id.clone();
     let kind = if hs.is_dm {
@@ -96,8 +101,8 @@ async fn run_session(
     } else {
         "гильдия"
     };
-    tracing::info!("voice[songbird]: сессия ({kind}) для {guild_id}");
-    let res = voice_session(&app, &state, &hs, &cancel).await;
+    tracing::info!("voice[songbird]: сессия ({kind}) для {guild_id} (поколение {gen})");
+    let res = voice_session(&app, &state, &hs, &cancel, gen).await;
     if let Err(e) = res {
         tracing::error!("voice[songbird]: ошибка сессии: {e:#}");
         let _ = app.emit(
@@ -117,6 +122,7 @@ async fn voice_session(
     state: &SharedState,
     hs: &VoiceHandshake,
     cancel: &CancellationToken,
+    gen: u64,
 ) -> anyhow::Result<()> {
     let Some(session_id) = hs.session_id.clone() else {
         anyhow::bail!("нет session_id");
@@ -242,6 +248,8 @@ async fn voice_session(
         DisconnectedHandler {
             app: app.clone(),
             guild_id: hs.guild_id.clone(),
+            state: Arc::clone(state),
+            gen,
         },
     );
 
@@ -507,6 +515,10 @@ impl EventHandler for ConnectedHandler {
 struct DisconnectedHandler {
     app: tauri::AppHandle,
     guild_id: String,
+    state: SharedState,
+    /// Поколение сессии: если она уже заменена (переход в другой канал),
+    /// авто-реджойн не запускаем.
+    gen: u64,
 }
 
 #[async_trait::async_trait]
@@ -517,6 +529,66 @@ impl EventHandler for DisconnectedHandler {
             "discord://voice",
             json!({ "kind": "disconnected", "data": { "guild_id": self.guild_id } }),
         );
+        // Автовосстановление: пока мы «должны быть» в этом канале и нас
+        // ещё не заменили — повторяем op4, сервер пришлёт свежую пару
+        // VOICE_STATE/SERVER_UPDATE, и координатор поднимет новую сессию.
+        // Лечит класс инцидентов «шлюз пересоздал сессию → voice-сервер
+        // убил медиа-WS → звонок умер» (v0.10.3, лог 17:11).
+        let current = self.state.voice_generation.load(Ordering::SeqCst);
+        if current == self.gen {
+            schedule_voice_rejoin(&self.state, &self.guild_id);
+        }
         None
     }
+}
+
+/// Одна попытка автовосстановления не чаще раза в 10 с: повторяем op4
+/// по сохранённой цели (voice_target). Гейт по generation исключает
+/// срабатывание при штатной замене сессии, гейт по времени — шторм
+/// реджойнов, если сервер стабильно отвергает вход.
+fn schedule_voice_rejoin(state: &SharedState, session_key: &str) {
+    let target = state.voice_target.lock().unwrap().clone();
+    let Some(t) = target else { return };
+    // Цель должна совпадать с умершей сессией (гильдия или канал ЛС).
+    let key = t.guild_id.clone().or_else(|| Some(t.channel_id.clone()));
+    if key.as_deref() != Some(session_key) {
+        return;
+    }
+    {
+        let mut last = state.voice_rejoin_at.lock().unwrap();
+        if let Some(at) = *last {
+            if at.elapsed() < Duration::from_secs(10) {
+                tracing::debug!("voice[songbird]: авто-реджойн на кулдауне");
+                return;
+            }
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    let Some(tx) = state.gateway_tx.read().unwrap().clone() else {
+        return;
+    };
+    tracing::info!("voice[songbird]: авто-реджойн — повторяем op4 для {session_key}");
+    let state2 = Arc::clone(state);
+    tauri::async_runtime::spawn(async move {
+        // Небольшая пауза: за это время юзер может сам уйти, а gateway —
+        // завершить реконнект (RESUME), чтобы op4 не потерялся.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // Перепроверяем цель: юзер мог уйти или перезайти руками.
+        let still = matches!(
+            state2.voice_target.lock().unwrap().clone(),
+            Some(ref t2) if t2.guild_id == t.guild_id && t2.channel_id == t.channel_id
+        );
+        if !still {
+            return;
+        }
+        let _ = tx
+            .send(GatewayCommand::VoiceStateUpdate {
+                guild_id: t.guild_id,
+                channel_id: Some(t.channel_id),
+                self_mute: t.self_mute,
+                self_deaf: t.self_deaf,
+                self_video: t.self_video,
+            })
+            .await;
+    });
 }

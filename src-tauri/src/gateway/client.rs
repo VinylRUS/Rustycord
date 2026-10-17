@@ -594,15 +594,19 @@ async fn run_session(
                             }
                             4002 | 4005 => {
                                 // Декод нашего исходящего payload сломан /
-                                // повторный IDENTIFY. Сессия недееспособна:
-                                // RESUME на неё всегда ответит INVALID_SESSION —
-                                // сразу чистим и идём на свежий IDENTIFY.
+                                // повторный IDENTIFY. Сессия при этом
+                                // ОСТАЁТСЯ резюмебельной (официальный клиент
+                                // и discord.py-self после 4002/4005 шлют
+                                // RESUME) — session_id НЕ чистим: свежий
+                                // IDENTIFY рождал новую gateway-сессию,
+                                // voice-сервер видел чужой session_id и
+                                // убивал медиа-WS звонка (v0.10.3, «падение
+                                // при трансляции»). Если сервер отвергнет
+                                // RESUME — INVALID_SESSION(resumable=false)
+                                // с чисткой уже есть ниже (ветка op 9).
                                 // Дамп последних кадров уходит в лог: какой
                                 // кадр сломал декодирование, видно без
                                 // verbose-режима (секреты скрыты в redact).
-                                session.id = None;
-                                session.resume_url = None;
-                                session.seq = None;
                                 state.emit_status(
                                     "reconnecting",
                                     Some(format!("close {code}: {}", cf.reason)),
@@ -911,13 +915,20 @@ async fn send_command(
             .await?;
         }
         GatewayCommand::StreamCreate {
-            stream_type,
             guild_id,
             channel_id,
         } => {
-            // op 18 STREAM_CREATE — «показать экран»/«включить камеру».
-            // Сервер разошлёт dispatch STREAM_CREATE с stream_key — по нему
-            // останавливаем (op 20) и ставим на паузу (op 22).
+            // op 18 STREAM_CREATE — Go Live-трансляция экрана.
+            // `type` = префикс stream_key: "guild" (серверный войс) или
+            // "call" (звонок ЛС/группы) — 1:1 с discord.py-self (dolfies):
+            //   { "type": "guild", "guild_id": "…", "channel_id": "…" }
+            // УРОК v0.10.3: type "screen"/"camera" сервер не декодирует
+            // (protobuf enum) → close 4002 «Error while decoding payload»
+            // → gateway-реконнект с НОВОЙ сессией → voice-сервер убивал
+            // медиа-WS → «звонок падал при включении трансляции».
+            // Камера op 18 не использует вовсе — она в op 4 (self_video).
+            // preferred_region опускаем, если региона нет (null не шлём).
+            let stream_type = if guild_id.is_some() { "guild" } else { "call" };
             send_frame(
                 writer,
                 frames,
@@ -927,23 +938,25 @@ async fn send_command(
                     "d": {
                         "type": stream_type,
                         "guild_id": guild_id,
-                        "channel_id": channel_id,
-                        "preferred_region": null
+                        "channel_id": channel_id
                     }
                 }),
             )
             .await?;
-            tracing::info!("gateway: op 18 STREAM_CREATE отправлен");
+            tracing::info!("gateway: op 18 STREAM_CREATE отправлен (type={stream_type})");
         }
         GatewayCommand::StreamDelete { stream_key } => {
+            // op 19 — STREAM_DELETE. op 20 — это STREAM_WATCH (смотреть
+            // чужой стрим): до v0.10.3 их путали и «останавливали» стрим
+            // командой подписки.
             send_frame(
                 writer,
                 frames,
-                "op 20 StreamDelete",
-                &json!({ "op": 20, "d": { "stream_key": stream_key } }),
+                "op 19 StreamDelete",
+                &json!({ "op": 19, "d": { "stream_key": stream_key } }),
             )
             .await?;
-            tracing::info!("gateway: op 20 STREAM_DELETE {stream_key}");
+            tracing::info!("gateway: op 19 STREAM_DELETE {stream_key}");
         }
         GatewayCommand::StreamSetPaused { stream_key, paused } => {
             send_frame(

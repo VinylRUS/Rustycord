@@ -211,11 +211,11 @@
       </button>
       <button
         class="voice-btn"
-        class:active={app.myStreams.some((s) => s.type === 'camera')}
+        class:active={!!app.myVoice?.selfVideo}
         title="Веб-камера"
-        onclick={() => void app.toggleStream('camera')}
+        onclick={() => void app.toggleCamera()}
       >
-        <Icon name="camera" size={18} color={app.myStreams.some((s) => s.type === 'camera') ? '#23a55a' : '#b5bac1'} />
+        <Icon name="camera" size={18} color={app.myVoice?.selfVideo ? '#23a55a' : '#b5bac1'} />
       </button>
       <button class="voice-leave" title="Отключиться" onclick={() => void app.leaveVoice()}>
         <Icon name="phone-off" size={20} color="#f23f43" />

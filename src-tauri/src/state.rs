@@ -82,16 +82,20 @@ pub enum GatewayCommand {
         /// self_video — «камера включена» (как в официальном клиенте).
         self_video: bool,
     },
-    /// op 18 STREAM_CREATE — начать трансляцию (screen/camera) в голосовом
-    /// канале. Точный формат из discord-client-rs (create_op_18).
+    /// op 18 STREAM_CREATE — Go Live-трансляция экрана в голосовом канале.
+    /// Формат 1:1 с dolfies/discord.py-self (stream_create): `type` — это
+    /// ПРЕФИКС stream_key ("guild" | "call"), а не «screen»/«camera» —
+    /// неверное значение рвёт шлюз close 4002 (урок v0.10.3).
+    /// Камера op 18 НЕ использует — она живёт в op 4 (self_video).
     StreamCreate {
-        /// "screen" | "camera" — тип трансляции.
-        stream_type: String,
-        guild_id: String,
+        /// Some(guild_id) → серверный войс (type "guild");
+        /// None → звонок в ЛС/группе (type "call").
+        guild_id: Option<String>,
         channel_id: String,
     },
-    /// op 20 STREAM_DELETE — прекратить трансляцию по ключу
+    /// op 19 STREAM_DELETE — прекратить трансляцию по ключу
     /// (stream_key прилетает в dispatch STREAM_CREATE).
+    /// ВАЖНО: 19, а не 20 — op 20 это STREAM_WATCH (до v0.10.3 путали).
     StreamDelete { stream_key: String },
     /// op 22 STREAM_SET_PAUSED — пауза/снятие трансляции.
     StreamSetPaused { stream_key: String, paused: bool },
@@ -376,6 +380,20 @@ impl Cache {
     }
 }
 
+/// Где пользователь «должен быть» в войсе: последний op4-выбор с каналом.
+/// Нужен автовосстановлению сессии: если медиа-WS умер по внешней причине
+/// (смена gateway-сессии, миграция сервера), повторяем op4 — сервер пришлёт
+/// свежую пару VOICE_STATE/SERVER_UPDATE, и координатор поднимет сессию заново.
+#[derive(Debug, Clone)]
+pub struct VoiceTarget {
+    /// None → звонок в ЛС/группе.
+    pub guild_id: Option<String>,
+    pub channel_id: String,
+    pub self_mute: bool,
+    pub self_deaf: bool,
+    pub self_video: bool,
+}
+
 /// Voice handshake pieces assembled from two independent gateway events:
 /// VOICE_STATE_UPDATE (session_id, channel_id, for our own user) and
 /// VOICE_SERVER_UPDATE (token + endpoint). Once both arrive for a guild,
@@ -454,6 +472,15 @@ pub struct AppState {
     pub voice_sessions: Mutex<HashMap<String, VoiceSessionHandle>>,
     /// Last desired op4 flags (written by join_voice, read by a starting session).
     pub voice_desired: Mutex<HashMap<String, (bool, bool)>>,
+    /// Последний op4-выбор пользователя (где мы в войсе) — для
+    /// автовосстановления после внешней смерти медиа-WS.
+    pub voice_target: Mutex<Option<VoiceTarget>>,
+    /// Гейт автовосстановления: не чаще раза в 10 с (анти-шторм).
+    pub voice_rejoin_at: Mutex<Option<std::time::Instant>>,
+    /// Поколение голосовых сессий: растёт на каждый spawn в poll_and_dial.
+    /// DisconnectedHandler сверяет своё поколение — если сессию уже
+    /// заменили (переход в другой канал), авто-реджойн не срабатывает.
+    pub voice_generation: std::sync::atomic::AtomicU64,
     pub voice_notify: tokio::sync::Notify,
     /// Гильдии, на которые уже отправлены op 37 + op 14 (юзер-сессии).
     /// Дедуп: повторное открытие сервера не спамит gateway подписками.
@@ -491,6 +518,9 @@ impl AppState {
             voice_tasks: tokio::sync::Mutex::new(HashMap::new()),
             voice_sessions: Mutex::new(HashMap::new()),
             voice_desired: Mutex::new(HashMap::new()),
+            voice_target: Mutex::new(None),
+            voice_rejoin_at: Mutex::new(None),
+            voice_generation: std::sync::atomic::AtomicU64::new(0),
             voice_notify: tokio::sync::Notify::new(),
             subscribed_guilds: Mutex::new(HashSet::new()),
             voice_dsp_cfg: Arc::new(Mutex::new(DspConfig::default())),
