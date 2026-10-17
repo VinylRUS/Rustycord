@@ -403,7 +403,7 @@ export type BackendEvent =
   | { type: 'qr'; stage: QrStage; svg?: string; fingerprint?: string; token?: string; username?: string; userId?: string; message?: string }
   | {
       type: 'voice';
-      kind: 'connected' | 'disconnected' | 'speaking';
+      kind: 'connected' | 'disconnected' | 'speaking' | 'mic_level';
       data: {
         guild_id: string;
         user_id?: string;
@@ -414,6 +414,8 @@ export type BackendEvent =
         endpoint?: string;
         ip?: string;
         port?: number;
+        /** mic_level: пик своего микрофона 0..1 за последний интервал. */
+        level?: number;
       };
     }
   | { type: 'warning'; message: string };

@@ -1134,6 +1134,15 @@ pub async fn handle_dispatch(
                                         if let Some(mut driver) = handle.driver.clone() {
                                             driver.mute(vs.self_mute || vs.self_deaf);
                                         }
+                                        // Мьют-флаги — главный подозреваемый «меня не
+                                        // слышно»: mute=true шлёт тишину вместо микрофона.
+                                        tracing::info!(
+                                            "voice: op4-эхо (звонок {cid}): self_mute={} \
+                                             self_deaf={} → driver.mute({})",
+                                            vs.self_mute,
+                                            vs.self_deaf,
+                                            vs.self_mute || vs.self_deaf
+                                        );
                                     }
                                 }
                                 None => {
@@ -1199,6 +1208,15 @@ pub async fn handle_dispatch(
                                     if let Some(mut driver) = handle.driver.clone() {
                                         driver.mute(vs.self_mute || vs.self_deaf);
                                     }
+                                    // Мьют-флаги — главный подозреваемый «меня не слышно»:
+                                    // mute=true шлёт тишину вместо микрофона.
+                                    tracing::info!(
+                                        "voice: op4-эхо (гильдия {gid}): self_mute={} \
+                                         self_deaf={} → driver.mute({})",
+                                        vs.self_mute,
+                                        vs.self_deaf,
+                                        vs.self_mute || vs.self_deaf
+                                    );
                                 }
                             } else if vs.channel_id.is_none() {
                                 // Выход из войса: гасим голосовую сессию.

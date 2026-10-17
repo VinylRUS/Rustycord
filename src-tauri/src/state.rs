@@ -3,7 +3,7 @@
 //! plumbing handles for the gateway task and voice sessions.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::sync::mpsc;
@@ -412,6 +412,9 @@ pub struct VoiceSessionHandle {
     /// Роль песни «микрофон»: держим, чтобы трек не завершался сам.
     #[allow(dead_code)]
     pub mic_track: Option<songbird::tracks::TrackHandle>,
+    /// Локальный тест микрофона (voice_loopback): захват → свои динамики
+    /// без Discord. Флаг читает InTap (devices.rs) в cpal-колбеке ввода.
+    pub loopback: Arc<AtomicBool>,
 }
 
 pub struct AppState {

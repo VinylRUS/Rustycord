@@ -149,6 +149,11 @@ export class AppStore {
   /* ---------- voice ---------- */
   myVoice = $state<MyVoice | null>(null);
   speaking = $state<Record<string, boolean>>({});
+  /** Уровень своего микрофона 0..1 (телеметрия Rust-я, каждые 500 мс в войсе).
+   *  Прыгает при речи — значит захват жив и звук доходит до бэка. */
+  micLevel = $state(0);
+  /** Локальный тест микрофона: свой голос в своих наушниках, минуя Discord. */
+  micLoopback = $state(false);
   /** Участники звонков в ЛС/группах: channel_id → голосовые состояния
    *  (VOICE_STATE_UPDATE с guild_id = null — как у оригинального клиента). */
   dmCalls = $state<Record<string, VoiceState[]>>({});
@@ -661,6 +666,8 @@ export class AppStore {
     this.activeChannelId = null;
     this.myVoice = null;
     this.speaking = {};
+    this.micLevel = 0;
+    this.micLoopback = false;
     this.dmCalls = {};
     this.streams = {};
     this.unread = {};
@@ -878,8 +885,8 @@ export class AppStore {
   }
 
   handleVoice(
-    kind: 'connected' | 'disconnected' | 'speaking',
-    data: { guild_id: string; user_id?: string; channel_id?: string | null; speaking?: boolean; mode?: string; endpoint?: string; ssrc?: number; ip?: string; port?: number },
+    kind: 'connected' | 'disconnected' | 'speaking' | 'mic_level',
+    data: { guild_id: string; user_id?: string; channel_id?: string | null; speaking?: boolean; mode?: string; endpoint?: string; ssrc?: number; ip?: string; port?: number; level?: number },
   ) {
     if (kind === 'connected') {
       if (this.myVoice) {
@@ -894,6 +901,12 @@ export class AppStore {
       this.toast(`Голос подключён · ${data.mode ?? 'opus'}${where}`, 'info');
     } else if (kind === 'disconnected') {
       this.toast('Голосовой канал отключён', 'info');
+      // Сессия погашена — телеметрия и лупбек больше не актуальны.
+      this.micLevel = 0;
+      this.micLoopback = false;
+    } else if (kind === 'mic_level') {
+      // Пик своего микрофона за последний интервал (клэмпим от мусора).
+      this.micLevel = Math.max(0, Math.min(1, data.level ?? 0));
     } else if (kind === 'speaking' && data.user_id) {
       const uid = data.user_id;
       this.speaking[uid] = !!data.speaking;
@@ -2134,6 +2147,19 @@ export class AppStore {
       );
     } catch {
       /* silent */
+    }
+  }
+
+  /** Локальный тест микрофона: лупбек в свои наушники, минуя Discord.
+   *  Если свой голос слышно — захват жив, проблема в передаче; если нет —
+   *  мьют в ОС/на микрофоне либо выбрано не то устройство. */
+  async setVoiceLoopback(on: boolean) {
+    if (!this.backend) return;
+    try {
+      await this.backend.voiceLoopback(on);
+      this.micLoopback = on;
+    } catch (e) {
+      this.toast(`Лупбек не переключился: ${errMsg(e)}`, 'error');
     }
   }
 

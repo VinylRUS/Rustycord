@@ -94,6 +94,7 @@ pub fn run() {
             commands::kick_member,
             commands::ban_member,
             commands::join_voice,
+            commands::voice_loopback,
             commands::start_stream,
             commands::stop_stream,
             commands::pause_stream,

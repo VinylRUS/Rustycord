@@ -106,6 +106,9 @@ export interface Backend {
 
   // voice
   joinVoice(guildId: string | null, channelId: string | null, selfMute: boolean, selfDeaf: boolean): Promise<void>;
+  /** Локальный тест микрофона: свой захват → свои наушники, минуя Discord
+   *  (диагностика «слышат ли меня»: если лупбек слышен — захват жив). */
+  voiceLoopback(enabled: boolean): Promise<void>;
 
   // tools
   parseSnowflake(id: string): Promise<SnowflakeInfo>;
@@ -240,6 +243,10 @@ class TauriBackend implements Backend {
 
   async joinVoice(guildId: string | null, channelId: string | null, selfMute: boolean, selfDeaf: boolean, selfVideo?: boolean): Promise<void> {
     await this.invoke('join_voice', { guildId, channelId, selfMute, selfDeaf, selfVideo });
+  }
+
+  async voiceLoopback(enabled: boolean): Promise<void> {
+    await this.invoke('voice_loopback', { enabled });
   }
 
   async startStream(streamType: 'screen' | 'camera', guildId: string, channelId: string): Promise<void> {

@@ -5,6 +5,7 @@
 //! микрофон и микширование приёма.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,7 +19,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::state::{SharedState, VoiceHandshake, VoiceSessionHandle};
 use crate::voice::jitter::Mixer;
-#[cfg(feature = "audio")]
+// mic нужен в любой сборке: MicStats — телеметрия монитор-таски (в headless
+// просто не пишется никем, но тип доступен).
 use crate::voice::mic;
 use crate::voice::VoiceControls;
 
@@ -154,6 +156,10 @@ async fn voice_session(
         .cloned()
         .unwrap_or((false, false));
     let controls = Arc::new(Mutex::new(VoiceControls::new(d_mute, d_deaf)));
+    tracing::info!(
+        "voice: стартовые флаги op4: self_mute={d_mute} self_deaf={d_deaf} \
+         (дальше их обновляет эхо VOICE_STATE_UPDATE — важно для driver.mute)"
+    );
 
     // ---- Приём: VoiceTick → Mixer (per-ssrc дорожки) ----
     let mixer = Arc::new(Mutex::new(Mixer::default()));
@@ -164,17 +170,22 @@ async fn voice_session(
 
     // ---- Микрофон (только с фичей audio) ----
     #[cfg(feature = "audio")]
-    let mic_pair = mic::mic_channel();
+    let (tap_writer, stream, mic_stats) = mic::mic_channel();
     #[cfg(feature = "audio")]
-    let tap = Arc::new(mic_pair.0);
-    #[cfg(feature = "audio")]
-    let stream = mic_pair.1;
+    let tap = Arc::new(tap_writer);
+    // Телеметрия тракта без фичи audio не пишется — создаём пустую,
+    // чтобы монитор-таска компилировалась и в headless-сборке.
+    #[cfg(not(feature = "audio"))]
+    let mic_stats = Arc::new(mic::MicStats::default());
+    // Локальный тест микрофона (команда voice_loopback): захват → свои
+    // динамики, минуя Discord. Флаг общий с InTap (devices.rs).
+    let loopback = Arc::new(AtomicBool::new(false));
 
     // Устройства: динамики (Mixer) + микрофон (MicTap). Guard держит живые
     // Stream'ы в отдельном std-потоке (cpal::Stream не Send на части
     // платформ) — ровно до конца сессии.
     #[cfg(feature = "audio")]
-    let _dev_guard = devices::open(&mixer, &controls, &tap);
+    let _dev_guard = devices::open(&mixer, &controls, &tap, &loopback);
 
     // ---- Driver ----
     // DecodeMode::Decode — songbird декодирует входящий opus в PCM
@@ -237,6 +248,8 @@ async fn voice_session(
     };
     #[cfg(not(feature = "audio"))]
     let mic_track: Option<songbird::tracks::TrackHandle> = None;
+    // Хэндл для монитор-таски: сам mic_track уезжает в voice_sessions.
+    let mic_probe = mic_track.clone();
 
     // Стартовый мьют (деафиен глушит микрофон, как в оригинале).
     driver.mute(d_mute || d_deaf);
@@ -248,6 +261,7 @@ async fn voice_session(
             controls: Arc::clone(&controls),
             driver: Some(driver.clone()),
             mic_track,
+            loopback: Arc::clone(&loopback),
         },
     );
 
@@ -268,8 +282,82 @@ async fn voice_session(
         anyhow::bail!("songbird connect: {e}");
     }
 
-    // ---- Жизнь сессии: до op4-выхода/замены/шатдауна ----
-    cancel.cancelled().await;
+    // ---- Жизнь сессии: монитор тракта передачи до op4-выхода/замены ----
+    // Раз в 500 мс — уровень своего микрофона в UI (kind = mic_level),
+    // раз в 10 с — телеметрия в лог: бисекция «меня не слышно» одним
+    // взглядом (захват → мост → трек songbird; мьют-флаги логирует эхо
+    // op4 в events.rs).
+    let mut meter = tokio::time::interval(Duration::from_millis(500));
+    meter.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    meter.tick().await; // первый тик мгновенный — гасим
+    let mut tick: u32 = 0;
+    let mut win_peak = 0.0f32; // пик уровня за 10-с окно
+    let mut last_in: u64 = 0;
+    let mut last_out: u64 = 0;
+    let mut last_pos = 0.0f32;
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = meter.tick() => {
+                tick += 1;
+                let peak = mic_stats.take_peak();
+                win_peak = win_peak.max(peak);
+                let _ = app.emit(
+                    "discord://voice",
+                    json!({
+                        "kind": "mic_level",
+                        "data": { "guild_id": hs.guild_id, "level": peak.clamp(0.0, 1.0) }
+                    }),
+                );
+                if tick % 20 != 0 {
+                    continue;
+                }
+                let bin = mic_stats.bytes_in.load(Ordering::Relaxed);
+                let bout = mic_stats.bytes_out.load(Ordering::Relaxed);
+                let din = bin - last_in;
+                let dout = bout - last_out;
+                let (track_desc, pos) = match &mic_probe {
+                    Some(t) => match t.get_info().await {
+                        Ok(i) => (
+                            format!("{:?}, поз. {:.1} с, громкость {:.2}", i.playing, i.position.as_secs_f32(), i.volume),
+                            i.position.as_secs_f32(),
+                        ),
+                        Err(e) => (format!("хэндл недоступен ({e:?})"), last_pos),
+                    },
+                    None => ("нет (headless/без микрофона)".to_string(), last_pos),
+                };
+                let db = if win_peak > 0.0 {
+                    20.0 * win_peak.log10()
+                } else {
+                    f32::NEG_INFINITY
+                };
+                let verdict = if din == 0 {
+                    "cpal-колбек не пишет — захват мёртв"
+                } else if win_peak < 1e-4 {
+                    "захват идёт, но сэмплы — тишина (мьют в ОС/на микрофоне?)"
+                } else if dout == 0 {
+                    "songbird не читает мост — трек стоит"
+                } else if pos - last_pos < 0.05 {
+                    "позиция трека не растёт — декодер застрял"
+                } else {
+                    "тракт жив"
+                };
+                tracing::info!(
+                    "voice: тракт передачи (10 с): захват {:.0} кБ/с, пик {:.0} дБ, \
+                     songbird читает {:.0} кБ/с, трек: {} | {}",
+                    din as f64 / 10.0 / 1024.0,
+                    db,
+                    dout as f64 / 10.0 / 1024.0,
+                    track_desc,
+                    verdict
+                );
+                last_in = bin;
+                last_out = bout;
+                last_pos = pos;
+                win_peak = 0.0;
+            }
+        }
+    }
     if let Some(handle) = state.voice_sessions.lock().unwrap().get(&hs.guild_id) {
         if let Some(t) = handle.mic_track.as_ref() {
             let _ = t.stop();

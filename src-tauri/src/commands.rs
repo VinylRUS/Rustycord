@@ -763,6 +763,12 @@ pub async fn join_voice(
         .clone()
         .ok_or("Gateway не подключён")?;
     let self_video = self_video.unwrap_or(false);
+    tracing::info!(
+        "voice: op4 → guild={:?} channel={:?} self_mute={self_mute} \
+         self_deaf={self_deaf} self_video={self_video}",
+        guild_id,
+        channel_id
+    );
     // Ключ состояния (мьют-флаги и рукопожатие): гильдия для серверного
     // войса, канал — для звонков ЛС (session_id-эхо придёт с guild_id:null
     // и ляжет под тем же ключом — см. events.rs).
@@ -788,6 +794,22 @@ pub async fn join_voice(
     })
     .await
     .map_err(es)?;
+    Ok(())
+}
+
+/// Локальный тест микрофона: свой захват → свои динамики, минуя Discord
+/// (и не влияя на передачу). Если свой голос слышно — захват жив,
+/// проблема в тракте передачи/флагах; если нет — мьют в ОС или железе.
+#[tauri::command]
+pub async fn voice_loopback(state: State<'_, Arc<AppState>>, enabled: bool) -> Result<(), String> {
+    let sessions = state.voice_sessions.lock().unwrap();
+    if sessions.is_empty() {
+        return Err("Нет активной голосовой сессии".into());
+    }
+    for (gid, h) in sessions.iter() {
+        h.loopback.store(enabled, Ordering::Relaxed);
+        tracing::info!("voice: лупбек({enabled}) для сессии {gid}");
+    }
     Ok(())
 }
 

@@ -800,6 +800,9 @@ export class MockBackend implements Backend {
     }
   }
 
+  /** Лупбек в моке недоступен (нет реального захвата) — тихий no-op. */
+  async voiceLoopback(_enabled: boolean): Promise<void> {}
+
   /** Демо-ключи активных трансляций (для экспериментального UI стримов). */
   private demoStreams: string[] = [];
 

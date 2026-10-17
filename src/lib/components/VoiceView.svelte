@@ -27,6 +27,15 @@
     <h1>{channel?.name ?? 'Голосовой канал'}</h1>
     {#if app.myVoice?.guildId === guild?.id && app.myVoice?.channelId === channelId}
       <span class="connected"><Icon name="signal" size={14} color="#23a55a" /> Подключено</span>
+      <div class="mic-test" title="Уровень своего микрофона (данные Rust-я каждые 500 мс)">
+        <div class="meter"><div class="fill" style="width: {Math.round(Math.min(1, app.micLevel) * 100)}%"></div></div>
+        <button
+          class="btn-test"
+          class:on={app.micLoopback}
+          title="Слышать свой микрофон в наушниках — локально, без Discord. Слышно себя → захват жив, проблема в передаче."
+          onclick={() => void app.setVoiceLoopback(!app.micLoopback)}
+        >{app.micLoopback ? 'Тест идёт' : 'Тест микрофона'}</button>
+      </div>
     {:else}
       <button class="btn-blurple join" onclick={() => guild && channel && void app.toggleVoice(guild.id, channel.id)}>
         Подключиться к голосу
@@ -175,6 +184,35 @@
     gap: 6px;
     color: var(--green);
     font-size: 13px;
+    font-weight: 600;
+  }
+  .mic-test {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .meter {
+    width: 72px;
+    height: 6px;
+    border-radius: 3px;
+    background: #2b2d31;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .fill {
+    height: 100%;
+    background: var(--green);
+    transition: width 80ms linear;
+  }
+  .btn-test {
+    font-size: 12px;
+    padding: 6px 10px;
+    color: var(--text-normal);
+    border-radius: var(--radius-md);
+  }
+  .btn-test:hover { background: var(--bg-secondary); }
+  .btn-test.on {
+    color: var(--green);
     font-weight: 600;
   }
   .join { font-size: 13px; padding: 8px 14px; }

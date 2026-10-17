@@ -9,6 +9,7 @@
 //! при иных возможностях устройства подключается линейный ресемплер
 //! (48k ↔ device rate) и при необходимости — миксдаун/дабмикс каналов.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -18,6 +19,10 @@ use crate::voice::jitter::Mixer;
 use crate::voice::mic::MicTap;
 use crate::voice::resample::LinearResampler;
 use crate::voice::VoiceControls;
+
+/// Псевдо-SSRC дорожки локального лупбека (тест микрофона): настоящие
+/// ssrc раздаёт медиасервер — коллизия с u32::MAX практически исключена.
+const LOOPBACK_SSRC: u32 = u32::MAX;
 
 /// Держатель живых потоков устройств.
 ///
@@ -60,6 +65,9 @@ pub fn open(
     mixer: &Arc<Mutex<Mixer>>,
     controls: &Arc<Mutex<VoiceControls>>,
     mic: &Arc<MicTap>,
+    // Локальный тест микрофона: при true захват дублируется в свой Mixer
+    // (пользователь слышит себя в наушниках, минуя Discord).
+    loopback: &Arc<AtomicBool>,
 ) -> DeviceGuard {
     // Парковка: просыпается при дропе Guard'а (закрытие канала).
     let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -69,10 +77,11 @@ pub fn open(
     let mixer = Arc::clone(mixer);
     let controls = Arc::clone(controls);
     let mic = Arc::clone(mic);
+    let loopback = Arc::clone(loopback);
 
     let handle = std::thread::spawn(move || {
         let output = open_output(&mixer, &controls);
-        let input = open_input(&mic);
+        let input = open_input(&mic, &mixer, &loopback);
         let _ = itx.send(input.is_some());
         // Stream'ы созданы, живут и будут дропнуты в этом же потоке.
         let _hold = (output, input);
@@ -288,12 +297,18 @@ fn pick_input(device: &cpal::Device) -> Option<(StreamConfig, SampleFormat)> {
 }
 
 /// Состояние колбэка ввода: устройство → моно 48k f32 → MicTap
-/// (мост в songbird: стерео-дублирование делает сам MicTap).
+/// (мост в songbird: стерео-дублирование делает сам MicTap). При
+/// включённом лупбеке тот же кадр идёт и в свой Mixer — тест микрофона.
 struct InTap {
     mic: Arc<MicTap>,
     dev_ch: usize,
     /// device-rate-моно → 48k-моно (None при 48k).
     res: Option<LinearResampler>,
+    /// Локальный лупбек: захват → свой Mixer (команда voice_loopback).
+    mixer: Arc<Mutex<Mixer>>,
+    loopback: Arc<AtomicBool>,
+    /// seq дорожки лупбека (Mixer упорядочивает кадры по seq).
+    seq: u16,
 }
 
 impl InTap {
@@ -315,11 +330,24 @@ impl InTap {
         if at48k.is_empty() {
             return;
         }
+        // Лупбек: те же кадры — в свой микшер (слышим себя в наушниках).
+        if self.loopback.load(Ordering::Relaxed) {
+            let stereo: Vec<f32> = at48k.iter().flat_map(|s| [*s, *s]).collect();
+            self.seq = self.seq.wrapping_add(1);
+            self.mixer
+                .lock()
+                .unwrap()
+                .on_frame(LOOPBACK_SSRC, self.seq, stereo);
+        }
         self.mic.push_mono(&at48k);
     }
 }
 
-fn open_input(mic: &Arc<MicTap>) -> Option<Stream> {
+fn open_input(
+    mic: &Arc<MicTap>,
+    mixer: &Arc<Mutex<Mixer>>,
+    loopback: &Arc<AtomicBool>,
+) -> Option<Stream> {
     let host = cpal::default_host();
     let device = match host.default_input_device() {
         Some(d) => d,
@@ -350,6 +378,9 @@ fn open_input(mic: &Arc<MicTap>) -> Option<Stream> {
         mic: Arc::clone(mic),
         dev_ch,
         res,
+        mixer: Arc::clone(mixer),
+        loopback: Arc::clone(loopback),
+        seq: 0,
     };
     let err_fn = |e| tracing::warn!("voice: ошибка ввода: {e}");
 
