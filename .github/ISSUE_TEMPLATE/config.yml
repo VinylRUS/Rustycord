@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 💡 Идеи и вопросы / Ideas and questions
+    url: https://github.com/VinylRUS/Rustycord/discussions
+    about: Для идей, вопросов и обсуждений используйте Discussions. / Use Discussions for ideas, questions and discussions.
+  - name: 🔒 Уязвимость / Security vulnerability
+    url: https://github.com/VinylRUS/Rustycord/security/advisories/new
+    about: Сообщайте приватно, не в публичных issues. / Report privately, not in public issues.

@@ -1,0 +1,15 @@
+# Чувствительные области: изменения всегда идут через владельца проекта.
+# Проверьте пути под актуальную структуру репозитория (часть путей указана по README).
+# Sensitive areas: changes always go through the project owner.
+# Adjust paths to the current repo layout (some paths come from the README).
+
+/.github/                      @VinylRUS
+/src-tauri/tauri.conf.json     @VinylRUS
+/src-tauri/capabilities/       @VinylRUS
+/src-tauri/Cargo.toml          @VinylRUS
+/src-tauri/src/gateway/        @VinylRUS
+/src-tauri/src/rest/           @VinylRUS
+/src-tauri/src/state.rs        @VinylRUS
+/src-tauri/src/commands.rs     @VinylRUS
+/src/lib/ipc.ts                @VinylRUS
+/plugins/                      @VinylRUS

@@ -1,628 +1,149 @@
-<div align="center">
-
 # 🦀 RustyCord
 
-**Неофициальный клиент Discord на Rust + Tauri + Svelte 5 — построенный на реверс-инжиниринге публичного API**
+**Лёгкий неофициальный клиент Discord на Rust + Tauri + Svelte 5.**
+Для тех, кому надоело, что мессенджер ест больше оперативки, чем среда разработки.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/VinylRUS/Rustycord/ci.yml?branch=main&label=CI&logo=github)](https://github.com/VinylRUS/Rustycord/actions/workflows/ci.yml)
-[![Dev Build](https://img.shields.io/github/actions/workflow/status/VinylRUS/Rustycord/dev-build.yml?branch=main&label=dev%20build&logo=github)](https://github.com/VinylRUS/Rustycord/actions/workflows/dev-build.yml)
 [![Release](https://img.shields.io/github/v/release/VinylRUS/Rustycord?label=релиз&logo=github)](https://github.com/VinylRUS/Rustycord/releases)
 [![Лицензия](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-`Gateway WebSocket` · `REST v10` · `Snowflake ID` · `Rate Limits` · `Voice UDP + songbird (aead_aes256_gcm)`
+🇷🇺 Русский · [🇬🇧 English](README.en.md)
 
-[Установка](#-быстрый-старт) · [Автосборка CI/CD](#-автосборка-через-github-actions) · [Реверс-разбор](#-реверс-инжиниринг-discord) · [Скриншоты](#-скриншоты) · [Roadmap](#-roadmap)
+[Зачем это](#-зачем-это) · [Цифры](#-цифры) · [Что работает](#-что-работает-а-что-нет) · [Запуск](#-запуск) · [Куда идём](#-куда-идёт-проект) · [Нужна помощь](#-нужна-помощь) · [Сообщество](#-сообщество)
 
-</div>
+> ⚠️ **Прочитайте перед запуском.** RustyCord работает на **пользовательском токене** (как Vencord/Vesktop), а это формально противоречит правилам Discord. Мы не знаем, как Discord отреагирует на конкретный аккаунт, поэтому используйте клиент на свой риск. Мы **не помогаем** с селфботами, спамом, автоматизацией от имени аккаунта и обходом защиты Discord, и этому проекту такие вещи не нужны. Подробности в [FAQ](#-faq).
 
 ---
 
-## 📜 О проекте
+## 💡 Зачем это
 
-RustyCord — экспериментальный настольный клиент Discord, который доказывает простую мысль: **для клиента не нужен Electron и 200 мегабайт**. Весь протокол Discord, который официальный клиент держит в секрете за обфусцированным JavaScript-кодом, на самом деле прекрасно документирован сообществом за 10 лет реверс-инжиниринга — и его можно переизобрести на Rust в ~10 МБ бинарника.
+Всё началось с того, что официальный клиент Discord доел почти 3 ГБ оперативки. Я увидел, как люди пересобирают пакеты Adobe и Microsoft Office на Rust с помощью нейросетей, и подумал: «чем я хуже?»
 
-Клиент работает в двух режимах:
+Так появился RustyCord: клиент без Electron, который стартует и живёт в разы легче. Но у проекта есть вторая цель, и она интереснее первой: **добавить то, что Discord мог бы сделать сам, но почему-то не делает.** Не инструменты для нарушений, а обычное удобство: чтобы пользоваться этим клиентом было не мерзко.
 
-| Режим | Что делает | Нужен вход? |
+---
+
+## 📊 Цифры
+
+| | RustyCord | Официальный Discord |
 |---|---|---|
-| **Tauri (боевой)** | Подключается к настоящему `wss://gateway.discord.gg` от **вашего аккаунта** (как официальный клиент): серверы, каналы, сообщения, войс, модерация | Да — QR-код / email+пароль / токен |
-| **Демо** | Полная симуляция Gateway на TypeScript: события, статусы, typing, войс — всё как настоящее | Нет |
+| Оперативная память | **~83 МБ** в пике (все процессы WebView2 + ядро; сам `rustycord.exe` занимает 20–30 МБ) | **~500 МБ** сразу после запуска |
 
-> ⚖️ **Честно о границах.** Начиная с v0.3.0 RustyCord — это **клиент на пользовательском токене** (как Vesktop/Vencord): вход по QR через официальный remote-auth протокол или email+пароль (+2FA). Это серая зона ToS Discord: пользоваться можно, но это на ваш риск. Не автоматизируйте и не спамьте от имени аккаунта — за это банят быстро. С v0.2.0 сохранился и бот-режим (токен бота вставляется на табе «Токен»).
-
----
-
-## 🔬 Реверс-инжиниринг Discord
-
-Главная ценность проекта — не интерфейс, а **разбор протоколов**, закодированный в `src-tauri/src/`. Ниже — конспект того, что вскрыто и переизобретено.
-
-### 1. Общая архитектура
-
-Discord — это event-driven система из четырёх транспортных каналов. Официальный клиент держит их все одновременно:
-
-```mermaid
-flowchart LR
-    subgraph CLIENT["Discord / RustyCord клиент"]
-        UI["UI-слой<br/>(DOM / Svelte)"]
-        CORE["Ядро клиента<br/>(JS у Electron / Rust у нас)"]
-    end
-
-    subgraph DISCORD["Инфраструктура Discord"]
-        GW["🛰️ Gateway<br/>WebSocket-ферма"]
-        REST["🌍 REST API<br/>api/v10"]
-        CDN["🖼️ CDN<br/>cdn.discordapp.com"]
-        MEDIA["🎙️ Media Server<br/>UDP + SRTP"]
-    end
-
-    UI <-->|"IPC (invoke/listen)"| CORE
-    CORE <-->|"wss://gateway.discord.gg<br/>события в реальном времени"| GW
-    CORE -->|"HTTPS + rate limits"| REST
-    UI -->|"картинки напрямую"| CDN
-    CORE <-->|"голос: WS-сигналинг<br/>+ UDP-аудио"| MEDIA
-```
-
-Ключевой реверс-вывод: **сообщения приходят по WebSocket (push), а отправляются по REST (pull-интерфейс)**. Хочешь что-то изменить — POST/ PATCH; хочешь узнать об изменениях — слушай `DISPATCH`. Событие о твоём собственном сообщении тоже приедет по WS — поэтому клиент должен уметь дедуплицировать (мы делаем это в `app.svelte.ts → appendMessage`).
-
-### 2. Gateway WebSocket — событийное сердце
-
-Единственное соединение `wss://gateway.discord.gg/?v=10&encoding=json` несёт всё: сообщения, статусы, typing, войс-сигналинг. Протокол — 15 опкодов:
-
-| Op | Название | Направление | Смысл |
-|----|----------|-------------|-------|
-| 0 | `DISPATCH` | сервер → мы | Событие: `MESSAGE_CREATE`, `PRESENCE_UPDATE`, … |
-| 1 | `HEARTBEAT` | оба | «Я жив». Пульс с последним `seq` |
-| 2 | `IDENTIFY` | мы → сервер | Авторизация: токен + **intents** |
-| 3 | `PRESENCE` | мы → сервер | Смена собственного статуса |
-| 4 | `VOICE_STATE_UPDATE` | оба | Войти/выйти из войс-канала, mute/deafen |
-| 6 | `RESUME` | мы → сервер | Восстановить сессию после обрыва |
-| 7 | `RECONNECT` | сервер → мы | «Переподключись, пожалуйста» |
-| 8 | `REQUEST_GUILD_MEMBERS` | мы → сервер | Дай список участников (придёт чанками) |
-| 9 | `INVALID_SESSION` | сервер → мы | Сессия мертва (`d: true` = можно resume) |
-| 10 | `HELLO` | сервер → нам | Интервал пульса (`heartbeat_interval`) |
-| 11 | `HEARTBEAT_ACK` | сервер → нам | Подтверждение пульса |
-| 12–14 | ларп/пейлоады | редко | Ping/voice ping — не нужны обычным клиентам |
-
-Жизненный цикл соединения — конечный автомат (реализован в [`gateway/client.rs`](src-tauri/src/gateway/client.rs)):
-
-```mermaid
-stateDiagram-v2
-    [*] --> Connecting: connect_async()
-    Connecting --> Identifying: HELLO (op 10)
-    Identifying --> Connected: READY
-    Identifying --> Connecting: INVALID_SESSION (d=false)
-    Connected --> Connected: DISPATCH / HEARTBEAT ⇄ ACK
-    Connected --> Resuming: обрыв / RECONNECT / нет ACK
-    Resuming --> Connected: RESUME → недостающие события
-    Resuming --> Connecting: INVALID_SESSION (d=false)
-    Connected --> Connecting: close 4014 (intents)
-    Connecting --> [*]: close 4004 (токен)
-```
-
-Три тонкости, которые узнаёшь только при реверсе:
-
-1. **Heartbeat-интервал диктует сервер** в `HELLO` (обычно ~41 250 мс). Если два пульса подряд не получают `HEARTBEAT_ACK` — соединение «зомби», надо переподключаться. Мы отслеживаем флаг `acked`.
-2. **RESUME спасает от потери событий**: `session_id` + последний `seq` + `resume_gateway_url` (отдельный URL из `READY`!) — и сервер досылает всё, что случилось за простой.
-3. **Intents — это подписка на события**. Битовая маска в `IDENTIFY`. Три «привилегированных» бита (`GUILD_MEMBERS`, `GUILD_PRESENCES`, `MESSAGE_CONTENT`) надо включать руками в Developer Portal. Наш клиент при close-коде 4014 **деградирует изящно**: перезапускается без привилегированных интентов и показывает предупреждение, вместо того чтобы упасть. (С v0.3.0 клиент работает от юзер-аккаунта, которому эти биты доступны без аппрува — маска 0x1FFFF.)
-
-Полная последовательность подключения:
-
-```mermaid
-sequenceDiagram
-    participant C as RustyCord (Rust)
-    participant G as Gateway (wss://gateway.discord.gg)
-    Note over C: GET /gateway/bot → адрес + лимиты
-    C->>G: WebSocket handshake (?v=10&encoding=json)
-    G-->>C: op 10 HELLO { heartbeat_interval: 41250 }
-    C->>G: op 2 IDENTIFY { token, intents: 46979, properties }
-    loop каждые 41.25 c
-        C->>G: op 1 HEARTBEAT { d: seq }
-        G-->>C: op 11 HEARTBEAT_ACK
-    end
-    G-->>C: op 0 READY { user, session_id, resume_gateway_url }
-    G-->>C: op 0 GUILD_CREATE × N (серверы пользователя)
-    C->>G: op 8 REQUEST_GUILD_MEMBERS { query: "", limit: 0 }
-    G-->>C: op 0 GUILD_MEMBERS_CHUNK × K
-    G-->>C: op 0 MESSAGE_CREATE / PRESENCE_UPDATE / TYPING_START / …
-```
-
-### 3. Snowflake — время, спрятанное в ID
-
-Каждый ID в Discord — 64-битное число, в котором зашит момент создания объекта. Поэтому API **не шлёт поле `timestamp`** в сообщениях: клиент сам декодирует его из ID. Именно так работает `formatStamp()` в нашем фронтенде.
-
-| Биты | Поле | Что означает |
-|------|------|--------------|
-| 63–22 (42 бита) | `timestamp` | Миллисекунды с **эпохи Discord** = `2015-01-01T00:00:00Z` (1420070400000) |
-| 21–17 (5 бит) | `worker_id` | Номер воркера, сгенерировавшего ID |
-| 16–12 (5 бит) | `process_id` | Номер процесса |
-| 11–0 (12 бит) | `increment` | Счётчик внутри процесса (за миллисекунду) |
-
-```rust
-// src-tauri/src/snowflake.rs — вся магия в одной строке
-let timestamp_ms = ((snowflake >> 22) as i64) + 1_420_070_400_000;
-let worker_id    = (snowflake >> 17) & 0x1f;
-let process_id   = (snowflake >> 12) & 0x1f;
-let increment    = snowflake & 0xfff;
-```
-
-В приложении есть **инспектор снежинок** (шестерёнка → «Инспектор Snowflake»): вставь любой ID — увидишь дату создания, воркера, процесс и инкремент. Парсер работает дважды: на Rust (боевой режим) и на BigInt (демо).
-
-### 4. REST API и Rate Limits
-
-Discord — один из немногих API, где лимиты **самоописываемые**: каждый ответ несёт заголовки, по которым клиент может заранее притормозить, не дожидаясь 429.
-
-| Заголовок | Смысл |
-|-----------|-------|
-| `X-RateLimit-Bucket` | ID бакета (лимиты вешаются на **маршрут**, не на URL) |
-| `X-RateLimit-Remaining` | Сколько запросов осталось в окне |
-| `X-RateLimit-Reset-After` | Сколько секунд до сброса окна |
-| `X-RateLimit-Global` | `true` — глобальный лимит (50 req/s на бота), пауза всему |
-
-Наш клиент ([`rest/client.rs`](src-tauri/src/rest/client.rs)) строит карту `маршрут → бакет → {remaining, reset_at}` и **спит до сброса до** отправки запроса:
-
-```mermaid
-flowchart TD
-    A["Запрос: POST /channels/123/messages"] --> B{"Бакет исчерпан?<br/>(remaining ≤ 0, now < reset_at)"}
-    B -->|Да| S["sleep(reset_at − now)"] --> C
-    B -->|Нет| C["Отправляем"]
-    C --> D{"Ответ"}
-    D -->|200/204| E["Обновляем бакет из заголовков<br/>отдаём результат"]
-    D -->|429| F["sleep(retry_after)"] --> C
-    D -->|401| G["«Неверный токен» — понятная ошибка"]
-```
-
-Реверс-нюанс: в ключе маршрута «мажорные» ID (первый после `channels/` / `guilds/`) сохраняются, а все остальные снежинки схлопываются в `{id}` — лимит один на все сообщения внутри канала.
-
-### 5. Клиент изнутри: Electron vs Tauri
-
-Официальный Discord — это Chromium-браузер с бандлом JS, общающийся с нативными модулями через IPC. RustyCord повторяет **архитектуру** (веб-UI + нативное ядро + IPC), но меняет движок:
-
-| | Discord (Electron) | RustyCord (Tauri 2) |
-|---|---|---|
-| Движок UI | Свой Chromium + Node.js | Системный WebView (WebKitGTK / WebView2 / WKWebView) |
-| Ядро протокола | Обфусцированный JavaScript | Читаемый **Rust** (tokio + tokio-tungstenite) |
-| Размер бинаря | ~200 МБ | **~10 МБ** |
-| Память в простое | ~400–600 МБ | ~80–150 МБ |
-| IPC | `ipcMain/ipcRenderer` (JSON) | `invoke()/listen()` (JSON, zero-copy ближе) |
-| Локальный кэш | IndexedDB (LevelDB) | `RwLock<HashMap>` в памяти |
-| Heartbeat, resume, rate limits | JS-таймеры | Rust-таски tokio (не задушит GC-пауза) |
-
-IPC-контракт у нас один и тот же в обоих мирах — `src/lib/ipc.ts` — а за ним скрывается либо Tauri-команда, либо демо-мок. Фронтенд вообще не знает, какой бэкенд под ним живёт.
-
-### 6. Голосовой протокол — самое красивое
-
-Голос — единственная часть Discord, где WebSocket не главный. Это **трёхсторонний танец**: главный Gateway (сигналинг) → голосовой WebSocket (управление) → чистый UDP (аудио). С v0.5 протокольную часть ведёт **[songbird](https://github.com/serenity-rs/songbird) 0.6** — тот же движок, на котором работают музыкальные боты serenity (миллионы инстансов): рукопожатие, NAT, шифрование, jitter-буфер и кодек (координатор сессии — [`voice/coordinator.rs`](src-tauri/src/voice/coordinator.rs), микрофонный мост — [`voice/mic.rs`](src-tauri/src/voice/mic.rs)):
-
-```mermaid
-sequenceDiagram
-    participant C as RustyCord
-    participant G as Главный Gateway
-    participant S as songbird Driver
-    participant U as Media UDP
-
-    C->>G: op 4 VOICE_STATE_UPDATE { channel_id }
-    G-->>C: VOICE_STATE_UPDATE (свой, с session_id)
-    G-->>C: VOICE_SERVER_UPDATE { token, endpoint }
-    Note over C,S: координатор собирает пару событий → ConnectionInfo
-
-    C->>S: driver.connect(ConnectionInfo)
-    S->>U: WebSocket + IDENTIFY + IP discovery (NAT)
-    S->>U: SELECT_PROTOCOL + SESSION_DESCRIPTION
-    S-->>C: CoreEvent::DriverConnect
-
-    loop пока в канале
-        S-->>C: CoreEvent::VoiceTick (PCM 48 кГц всех говорящих)
-        S-->>C: CoreEvent::SpeakingStateUpdate (ssrc↔user, индикация)
-        S-->>C: CoreEvent::ClientDisconnect (ушёл участник)
-        C->>S: driver.mute(true/false) — эхо op4 от сервера
-    end
-```
-
-Что здесь реверс-жемчужин:
-
-- **IP discovery** — домашний NAT-обход: клиент шлёт 74-байтный пакет `[0x1][len=70][ssrc][нули]`, а сервер возвращает его же снаружи — с реальным IP:port. STUN не нужен (делает songbird).
-- **Шифрование — актуальные режимы `aead_aes256_gcm` / `xchacha20`**: устаревший `xsalsa20_poly1305` (нонс = сам RTP-заголовок) Discord отключает на новых шлюзах; songbird выбирает лучший из предложенных сервером режимов и умеет DAVE-согласование.
-- **ssrc то число, то строка** — op 2 присылает число, а op 5 ожидает строку. Классика живого протокола, о которой знают только те, кто его трогал руками.
-- **Кто говорит** — songbird отдаёт `SpeakingStateUpdate` (ssrc + user_id + микрофонный бит) и `ClientDisconnect`; по ним мы рисуем зелёные кольца вокруг аватарок.
-
-Аудиодуплекс (наш код поверх движка):
-
-- **Приём**: `CoreEvent::VoiceTick` → декодированный songbird'ом PCM → собственный микшер с SSRC-дорожками ([`voice/jitter.rs`](src-tauri/src/voice/jitter.rs): прайминг 40 мс, тишина вместо коротких потерь, ресинк вместо длинных) → cpal-вывод — WASAPI / CoreAudio / ALSA. Устройства с частотой ≠ 48 кГц подключаются через линейный ресемплер.
-- **Передача**: cpal-колбек → `MicTap` (стерео-дублирование, байт-буфер с waker'ом) → `AsyncAdapterStream` + `RawAdapter` (живой поток без длины) → songbird Input → opus → RTP → UDP. op 5 SPEAKING и heartbeat берёт на себя движок.
-- **Мьют/деафиен** едут тем же op 4; ядро слушает эхо VOICE_STATE_UPDATE и переключает `driver.mute` на лету, без переподключения сессии.
-
-Сборка `--no-default-features` даёт headless-вариант: сигналинг и голосовой движок работают, аудиоустройства не открываются.
+*Замеры автора: Windows 11, Диспетчер задач, пик при переходах по крупным серверам. Одна машина, не лабораторный бенчмарк. Если у вас получилось иначе, присылайте цифры в issues, нам важно знать.*
 
 ---
 
-## 🛠 Наша реализация
+## 🧭 Что работает, а что нет
 
-### Стек
+Мы честно говорим, в каком состоянии проект. Это ранняя стадия: он живой, но шероховатый.
 
-| Слой | Технологии |
+| Область | Статус |
 |---|---|
-| Нативное ядро | Rust 1.77+, tokio, tokio-tungstenite (rustls), reqwest, songbird 0.6 (войс: шифрование aead_aes256_gcm, jitter, opus), cpal |
-| Оболочка | Tauri 2 (системный WebView, capabilities-модель безопасности) |
-| UI | Svelte 5 (runes: `$state` / `$derived` / `$effect`), TypeScript, Vite 6 |
-| Стили | Ручной CSS с дизайн-токенами Discord (`#313338`, `#5865F2`, …) |
+| Авторизация (QR, email+пароль, токен) | ✅ работает |
+| Чат: сообщения, реакции, вложения | ✅ работает |
+| Группы и личные сообщения | ✅ работает |
+| Треды и форумы | ✅ работает |
+| Голосовые звонки | 🟡 работают, стабильность и передача микрофона нуждаются в проверке |
+| Список участников и статусы | 🟡 работают, нужны тестеры на разных серверах |
+| Стримы и демонстрация экрана | ❌ не работают |
+| Внешний вид | 🐞 много багов, нужен полный проход тестером |
 
-### Архитектура процесса
-
-```mermaid
-flowchart TB
-    subgraph WEBVIEW["WebView (Svelte 5)"]
-        STORE["AppStore<br/>$state-кэш: гильдии/каналы/<br/>сообщения/присутствия"]
-        UI["Компоненты:<br/>ServerRail · ChannelSidebar ·<br/>ChatArea · MemberList · VoiceView"]
-    end
-
-    subgraph RUST["Rust-процесс (tokio)"]
-        GW["gateway::client<br/>select! { heartbeat, rx-команды, WS }"]
-        EV["gateway::events<br/>кэш + emit в UI"]
-        RC["rest::client<br/>бакеты rate limit"]
-        VC["voice::coordinator<br/>ждёт оба события"]
-        VW["voice::ws + udp + crypto"]
-        SF["snowflake::parse"]
-    end
-
-    UI -->|"invoke(): connect, get_messages,<br/>send_message, join_voice, kick…"| RC
-    UI -->|"invoke()"| SF
-    GW --> EV
-    EV -->|"emit('discord://dispatch')"| STORE
-    STORE -->|"listen()"| UI
-    EV --> VC --> VW
-    VW -->|"emit('discord://voice')"| STORE
-```
-
-### Структура репозитория
-
-```
-rustycord/
-├── src/                          # Svelte 5 фронтенд
-│   ├── lib/
-│   │   ├── ipc.ts                #   контракт UI↔ядро (Tauri / мок)
-│   │   ├── mock.ts               #   демо-режим: симуляция Gateway на TS
-│   │   ├── stores/app.svelte.ts  #   центральное состояние на рунах
-│   │   ├── markdown.ts           #   Discord-подмножество markdown (XSS-safe)
-│   │   ├── permissions.ts        #   битовая маска прав (41 флаг)
-│   │   ├── time.ts               #   snowflake → «Сегодня в 14:32»
-│   │   └── components/           #   15 UI-компонентов
-│   └── app.css                   #   дизайн-токены Discord
-├── src-tauri/
-│   ├── src/
-│   │   ├── gateway/              #   опкоды, heartbeat, RESUME, chunking, op 37/14
-│   │   ├── rest/                 #   модели v10 + rate-limit-клиент
-│   │   ├── voice/                #   songbird-движок: coordinator (сессии),
-│   │   │                         #   mic (мост cpal→Input), jitter-микшер, devices (cpal)
-│   │   ├── snowflake.rs          #   декодер ID
-│   │   ├── state.rs              #   кэш + каналы задач
-│   │   └── commands.rs           #   17 Tauri-команд
-│   ├── icons/                    #   PNG + ICO + ICNS (все платформы)
-│   └── tauri.conf.json
-├── .github/workflows/            #   ci · dev-build · release
-├── CHANGELOG.md                  #   история версий (Keep a Changelog)
-└── docs/screenshots/             #   живые скриншоты
-```
+**Платформы.** Руками проверено только на **Windows 11**. Windows 10, Linux и macOS собираются в CI, но запускались ли они по-настоящему, никто не знает. Если у вас такая система, вы для нас золото 👇
 
 ---
 
-## 📸 Скриншоты
+## 🚀 Запуск
 
-| Логин | Чат с ролями и реакциями |
-|---|---|
-| ![Логин](docs/screenshots/01-login.png) | ![Чат](docs/screenshots/02-chat.png) |
+### Готовые сборки
 
-| Реверс-канал с код-блоками | Голосовой канал |
-|---|---|
-| ![Реверс](docs/screenshots/03-reverse-channel.png) | ![Войс](docs/screenshots/04-voice.png) |
+Скачайте установщик на странице [Releases](https://github.com/VinylRUS/Rustycord/releases). *(Если раздел пуст, сборки пока выкладываются не для всех релизов, тогда собирайте из исходников.)*
 
-| Личные сообщения | Инспектор Snowflake |
-|---|---|
-| ![DM](docs/screenshots/05-dm-home.png) | ![Snowflake](docs/screenshots/07-snowflake.png) |
+### Из исходников
 
-| Друзья (v0.4.0) | ЛС первым (v0.4.0) |
-|---|---|
-| ![Друзья](docs/screenshots/16-friends-page.png) | ![Первое сообщение](docs/screenshots/17-dm-first-message.png) |
-
-| Эмодзи-пикер (v0.5.0) | Поиск эмодзи (v0.5.0) |
-|---|---|
-| ![Пикер](docs/screenshots/20-emoji-picker.png) | ![Поиск](docs/screenshots/23-emoji-search.png) |
-
-Все скриншоты сняты в демо-режиме (`npm run dev` → «Открыть демо-режим») — тот же UI, что и в бою.
-
----
-
-## 🚀 Быстрый старт
-
-### Вариант А. Готовые сборки (без Rust на машине)
-
-Скачай установщик для своей ОС со страницы [**Releases**](https://github.com/VinylRUS/Rustycord/releases) —
-свежий тег собирается автоматически на трёх платформах (см. [CI/CD](#-автосборка-через-github-actions)):
-
-| Платформа | Файл |
-|---|---|
-| **Windows 10/11** | `RustyCord_0.1.0_x64-setup.exe` (NSIS) или `.msi` |
-| **macOS** (Intel + Apple Silicon) | `RustyCord_0.1.0_universal.dmg` |
-| **Linux** | `.AppImage`, `.deb`, `.rpm` |
-
-> Dev-сборки последнего main — на вкладке Actions → [Dev Build](https://github.com/VinylRUS/Rustycord/actions/workflows/dev-build.yml) → артефакты запуска.
-
-### Вариант Б. Сборка из исходников
-
-#### Шаг 0. Зависимости
-
-- [Node.js](https://nodejs.org) ≥ 20 и npm
-- [Rust](https://rustup.rs) ≥ 1.77 (stable)
-- Системные библиотеки Tauri:
-  - **Ubuntu/Debian**: `sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libopus-dev cmake`
-  - **macOS**: Xcode Command Line Tools
-  - **Windows**: [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) (уже есть в Win 11) + [MSVC Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
-
-#### Шаг 1. Вход в аккаунт (как в оригинале)
-
-Ничего создавать не нужно — с v0.3.0 вход выполняется от **вашего аккаунта**:
-
-- **QR-код** (рекомендуется): открой приложение Discord на телефоне → **Настройки → Устройства → Сканировать QR-код** — и вы в клиенте. Протокол remote-auth **v2** (RSA-OAEP-SHA256, эхо-nonce, обмен ticket → токен через `POST /users/@me/remote-auth/login`, heartbeat по интервалу из hello) реализован на Rust и проверен против живого шлюза; fingerprint сверяется с SHA-256 вашего ключа (защита от подмены), токен расшифровывается только на вашем устройстве.
-- **Email + пароль**: как на discord.com/login; при включённой 2FA запросит код аутентификатора (TOTP). Если Discord попросит капчу (новый IP) — откроется окно подтверждения на discord.com: оно скрыто, пока проверка не понадобится, и решает капчу в том же браузерном контексте, где родился вызов (rqdata Enterprise привязан к контексту сессии).
-- **Токен сессии**: вставка токена вручную (например, для отладки; поддерживает и бот-токены).
-
-Вход по QR не создаёт новую «сессию приложения» в списке устройств — серверы видят обычный веб-клиент (совпадающие X-Super-Properties, браузерный User-Agent, актуальный client_build_number тянется с discord.com автоматически).
-
-#### Шаг 2. Собери и запусти
+Нужны: [Node.js](https://nodejs.org) ≥ 20, [Rust](https://rustup.rs) ≥ 1.77 и системные библиотеки Tauri ([список для вашей ОС](CONTRIBUTING.md#как-собрать-и-запустить)).
 
 ```bash
-git clone https://github.com/VinylRUS/Rustycord.git && cd Rustycord   # или распакуй архив
-npm install                        # фронтенд-зависимости
-npm run tauri dev                  # первый запуск скачает crate'ы (~2-3 мин) и откроет окно
+git clone https://github.com/VinylRUS/Rustycord.git && cd Rustycord
+npm install
+npm run tauri dev      # откроет окно приложения
 ```
 
-Вставь токен → «Войти». Через секунду увидишь свой сервер, каналы и сообщения в живом режиме.
-
-**Демо без входа**: `npm run dev` → открой `http://localhost:1420` → кнопка «Открыть демо-режим». Или в собранном приложении — если запустить UI без Rust-ядра.
-
-#### Шаг 3. Продакшен-сборка
-
-```bash
-npm run tauri build                # бинарь + инсталлер в src-tauri/target/release/bundle/
-```
+Демо без входа в аккаунт: `npm run dev` и откройте `http://localhost:1420`.
 
 ---
 
-## 🏭 Автосборка через GitHub Actions
+## 🛠 Что внутри
 
-Репозиторий готов к «пуш-и-забудь»: три workflow закрывают весь цикл — от проверки кода до готовых установщиков.
+- **Ядро:** Rust, tokio, tokio-tungstenite (Gateway), reqwest (REST), songbird (голос), cpal (аудиоустройства).
+- **Оболочка:** Tauri 2, системный WebView вместо Chromium.
+- **Интерфейс:** Svelte 5 + TypeScript.
+- **Плагины:** JS-файлы в духе Vencord (см. [`plugins/`](plugins)).
 
-| Workflow | Триггер | Что делает |
-|---|---|---|
-| [`ci.yml`](.github/workflows/ci.yml) | push / PR | `svelte-check` + production-сборка фронтенда, `cargo fmt --check`, `cargo clippy -D warnings` и `cargo test` на Linux/macOS/Windows |
-| [`dev-build.yml`](.github/workflows/dev-build.yml) | push в `main` | Собирает установщики всех трёх платформ и выкладывает как артефакты запуска (без релиза) |
-| [`release.yml`](.github/workflows/release.yml) | тег `v*` | Проверяет консистентность версий → собирает → создаёт **черновик GitHub Release** со всеми файлами |
-
-### Как выпустить релиз
-
-```bash
-# 1. Обнови version сразу в трёх местах:
-#    package.json · src-tauri/tauri.conf.json · src-tauri/Cargo.toml
-# 2. Опиши изменения в CHANGELOG.md
-# 3. Тегни и запушь:
-git tag v0.2.0
-git push origin v0.2.0
-# → Actions соберёт всё и создаст draft-релиз — останется нажать Publish
-```
-
-Джоба `check-version` не даст выпустить релиз, если тег и версии в манифестах расходятся — классическая ошибка «забыл бампнуть» исключена на уровне CI.
-
-### Конвейер сборки
-
-```mermaid
-flowchart LR
-    subgraph on_push["push / pull request"]
-        A["⚡ CI<br/>svelte-check + vite build"] --> B["🎨 rustfmt"]
-        A --> C["🔍 clippy + test<br/>linux · macos · windows"]
-    end
-
-    subgraph on_main["push в main"]
-        D["📦 Dev Build<br/>3 платформы → artifacts"]
-    end
-
-    subgraph on_tag["тег v*"]
-        E["✅ check-version<br/>тег = 3 манифеста"] --> F["🏗 Сборка<br/>macos universal · ubuntu · windows"] --> G["🏷 Draft GitHub Release<br/>dmg · AppImage · deb · rpm<br/>exe · msi"]
-    end
-
-    B -.->|merge в main| D
-    D -.->|git tag v0.2.0| E
-    C -.->|зелёный CI обязателен| F
-
-    style E fill:#3ba55d,color:#fff
-    style G fill:#5865F2,color:#fff
-    style D fill:#faa81a,color:#1e1f22
-```
-
-Матрица сборки (все флаги репозитория — Rust cache через `swatinem/rust-cache`, Node 22):
-
-- **macOS-latest** — один универсальный `.dmg` (Apple Silicon + Intel) через `--target universal-apple-darwin`
-- **ubuntu-latest** — `.deb` + `.rpm` + `.AppImage` (webkit2gtk-4.1 из apt)
-- **windows-latest** — NSIS `-setup.exe` + `.msi` (WebView2 подхватывается автоматически)
-
-<details>
-<summary><b>Автообновления приложения (настроено с v0.9.5)</b></summary>
-
-Начиная с v0.9.5 приложение обновляется само: при старте клиент читает
-подписанный `latest.json` из последнего релиза (`tauri-plugin-updater`),
-проверяет minisign-подпись против pubkey в `tauri.conf.json` и предлагает
-«Обновить автоматически» — скачивает, ставит и перезапускается.
-
-Что где лежит:
-
-1. **Публичный ключ** уже вшит в `src-tauri/tauri.conf.json`
-   (`plugins.updater.pubkey`) — им клиент проверяет подпись `latest.json`.
-2. **Приватный ключ** — секрет репозитория `TAURI_SIGNING_PRIVATE_KEY`
-   (сгенерирован командой `npx tauri signer generate -w rustycord-updater.key`,
-   без пароля). `release.yml` подписывает им апдейтер-артефакты
-   (`.tar.gz` + `.sig`) и через `includeUpdaterJson: true` прикладывает
-   `latest.json` к релизу.
-3. **Платформы**: Windows (NSIS/MSI), macOS (universal) и Linux
-   (только AppImage) обновляются на месте; `deb`/`rpm` — баннер со
-   ссылкой на релиз (пакетный менеджер так не умеет).
-
-Потеря приватного ключа = обновления перестанут проходить проверку
-подписи — придётся выпускать версию с новым pubkey и раздавать её
-вручную. Храни ключ бережно.
-</details>
+Разбор протокола (Gateway, op 37, голос, remote-auth) лежит в репозитории: если вас тянет в реверс, это ваша стартовая точка.
 
 ---
 
-## ✨ Возможности
+## 🔭 Куда идёт проект
 
-| Функция | Статус |
+Мы хотим развиваться **вширь**, а не просто догонять официальный клиент:
+
+- **QoL-функции, которых не хватает Discord.** Идеи для старта: закреплённые чаты поверх списка, единый список непрочитанного по всем серверам, свой порядок и группировка каналов, поиск по локальной истории. Мерило простое: функция улучшает жизнь человеку, а не делает что-то за него от имени аккаунта.
+- **Панели ботов внутри клиента (концепт).** Представьте бота для киновечера: добавили его на сервер, и в клиенте появилась панель с его возможностями, а не только слэш-команды. Идея в том, чтобы бот публиковал **декларативный манифест** (описание панелей и кнопок без исполняемого кода), а клиент сам рисовал интерфейс. Пока это набросок, обсуждайте его в [Discussions](https://github.com/VinylRUS/Rustycord/discussions).
+- **Стабильные голос и видео, стримы, нормальный внешний вид.**
+
+---
+
+## 🙋 Нужна помощь
+
+Денег у проекта нет, и платить я не могу. Что я точно могу предложить: **человеческое спасибо**, ваше имя в [CHANGELOG](CHANGELOG.md) и в списке контрибьюторов и внимательное ревью. Времени у меня мало (основная работа съедает почти всё), поэтому отвечаю обычно раз в одну-две недели.
+
+Есть несколько дверей, выбирайте свою:
+
+| Если вы… | Чем поможете |
 |---|---|
-| **Авторизация как в оригинале: QR (remote-auth v2: эхо-nonce + ticket → токен)** | ✅ v0.3.1 |
-| **Авторизация email+пароль + 2FA (TOTP)** | ✅ v0.3.0 |
-| **Пользовательская сессия: X-Super-Properties, браузерный UA, автосборка build number** | ✅ v0.3.0 |
-| **Юзер-IDENTIFY как у официального клиента: capabilities вместо intents, op 37/op 14 подписки — список серверов юзера приезжает полностью** | ✅ v0.5.0 |
-| Подключение к реальному Gateway (IDENTIFY, heartbeat, RESUME) | ✅ |
-| Серверы, категории, текстовые каналы | ✅ |
-| **Треды (type 11/12): ветки под каналами, «Обсудить в ветке» из сообщения, события THREAD_*** | ✅ v0.8.0 |
-| **Форумы (type 15): список постов, создание поста с первым сообщением** | ✅ v0.8.0 |
-| Real-time сообщения: приём/отправка/редактирование/удаление | ✅ |
-| **Реакции: тоггл (поставить/снять), эмодзи-пикер с категориями и поиском, кастомные эмодзи сервера, часто используемые** | ✅ v0.5.0 |
-| **Кто поставил реакцию: поповер со списком юзеров (hover)** | ✅ v0.8.0 |
-| Typing-индикаторы (TYPING_START + REST trigger) | ✅ |
-| Discord-markdown: **жирный**, `код`, блоки, спойлеры, упоминания | ✅ |
-| Статусы участников (online/idle/dnd/offline) + кастомные | ✅ |
-| Список участников по хойст-ролям с цветами | ✅ |
-| **Ленивый сайдбар участников (GUILD_MEMBER_LIST_UPDATE): серверный SYNC/INSERT/UPDATE/DELETE, группы+пресенсы+активности, цвет по роли** | ✅ v0.9.2 |
-| **Догрузка участников при скролле: диапазоны сотнями как onScroll официала (всегда [0,99] + видимые + overscan), replay после reconnect** | ✅ v0.9.3 |
-| **Папки серверов раскрываются в рейле (цветной столбик с шапкой и серверами) — как в оригинале** | ✅ v0.9.3 |
-| **Список «кто в сети»: union карточек и пресенсов, счётчики, офлайн с потолком** | ✅ v0.9.0 |
-| Личные сообщения (DM из READY + REST) | ✅ v0.3.0 (юзер) |
-| **Страница «Друзья»: Онлайн/Все/Ожидание/Заблокированные, заявки, блок-лист** | ✅ v0.4.0 |
-| **Написать первым в ЛС (create_dm) + вступление на сервер по приглашению** | ✅ v0.4.0 |
-| **Создание групповых ЛС (type 3) из друзей + создание своих серверов** | ✅ v0.8.0 |
-| **Капча hCaptcha (Enterprise rqdata) в окне discord.com: вход email/2FA/QR** | ✅ v0.8.4 |
-| **Звонки в ЛС и группах (op 4 guild_id:null, server_id = канал): колл-бар, баннер «Идёт звонок», мьют/деафен** | ✅ v0.9.0 |
-| **Скрытые каналы: permission_overwrites → расчёт VIEW_CHANNEL (роли + перезаписи), опустевшие категории прячутся** | ✅ v0.9.0 |
-| **Полный рейл серверов: union с GET /users/@me/guilds (все сервера + иконки), фолбэк-инициалы** | ✅ v0.9.0 |
-| **Папки серверов: protobuf user_settings_proto + legacy guild_folders (декодер в Rust), порядок и цвет папок, поповер с серверами** | ✅ v0.9.1 |
-| **Красные бейджи упоминаний на серверах/папках/ЛС + белая точка непрочитанных** | ✅ v0.9.1 |
-| **Quick Switcher (Ctrl+K): каналы/ЛС/серверы, Sublime-матчинг, стрелки/Enter/Esc** | ✅ v0.9.1 |
-| **Иконный набор Tabler Icons (MIT): 44 инлайн-иконки, единый stroke-стиль** | ✅ v0.9.1 |
-| **Протокол подписок 1:1 с официалом: op 37 БЕЗ каналов + subscribe_channel (LRU-5, [[0,99]]), буферизация до READY, replay после reconnect** | ✅ v0.9.2 |
-| **Профиль: смена аватара, био, display name (PATCH /users/@me)** | ✅ v0.8.0 |
-| Роли, профиль-карточка, расчёт permission-битов (41 флаг) | ✅ |
-| **Управление сервером: имя, каналы (CRUD), роли (цвет/права), участники (ник/роли/кик/бан), бан-лист, инвайты** | ✅ v0.3.0 |
-| **Плагины (Vencord-style): JS-файлы, события, REST-мост, CSS-инъекции** | ✅ v0.3.0 |
-| Голос: вход/выход, mute/deafen, участники, «кто говорит» | ✅ |
-| **Голосовой движок songbird: сигналинг v4/v5, современное шифрование (aead_aes256_gcm / xchacha20), jitter-буфер, opus** | ✅ v0.5.0 |
-| **Аудиодвижок: приём opus → jitter-буфер → микшер → динамики** | ✅ v0.2.0 |
-| **Аудиодвижок: микрофон → opus → RTP → UDP (мьют через driver.mute)** | ✅ v0.2.0 |
-| Инспектор Snowflake (дата создания любого ID) | ✅ |
-| Консоль протокола: сырые JSON-кадры прямо в Gateway | ✅ |
-| Демо-режим без входа (симуляция Gateway + плагинов) | ✅ только dev-браузер (в приложении скрыт, v0.9.0) |
-| Вложения файлов, эмбеды, стикеры, ответы, пины | ✅ v0.6.0 |
-| Поиск по сообщениям (REST /search) | ✅ v0.6.0 |
-| Трансляция экрана/камеры: протокол op 18/20/22 + локальное превью | 🚧 транспорт в roadmap |
+| 🦀 **пишете на Rust руками**, а не только ставите задачи нейросети | Голос и songbird, Gateway, декодеры, баги, с которыми автор не справился. Самая нужная помощь. |
+| 🧪 **тестер / QA** (код не нужен) | Пройтись по приложению, выписать баги списком с шагами и логами. Отдельный человек на эту роль очень нужен. |
+| 🎨 **пишете на Svelte или любите дизайн** | Внешний вид сейчас один большой баг. |
+| 🐧 **сидите на Linux или macOS** | Просто запустите сборку и расскажите, что сломалось. Там WebKitGTK и свой звук, и почти наверняка найдётся сюрприз. |
+| 🔬 **любите реверс протокола** | Сверка с поведением официального клиента, документация, новые находки. |
+
+С чего начать, читайте в [CONTRIBUTING.md](CONTRIBUTING.md). ИИ-код допускается, если CI зелёный, а автор понимает, что отправляет.
 
 ---
 
-## 🧩 Плагины (v0.3.0)
+## 💬 Сообщество
 
-Система в духе Vencord: плагин — обычный JS-файл-объект, который исполняется в том же WebView, что и интерфейс. Сетевые запросы идут через Rust-слой с общими rate limits и заголовками сессии. Управление: **Настройки → Плагины** (установка из кода, вкл/выкл, просмотр кода, удаление). Примеры лежат в [`plugins/`](plugins/) репозитория.
+- Discord-сервер: _[ссылка появится здесь]_
+- Telegram: _[ссылка появится здесь]_
+- Обсуждения, идеи и вопросы: [GitHub Discussions](https://github.com/VinylRUS/Rustycord/discussions)
+- Баги: [Issues](https://github.com/VinylRUS/Rustycord/issues)
+- Уязвимости: **не в публичные issues**, см. [SECURITY.md](SECURITY.md)
 
-```js
-({
-  name: 'Мой плагин',
-  version: '1.0.0',
-  author: 'ты',
-  description: 'Что делает',
-  start(api) {
-    // события: message:create / message:update / message:delete /
-    //          message:send (хук: вернуть string|false) / dispatch / ready
-    api.on('message:create', (m) => console.log(m.author.username, m.content));
+Правила общения: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Коротко: уважаем друг друга, без политики, без национальных оскорблений.
 
-    // REST-прокси (те же заголовки и rate limits, что у клиента)
-    api.rest('GET', '/users/@me').then(console.log);
+---
 
-    // CSS-инъекция (снимается при выключении плагина)
-    api.addCss('.message { letter-spacing: 0.3px; }');
+## 🧭 Принципы проекта
 
-    // поведенческие флаги: 'typing' — не отправлять «печатает…»
-    api.suppress('typing', true);
-
-    // localStorage с префиксом плагина + тосты
-    api.storage.set('counter', 1);
-    api.toast('Плагин запущен!');
-  },
-  stop(api) {}
-});
-```
-
-Хранение — `plugins/*.js` в каталоге данных приложения (`%APPDATA%/com.rustycord.app` · `~/Library/Application Support` · `~/.local/share`), плюс `plugins.json` с флагами включения и манифестами. В демо-режиме плагины работают в памяти браузера.
-
-<details>
-<summary>📋 Справочник API плагинов</summary>
-
-| Метод | Описание |
-|---|---|
-| `api.on(event, fn)` | подписка на события клиента (авто-отписка при stop) |
-| `api.rest(method, path, body?)` | REST-запрос к api/v10 (rate limits на месте) |
-| `api.addCss(css)` | инъекция `<style>` с авто-чисткой |
-| `api.suppress('typing', bool)` | подавить отправку typing-индикатора |
-| `api.storage.get/set` | изолированный localStorage плагина |
-| `api.toast(text)` | тост-уведомление |
-| `api.me()` | текущий пользователь |
-
-Событие `message:send` — хук **до** отправки: верните `string` чтобы заменить текст, `false` чтобы отменить. Событие `dispatch` доставляет сырые кадры Gateway `{t, d}` — как Vencord прокидывает flux-события.
-
-</details>
+1. Клиент создан, чтобы **улучшать** жизнь пользователей Discord, а не вредить сообществу.
+2. Никаких селфботов, массовой рассылки, автоматизации от имени аккаунта и обхода защиты Discord. Просьбы о таком закрываются без обсуждения.
+3. Никакой отправки токена и пользовательских данных куда-либо, кроме серверов Discord. PR с таким поведением отклоняется сразу.
+4. Мы честны о состоянии проекта: что работает, а что сломано, написано выше.
 
 ---
 
 ## ❓ FAQ
 
-- **Почему «У ботов нет друзей»?** Так выглядит страница для бот-аккаунта (токен бота). Войди своим аккаунтом (QR/email) — увидишь полноценную вкладку «Друзья» со заявками и статусами.
-- **Кик/бан/роли возвращают 403?** Не хватает прав или ваша роль ниже цели в иерархии — так же, как у всех.
-- **Discord просит капчу?** Это антифрод на новый IP/логин (может сработать и на email-вход, и на обмен QR-тикета). RustyCord откроет окно подтверждения на discord.com — реши капчу в нём, вход продолжится автоматически: sitekey Discord привязан к домену, а rqdata Enterprise — к контексту сессии, поэтому и виджет, и сам запрос живут в одном окне на настоящем origin (как у официального клиента). rqdata передаётся виджету отдельным вызовом `hcaptcha.setData` после рендера (опция render её молча игнорирует — токен без привязки siteverify отклоняет как invalid-response), а решение отправляется дважды — заголовками `X-Captcha-*` и полями JSON-тела (`captcha_key`/`captcha_rqtoken`/`captcha_session_id`): веб-эндпоинты Discord читают заголовки, а `remote-auth/login` (QR-вход) — тело.
-- **Токен слетел после смены пароля?** Discord сбрасывает сессии — войди заново через QR.
-- **Это законно?** Клиенты на user-токене (Vencord, Vesktop, Ripcord) живут годами; ToS это нарушает формально, но баны за обычное использование — редкость. Автоспам/скрипты от имени аккаунта = быстрый бан без разбана.
-- **Безопасно ли вставлять токен?** Токен хранится только локально (localStorage) и уходит только на discord.com. Никогда не вставляйте его в чужие программы.
+**Это законно?** Клиенты на пользовательском токене (Vencord, Vesktop и другие) существуют давно, но формально это против правил Discord. Баны за обычное использование редки, но возможны. Решение за вами.
+
+**Безопасно ли вводить токен?** Токен хранится локально (сейчас в `localStorage` WebView) и уходит только на серверы Discord. Перенос в системное хранилище (Keychain/Credential Manager/libsecret) отличная задача для контрибьютора. Не вставляйте токен в чужие программы и не показывайте логи с токеном.
+
+**Почему пользовательский токен, а не бот?** Потому что нужен полный клиентский опыт: серверы, ЛС, войс, а не только возможности бота. Режим бота при этом остался для отладки.
+
+**Discord попросил капчу.** Это антифрод. RustyCord откроет окно подтверждения на discord.com, решите её там, и вход продолжится.
 
 ---
 
-## 🧭 Roadmap
+## 📄 Лицензия и дисклеймер
 
-- [x] **Аудио-движок** (v0.2.0): cpal + libopus, полный дуплекс, jitter-буфер, энергетический VAD, ресемплер под устройства
-- [x] **Пользовательская авторизация + управление сервером + плагины** (v0.3.0)
-- [ ] **Трансляция экрана**: захват (PipeWire/XDG Desktop Portal, DXGI, ScreenCaptureKit) → VP8/H264 → тот же voice-транспорт
-- [x] Вкладка «Друзья»: relationships из READY, заявки, добавить в друзья *(v0.4.0)*
-- [ ] Адаптивная глубина jitter-буфера (сейчас фиксированный пре-ролл 40 мс)
-- [ ] Вложения файлов (drag&drop → multipart POST)
-- [ ] Рендер эмбедов и web-превью ссылок
-- [ ] Поиск по истории (REST `/channels/{id}/messages/search` для серверов с бустом… или локальный)
-- [ ] Сжатие трафика `encoding=etf` (MessagePack-альтернатива JSON)
-- [ ] Мобильная сборка (Tauri 2 умеет iOS/Android)
-
----
-
-## 🩺 Устранение неполадок
-
-| Симптом | Причина и решение |
-|---|---|
-| `cargo` не находится | Установи rustup.rs, перезапусти терминал |
-| Сборка падает на `webkit2gtk` | Пакеты из Шага 0 не установлены (Linux) |
-| Мгновенно «Токен отклонён (4004)» | Токен скопирован с пробелом или сброшен — сделай Reset Token |
-| Бесконечное «Подключаемся…» | Проверь доступ к discord.com (VPN/файрвол) |
-| Оранжевый баннер не исчезает | Смотри логи: `RUST_LOG=debug npm run tauri dev` |
-
----
-
-## ⚖️ Дисклеймер
-
-RustyCord — учебный проект для изучения архитектуры мессенджеров. Не аффилирован с Discord Inc. Discord — товарный знак Discord Inc. Клиент работает на **пользовательском токене** (как Vencord/Vesktop) — это формально нарушает ToS Discord; авторы проекта не несут ответственности за блокировку аккаунта. Токен хранится исключительно локально (`localStorage`) и передаётся только на `discord.com`. Не используйте клиент для автоматизации и спама от имени аккаунта.
-
-## 📄 Лицензия
-
-MIT — см. [LICENSE](LICENSE). Крабов при сборке не обижать. 🦀
-
-История версий — в [CHANGELOG.md](CHANGELOG.md).
-
-
-
+MIT, см. [LICENSE](LICENSE). Проект не аффилирован с Discord Inc., Discord — товарный знак Discord Inc. Авторы не отвечают за блокировку аккаунтов. Крабов при сборке не обижать. 🦀

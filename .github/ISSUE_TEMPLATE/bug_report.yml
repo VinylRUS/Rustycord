@@ -1,0 +1,65 @@
+name: 🐞 Баг-репорт / Bug report
+description: Что-то сломалось? Расскажите, мы разберёмся. / Something broke? Tell us.
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо, что нашли время! Отвечаю обычно раз в 1–2 недели.
+        **Не прикладывайте токен.** Уязвимости присылайте приватно, см. SECURITY.md.
+        Thanks for taking the time! I usually reply every 1–2 weeks. **Do not attach your token.** Report vulnerabilities privately (see SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Версия RustyCord / RustyCord version
+      placeholder: "0.9.x или коммит / or commit"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Операционная система / OS
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux
+        - macOS
+        - Другая / Other
+    validations:
+      required: true
+  - type: input
+    id: os_details
+    attributes:
+      label: Подробности об ОС / OS details
+      description: Дистрибутив и окружение (Wayland/X11), версия WebView2 и т. п. / Distro, Wayland/X11, WebView2 version, etc.
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения / Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидалось / Expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Что произошло / Actual
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Лог с RUST_LOG=debug / Log with RUST_LOG=debug
+      description: Перед отправкой удалите токен, если он попал в лог. / Remove the token before sending if it ended up in the log.
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Скриншоты и детали / Screenshots and extras
