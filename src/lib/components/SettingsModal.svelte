@@ -3,10 +3,11 @@
   import { plugins } from '../plugins/manager';
   import type { SnowflakeInfo, VoiceDspStatus } from '../types';
   import { formatDuration } from '../time';
+  import { APP_VERSION } from '../version';
   import Avatar from './Avatar.svelte';
   import Icon from './Icon.svelte';
 
-  let tab = $state<'profile' | 'connection' | 'voice' | 'plugins' | 'snowflake' | 'protocol' | 'about'>('profile');
+  let tab = $state<'account' | 'voice' | 'plugins' | 'connection' | 'tools' | 'about'>('account');
   let snowflakeInput = $state('');
   let snowflakeResult = $state<SnowflakeInfo | null>(null);
   let snowflakeError = $state('');
@@ -21,7 +22,7 @@
 
   // Черновики — при каждом открытии вкладки из живого профиля.
   $effect(() => {
-    if (tab === 'profile' && app.user) {
+    if (tab === 'account' && app.user) {
       bioDraft = app.user.bio ?? '';
       nameDraft = app.user.global_name ?? '';
     }
@@ -223,24 +224,31 @@
   <div class="backdrop" onclick={() => (app.showSettings = false)} oncontextmenu={(e) => e.preventDefault()}></div>
   <div class="modal">
     <header>
-      <h1>Настройки RustyCord</h1>
+      <h1>Настройки</h1>
       <button class="close" onclick={() => (app.showSettings = false)}>
         <Icon name="close" size={20} color="#b5bac1" />
       </button>
     </header>
 
-    <nav class="tabs">
-      <button class:active={tab === 'profile'} onclick={() => (tab = 'profile')}>Профиль</button>
-      <button class:active={tab === 'connection'} onclick={() => (tab = 'connection')}>Подключение</button>
-      <button class:active={tab === 'voice'} onclick={() => (tab = 'voice')}>Голос</button>
-      <button class:active={tab === 'plugins'} onclick={() => (tab = 'plugins')}>Плагины</button>
-      <button class:active={tab === 'snowflake'} onclick={() => (tab = 'snowflake')}>Инспектор Snowflake</button>
-      <button class:active={tab === 'protocol'} onclick={() => (tab = 'protocol')}>Протокол</button>
-      <button class:active={tab === 'about'} onclick={() => (tab = 'about')}>О проекте</button>
-    </nav>
+    <div class="body">
+      <nav class="nav">
+        <div class="nav-group">Настройки пользователя</div>
+        <button class:active={tab === 'account'} onclick={() => (tab = 'account')}>Моя учётная запись</button>
+        <button class:active={tab === 'voice'} onclick={() => (tab = 'voice')}>Голос и видео</button>
+        <button class:active={tab === 'plugins'} onclick={() => (tab = 'plugins')}>Плагины</button>
+        <div class="nav-group">Расширенные</div>
+        <button class:active={tab === 'connection'} onclick={() => (tab = 'connection')}>Подключение</button>
+        <button class:active={tab === 'tools'} onclick={() => (tab = 'tools')}>Инструменты</button>
+        <div class="nav-group">Прочее</div>
+        <button class:active={tab === 'about'} onclick={() => (tab = 'about')}>О RustyCord</button>
+        <div class="nav-spacer"></div>
+        <button class="nav-logout" onclick={() => void app.logout()}>
+          <Icon name="logout" size={16} color="#f23f43" /> Выйти из аккаунта
+        </button>
+      </nav>
 
     <div class="content scroller">
-      {#if tab === 'profile'}
+      {#if tab === 'account'}
         <section class="pane">
           <h3>Мой аккаунт</h3>
           <div class="profile-card">
@@ -273,20 +281,20 @@
           </div>
         </section>
       {:else if tab === 'connection'}
-        <div class="user-line">
-          <Avatar user={app.user} size={48} ringColor="#313338" />
-          <div>
-            <div class="big">{app.user?.global_name || app.user?.username}</div>
-            <div class="muted">{app.user ? '@' + app.user.username : ''} · {app.user?.bot ? 'bot' : 'user'}</div>
+        <section class="pane">
+          <h3>Подключение</h3>
+          <p class="hint">Состояние соединения с Discord и служебная информация для баг-репортов.</p>
+          <div class="user-line">
+            <Avatar user={app.user} size={48} ringColor="var(--bg-secondary)" />
+            <div>
+              <div class="big">{app.user?.global_name || app.user?.username}</div>
+              <div class="muted">{app.user ? '@' + app.user.username : ''}</div>
+            </div>
           </div>
-        </div>
-        <table>
-          <tbody>
-          <tr><td>Режим</td><td class="mono">{app.mode === 'mock' ? 'Демо (симуляция Gateway)' : 'Tauri → Rust core'}</td></tr>
+          <table>
+            <tbody>
           <tr><td>Статус</td><td class="mono">{app.connStage}{app.connDetail ? ` (${app.connDetail})` : ''}</td></tr>
-          <tr><td>Session ID</td><td class="mono small">{app.sessionId || '—'}</td></tr>
-          <tr><td>Gateway</td><td class="mono small">wss://gateway.discord.gg/?v={app.isBotAccount ? '10' : '9'}&amp;encoding=json</td></tr>
-          <tr><td>Гильдий в кэше</td><td class="mono">{app.guilds.length}</td></tr>
+          <tr><td>Серверов</td><td class="mono">{app.guilds.length}</td></tr>
           <tr><td>Логи</td><td class="mono small" title={logPath}>{logPath || '…'}</td></tr>
           </tbody>
         </table>
@@ -297,20 +305,13 @@
             </button>
           </div>
         {/if}
-        <div class="row">
-          <button class="btn-blurple" onclick={() => void app.logout()}>
-            <span style="display:inline-flex;align-items:center;gap:6px">
-              <Icon name="logout" size={16} color="#fff" /> Выйти из аккаунта
-            </span>
-          </button>
-        </div>
+        </section>
       {:else if tab === 'voice'}
         <section class="pane">
           <h3>Обработка микрофона</h3>
           <p class="hint">
-            Путь сигнала: микрофон → DC-блокер → шумоподавление (STFT + винеровский гейн)
-            → автоусиление → лимитер → Opus. Всё считается в Rust-колбеке захвата,
-            настройки применяются на лету — без перезахода в канал.
+            Шумоподавление и автогромкость работают на лету — настройки
+            применяются сразу, без перезахода в канал.
           </p>
 
           <div class="dsp-row">
@@ -346,8 +347,8 @@
             <div class="dsp-main">
               <div class="dsp-name">Автоусиление (AGC)</div>
               <div class="dsp-desc">
-                Доводит речь до −20 dBFS: тихий микрофон подтягивается (до +30 dB),
-                громкий — приглушается. В паузах усиление заморожено, шум не разгоняется.
+                Доводит громкость речи до комфортного уровня: тихий микрофон
+                подтягивается, громкий — приглушается. В паузах ничего не разгоняется.
               </div>
             </div>
             <label class="switch">
@@ -359,6 +360,21 @@
               <span></span>
             </label>
           </div>
+
+          {#if app.myVoice}
+            <div class="dsp-row">
+              <div class="dsp-main">
+                <div class="dsp-name">Проверка микрофона</div>
+                <div class="dsp-desc">
+                  Услышь свой голос в наушниках — ровно таким, каким его услышат
+                  собеседники. Никуда не отправляется, только тебе.
+                </div>
+              </div>
+              <button class="mini" class:on={app.micLoopback} onclick={() => void app.setVoiceLoopback(!app.micLoopback)}>
+                {app.micLoopback ? 'Идёт проверка… стоп' : 'Слушать'}
+              </button>
+            </div>
+          {/if}
         </section>
 
         <section class="pane">
@@ -366,7 +382,7 @@
           {#if dspStatus?.active}
             <div class="meter">
               <div class="meter-head">
-                <span>Вход · до обработки</span>
+                <span>Микрофон · до обработки</span>
                 <span class="mono">{fmtDb(dspStatus.metrics.input_db)} dBFS</span>
               </div>
               <div class="meter-track">
@@ -375,7 +391,7 @@
             </div>
             <div class="meter">
               <div class="meter-head">
-                <span>Выход · уходит в Opus</span>
+                <span>Что услышат собеседники</span>
                 <span class="mono">{fmtDb(dspStatus.metrics.output_db)} dBFS</span>
               </div>
               <div class="meter-track">
@@ -385,70 +401,69 @@
             <table>
               <tbody>
               <tr><td>Детектор</td><td>{#if dspStatus.metrics.speech}<span class="vad on">речь</span>{:else}<span class="vad">тишина</span>{/if}</td></tr>
-              <tr><td>Оценка шума</td><td class="mono">{fmtDb(dspStatus.metrics.noise_db)} dBFS</td></tr>
-              <tr><td>Усиление AGC</td><td class="mono">{dspStatus.metrics.agc_db >= 0 ? '+' : ''}{fmtDb(dspStatus.metrics.agc_db)} dB</td></tr>
-              <tr><td>Шумодав снял</td><td class="mono">{fmtDb(dspStatus.metrics.ns_db)} dB</td></tr>
+              <tr><td>Усиление</td><td class="mono">{dspStatus.metrics.agc_db >= 0 ? '+' : ''}{fmtDb(dspStatus.metrics.agc_db)} dB</td></tr>
+              <tr><td>Шумодав снял</td><td class="mono">{fmtDb(dspStatus.metrics.noise_db)} dB фона</td></tr>
               </tbody>
             </table>
             <p class="hint small">
-              Цель AGC — речь на выходе около −20 dBFS. Если после включения слышно
-              «дыхание» фона, добавь шумоподавление или прибавь силу.
+              Если после включения шумодава слышно «дыхание» фона — прибавь силу
+              или выключи автогромкость.
             </p>
           {:else}
-            <p class="hint">Подключись к голосовому каналу — здесь появятся живые уровни микрофона и телеметрия обработки.</p>
+            <p class="hint">Подключись к голосовому каналу — здесь появятся живые уровни микрофона.</p>
           {/if}
         </section>
-      {:else if tab === 'snowflake'}
-        <p class="hint">
-          Snowflake — 64-битный ID Discord: <b>42 бита</b> времени (эпоха 2015-01-01) + <b>5</b> worker +
-          <b>5</b> process + <b>12</b> инкремент. Вставь любой ID (сообщение, канал, пользователь) — парсер
-          работает на Rust side, а в демо — на BigInt.
-        </p>
-        <div class="sf-form">
-          <input placeholder="Например: 1301000000000000305" bind:value={snowflakeInput} />
-          <button class="btn-blurple" onclick={() => void inspect()}>Разобрать</button>
-        </div>
-        {#if snowflakeError}
-          <div class="err">{snowflakeError}</div>
-        {/if}
-        {#if snowflakeResult}
-          <table>
-            <tbody>
-            <tr><td>ID</td><td class="mono small">{snowflakeResult.id}</td></tr>
-            <tr><td>Создан</td><td class="mono">{new Date(snowflakeResult.timestamp_ms).toLocaleString('ru-RU')}</td></tr>
-            <tr><td>ISO 8601</td><td class="mono small">{snowflakeResult.created_at}</td></tr>
-            <tr><td>Возраст</td><td class="mono">{formatDuration(snowflakeResult.age_seconds)} назад</td></tr>
-            <tr><td>Worker ID</td><td class="mono">{snowflakeResult.worker_id}</td></tr>
-            <tr><td>Process ID</td><td class="mono">{snowflakeResult.process_id}</td></tr>
-            <tr><td>Инкремент</td><td class="mono">{snowflakeResult.increment}</td></tr>
-            </tbody>
-          </table>
-        {/if}
-      {:else if tab === 'protocol'}
-        <p class="hint">
-          <b>Консоль протокола</b> — escape hatch в сам websocket. Любой JSON-кадр уйдёт как есть:
-          экспериментируйте с опкодами 1/8/… как настоящий клиент. Ответ смотрите в dispatch-потоке
-          или в логах (RUST_LOG=debug). В демо-режиме кадр только валидируется.
-        </p>
-        <div class="sf-form">
-          <textarea
-            rows="7"
-            class="mono"
-            spellcheck="false"
-            bind:value={rawFrame}
-            placeholder={'{ "op": 1, "d": null }'}
-          ></textarea>
-        </div>
-        <div class="row">
-          <button class="btn-blurple" onclick={() => void sendRaw()}>Отправить кадр</button>
-        </div>
-        {#if rawStatus}
-          <div class={rawStatus.kind === 'ok' ? 'ok-msg' : 'err'}>{rawStatus.text}</div>
-        {/if}
+      {:else if tab === 'tools'}
+        <section class="pane">
+          <h3>Инспектор ID</h3>
+          <p class="hint">
+            Вставь любой ID Discord (сообщение, канал, пользователь) — покажем,
+            когда он создан и сколько ему дней.
+          </p>
+          <div class="sf-form">
+            <input placeholder="Например: 1301000000000000305" bind:value={snowflakeInput} />
+            <button class="btn-blurple" onclick={() => void inspect()}>Разобрать</button>
+          </div>
+          {#if snowflakeError}
+            <div class="err">{snowflakeError}</div>
+          {/if}
+          {#if snowflakeResult}
+            <table>
+              <tbody>
+              <tr><td>ID</td><td class="mono small">{snowflakeResult.id}</td></tr>
+              <tr><td>Создан</td><td class="mono">{new Date(snowflakeResult.timestamp_ms).toLocaleString('ru-RU')}</td></tr>
+              <tr><td>Возраст</td><td class="mono">{formatDuration(snowflakeResult.age_seconds)} назад</td></tr>
+              </tbody>
+            </table>
+          {/if}
+        </section>
+
+        <section class="pane">
+          <h3>Консоль протокола</h3>
+          <p class="hint">
+            Отправка JSON-кадра напрямую в шлюз Discord — для отладки
+            и экспериментов. Ответ приходит потоком событий и пишется в логи
+            приложения (путь — во вкладке «Подключение»).
+          </p>
+          <div class="sf-form">
+            <textarea
+              rows="7"
+              class="mono"
+              spellcheck="false"
+              bind:value={rawFrame}
+              placeholder={'{ "op": 1, "d": null }'}
+            ></textarea>
+          </div>
+          <div class="row">
+            <button class="btn-blurple" onclick={() => void sendRaw()}>Отправить кадр</button>
+          </div>
+          {#if rawStatus}
+            <div class={rawStatus.kind === 'ok' ? 'ok-msg' : 'err'}>{rawStatus.text}</div>
+          {/if}
+        </section>
       {:else if tab === 'plugins'}
         <p class="hint">
-          <b>Плагины</b> — как у Vencord: JS-файлы в папке приложения. Исполняются в том же WebView,
-          что и интерфейс; сетевые запросы идут через Rust-слой с общими rate limits.
+          <b>Плагины</b> — как у Vencord: JS-файлы в папке приложения.
         </p>
 
         {#if pluginError}
@@ -509,25 +524,27 @@
           api.addCss(css) · api.suppress('typing', true) · api.storage · api.toast(text).
           Хук 'message:send' может вернуть изменённый текст или false для отмены.
         </p>
-      {:else}
-        <p class="hint">
-          <b>RustyCord</b> — экспериментальный клиент Discord, построенный на реверс-инжиниринге публичного API.
-        </p>
-        <table>
-          <tbody>
-          <tr><td>Ядро</td><td class="mono">Rust · tokio · tokio-tungstenite</td></tr>
-          <tr><td>UI</td><td class="mono">Svelte 5 (runes) · Vite · TypeScript</td></tr>
-          <tr><td>Оболочка</td><td class="mono">Tauri 2 (system WebView)</td></tr>
-          <tr><td>Голос</td><td class="mono">voice WS v4 · UDP · xsalsa20poly1305</td></tr>
-          <tr><td>Лицензия</td><td class="mono">MIT</td></tr>
-          </tbody>
-        </table>
-        <p class="hint small">
-          Не аффилирован с Discord Inc. Клиент работает на пользовательском токене (как Vencord/Vesktop) —
-          это серая зона ToS: безавтоматизационное использование терпимо, спам и self-ботинг = бан аккаунта.
-          Используй разумно и на свой риск.
-        </p>
+      {:else if tab === 'about'}
+        <section class="pane">
+          <h3>О RustyCord</h3>
+          <p class="hint">
+            Лёгкий неофициальный клиент Discord. Открытый код, лицензия MIT:
+            <a href="https://github.com/VinylRUS/Rustycord" target="_blank" rel="noreferrer">github.com/VinylRUS/Rustycord</a>.
+          </p>
+          <table>
+            <tbody>
+            <tr><td>Версия</td><td class="mono">{APP_VERSION}</td></tr>
+            <tr><td>Лицензия</td><td class="mono">MIT</td></tr>
+            </tbody>
+          </table>
+          <p class="hint small">
+            Не аффилирован с Discord Inc. Клиент работает на пользовательском токене
+            (как Vencord/Vesktop) — это серая зона ToS: спокойное использование
+            терпимо, спам и автоматизация = бан аккаунта. Используй разумно и на свой риск.
+          </p>
+        </section>
       {/if}
+    </div>
     </div>
   </div>
 {/if}
@@ -543,20 +560,22 @@
     position: fixed;
     inset: 0;
     margin: auto;
-    width: min(720px, calc(100vw - 48px));
-    height: min(560px, calc(100vh - 48px));
+    width: min(940px, calc(100vw - 48px));
+    height: min(600px, calc(100vh - 48px));
     background: var(--bg-primary);
     border-radius: var(--radius-md);
     z-index: 101;
     display: flex;
     flex-direction: column;
     animation: popIn 0.15s ease;
+    overflow: hidden;
   }
   header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 16px 20px 8px;
+    flex-shrink: 0;
   }
   h1 { font-size: 20px; color: var(--header-primary); }
   .close {
@@ -568,22 +587,52 @@
     justify-content: center;
   }
   .close:hover { background: var(--bg-modifier-hover); }
-  .tabs {
+
+  /* ---- Discord-style: левая навигация + контент ---- */
+  .body {
+    flex: 1;
     display: flex;
-    gap: 4px;
-    padding: 0 20px;
-    border-bottom: 1px solid #26282c;
+    min-height: 0;
   }
-  .tabs button {
-    padding: 8px 12px;
-    font-size: 14px;
-    font-weight: 600;
+  .nav {
+    width: 218px;
+    flex-shrink: 0;
+    background: var(--bg-secondary);
+    padding: 8px 8px 12px;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    user-select: none;
+  }
+  .nav-group {
+    padding: 16px 10px 4px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
     color: var(--text-muted);
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
   }
-  .tabs button.active { color: #fff; border-bottom-color: #fff; }
-  .content { padding: 20px; }
+  .nav button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    text-align: left;
+    padding: 6px 10px;
+    margin: 1px 0;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .nav button:hover { background: var(--bg-modifier-hover); color: var(--text-normal); }
+  .nav button.active {
+    background: var(--bg-modifier-active);
+    color: #fff;
+  }
+  .nav-spacer { flex: 1; }
+  .nav-logout { color: var(--red) !important; font-weight: 600; }
+  .nav-logout:hover { background: #f23f4322 !important; }
+  .content { padding: 4px 24px 24px; }
   .user-line { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
   .big { font-size: 18px; font-weight: 700; color: var(--header-primary); }
   table { width: 100%; border-collapse: collapse; margin-bottom: 18px; }
@@ -678,6 +727,7 @@
   .mini:hover { background: #6d6f78; }
   .mini.danger { background: transparent; color: #f23f43; }
   .mini.danger:hover { background: #f23f4322; }
+  .mini.on { background: var(--green); color: #fff; }
   .plugin-code {
     background: #1e1f22;
     border-radius: 6px;

@@ -61,7 +61,7 @@
       <Icon name="logo" size={56} color="#5865f2" />
     </div>
     <h1>С возвращением!</h1>
-    <p class="sub">RustyCord — неофициальный клиент Discord на <b>Rust + Tauri</b></p>
+    <p class="sub">RustyCord — лёгкий неофициальный клиент Discord</p>
 
     {#if app.loginError}
       <div class="error">{app.loginError}</div>
@@ -150,7 +150,7 @@
           spellcheck="false"
         />
         <button class="btn-blurple submit" type="submit" disabled={app.loginBusy}>
-          {app.loginBusy ? 'Подключаемся к Gateway…' : 'Войти'}
+          {app.loginBusy ? 'Входим…' : 'Войти'}
         </button>
       </form>
       <p class="note">Токен живёт в localStorage браузера (ключ <code>token</code>) или в DevTools → Application.</p>
@@ -179,8 +179,8 @@
   </div>
 
   <div class="footer">
-    <span>Gateway v9 · REST api/v10 · remote-auth v2</span>
-    <span>RustyCord v{APP_VERSION} · не аффилирован с Discord Inc.</span>
+    <span>RustyCord v{APP_VERSION}</span>
+    <span>Не аффилирован с Discord Inc.</span>
   </div>
 </div>
 

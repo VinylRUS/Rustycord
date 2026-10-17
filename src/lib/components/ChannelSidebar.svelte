@@ -78,7 +78,11 @@
 
   function channelClick(c: Channel) {
     if (isVoice(c) && guild) {
-      void app.toggleVoice(guild.id, c.id);
+      // Уже в этом канале — просто открываем вид, соединение не рвём
+      // (выйти можно кнопкой «Отключиться» в панели снизу).
+      if (app.myVoice?.channelId !== c.id) {
+        void app.toggleVoice(guild.id, c.id);
+      }
       app.selectChannel(c.id); // show voice view
     } else {
       app.selectChannel(c.id);
@@ -193,11 +197,8 @@
           <span>Голос подключён</span>
         </div>
         <div class="voice-target truncate">
-          {app.channelById(app.myVoice.channelId)?.name ?? 'Канал'} / {app.myVoice.mode ?? 'connecting…'}
+          {app.channelById(app.myVoice.channelId)?.name ?? 'Канал'}
         </div>
-        {#if app.myVoice.endpoint}
-          <div class="voice-endpoint truncate">{app.myVoice.endpoint}{#if app.myVoice.ssrc} · ssrc {app.myVoice.ssrc}{/if}</div>
-        {/if}
       </div>
       <!-- Трансляции: экран и камера (эксперимент) -->
       <button
@@ -229,7 +230,7 @@
           <span>Звонок · {app.dmCallUsers(app.myVoice.channelId).length || 1}</span>
         </div>
         <div class="voice-target truncate">
-          {app.channelTitle || 'Беседа'} · {app.myVoice.mode ?? 'подключаемся…'}
+          {app.channelTitle || 'Беседа'}
         </div>
       </div>
       <button class="voice-leave" title="Завершить звонок" onclick={() => void app.leaveVoice()}>
@@ -507,7 +508,6 @@
     font-weight: 600;
   }
   .voice-target { color: var(--text-muted); font-size: 12px; margin-top: 1px; }
-  .voice-endpoint { color: var(--text-muted); font-size: 10px; font-family: var(--font-code); opacity: 0.7; }
   .voice-btn {
     width: 32px;
     height: 32px;

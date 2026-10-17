@@ -405,11 +405,19 @@ impl VoiceHandshake {
 }
 
 /// Живая голосовая сессия на songbird: `controls` обновляется эхом op4
-/// (events.rs), `driver` — клон канала управления движком (mute/leave).
+/// (events.rs), `driver` — общий экземпляр движка (mute).
+///
+/// ВАЖНО: `Driver` в songbird при **дропе** отправляет ядру `Poison` и убивает
+/// всю сессию (см. `impl Drop for Driver`). Клонировать его нельзя — клоны
+/// в обработчиках эха умирали в конце скоупа и отравляли ядро: трек
+/// микрофона удалялся из микшера, чтения моста останавливались («звонок
+/// падает при включении трансляции/деафена»). Поэтому расшариваем ОДИН
+/// экземпляр через `Arc<Mutex<..>>`: дропается он только вместе с сессией —
+/// ровно тогда, когда ядро и должно умереть.
 #[derive(Clone)]
 pub struct VoiceSessionHandle {
     pub controls: Arc<Mutex<VoiceControls>>,
-    pub driver: Option<songbird::Driver>,
+    pub driver: Option<Arc<Mutex<songbird::Driver>>>,
     /// Роль песни «микрофон»: держим, чтобы трек не завершался сам.
     #[allow(dead_code)]
     pub mic_track: Option<songbird::tracks::TrackHandle>,

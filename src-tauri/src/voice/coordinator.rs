@@ -262,12 +262,17 @@ async fn voice_session(
     // Стартовый мьют (деафиен глушит микрофон, как в оригинале).
     driver.mute(d_mute || d_deaf);
 
+    // Один общий экземпляр движка: клоны Driver при дропе шлют ядру Poison
+    // и убивают сессию (грабли «звонок падает при включении трансляции»),
+    // поэтому events.rs мьютит через Arc<Mutex>, а не через clone().
+    let driver = Arc::new(Mutex::new(driver));
+
     // Регистрируем сессию: events.rs по эху op4 обновит controls и driver.
     state.voice_sessions.lock().unwrap().insert(
         hs.guild_id.clone(),
         VoiceSessionHandle {
             controls: Arc::clone(&controls),
-            driver: Some(driver.clone()),
+            driver: Some(Arc::clone(&driver)),
             mic_track,
             loopback: Arc::clone(&loopback),
         },
@@ -286,7 +291,10 @@ async fn voice_session(
         token,
         endpoint,
     };
-    if let Err(e) = driver.connect(info).await {
+    // connect: future создаём под кратким локом (внутри — только отправка
+    // сообщения в ядро), ждём ответ уже снаружи — лок через .await нельзя.
+    let connect = driver.lock().unwrap().connect(info);
+    if let Err(e) = connect.await {
         anyhow::bail!("songbird connect: {e}");
     }
 

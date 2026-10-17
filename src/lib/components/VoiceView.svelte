@@ -66,26 +66,15 @@
         <div
           class="mic-meter"
           class:speaking={micLevel.metrics.speech}
-          title="Уровень микрофона после обработки (шумодав + AGC) — ровно то, что уходит собеседникам"
+          title="Уровень микрофона — ровно то, что уходит собеседникам"
         >
           <Icon name="mic" size={14} color={micLevel.metrics.speech ? '#23a55a' : '#b5bac1'} />
           <div class="mic-track"><div class="mic-fill" style:width="{micPct}%"></div></div>
         </div>
-        <button
-          class="btn-test"
-          class:on={app.micLoopback}
-          title="Слышать свой голос в наушниках — локально, без Discord. Слышно себя (уже после шумодава и AGC) → захват и обработка живы, проблема в передаче."
-          onclick={() => void app.setVoiceLoopback(!app.micLoopback)}
-        >{app.micLoopback ? 'Тест идёт' : 'Тест'}</button>
       {/if}
     {:else}
       <button class="btn-blurple join" onclick={() => guild && channel && void app.toggleVoice(guild.id, channel.id)}>
         Подключиться к голосу
-      </button>
-    {/if}
-    {#if connected}
-      <button class="leave" title="Отключиться" onclick={() => void app.leaveVoice()}>
-        <Icon name="phone-off" size={20} color="#f23f43" />
       </button>
     {/if}
   </header>
@@ -104,8 +93,8 @@
     {:else}
       <div class="empty">
         <div class="big"><Icon name="speaker" size={48} color="#4e5058" /></div>
-        <h2>Здесь тихо…</h2>
-        <p class="muted">Подключись первым — покажем протокол в деле: op 4 → VOICE_SERVER_UPDATE → UDP handshake → xsalsa20_poly1305.</p>
+        <h2>Здесь пока никого нет</h2>
+        <p class="muted">Подключись к голосовому каналу — друзья увидят, что ты здесь, и присоединятся.</p>
       </div>
     {/each}
   </div>
@@ -143,12 +132,6 @@
         </div>
       {/each}
     </div>
-  {/if}
-
-  {#if app.myVoice?.mode}
-    <footer class="proto-info mono">
-      protocol v4 · mode {app.myVoice.mode} · ssrc {app.myVoice.ssrc} · {app.myVoice.endpoint}
-    </footer>
   {/if}
 </section>
 
@@ -250,28 +233,7 @@
     background: #23a55a;
     transition: width 0.12s linear;
   }
-  .btn-test {
-    font-size: 12px;
-    padding: 6px 10px;
-    color: var(--text-normal);
-    border-radius: var(--radius-md);
-    flex-shrink: 0;
-  }
-  .btn-test:hover { background: var(--bg-secondary); }
-  .btn-test.on {
-    color: var(--green);
-    font-weight: 600;
-  }
   .join { font-size: 13px; padding: 8px 14px; }
-  .leave {
-    width: 34px;
-    height: 34px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .leave:hover { background: #f23f4322; }
   .tiles {
     flex: 1;
     display: flex;
@@ -320,11 +282,4 @@
     justify-content: center;
   }
   h2 { color: var(--header-primary); font-size: 24px; }
-  .proto-info {
-    padding: 8px 16px;
-    color: var(--text-muted);
-    font-size: 11px;
-    border-top: 1px solid #26282c;
-    flex-shrink: 0;
-  }
 </style>

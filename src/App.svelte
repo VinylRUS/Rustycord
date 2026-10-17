@@ -67,14 +67,7 @@
   <div class="layout">
     {#if showReconnectBanner}
       <div class="banner" title={app.connDetail || ''}>
-        {app.connStage === 'disconnected' ? 'Соединение потеряно' : 'Переподключаемся к Gateway'}…
-        {#if app.connDetail}
-          <span class="banner-detail"> · {app.connDetail}</span>
-        {:else if app.connStage === 'disconnected'}
-          <span class="banner-detail"> · пробуем снова с backoff</span>
-        {:else}
-          <span class="banner-detail"> · RESUME {(app.sessionId || '').slice(0, 8)}…</span>
-        {/if}
+        {app.connStage === 'disconnected' ? 'Соединение потеряно — переподключаемся…' : 'Переподключаемся…'}
       </div>
     {/if}
     {#if app.updateInfo}
@@ -172,9 +165,7 @@
     text-align: center;
     padding: 6px;
     flex-shrink: 0;
-    font-family: var(--font-code);
   }
-  .banner-detail { font-weight: 400; opacity: 0.85; }
   .update-card {
     position: fixed;
     bottom: 16px;

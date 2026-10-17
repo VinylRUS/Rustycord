@@ -1131,8 +1131,10 @@ pub async fn handle_dispatch(
                                     if let Some(handle) = sessions.get(&cid) {
                                         *handle.controls.lock().unwrap() =
                                             VoiceControls::new(vs.self_mute, vs.self_deaf);
-                                        if let Some(mut driver) = handle.driver.clone() {
-                                            driver.mute(vs.self_mute || vs.self_deaf);
+                                        // Мьют через общий Arc<Mutex<Driver>>: клон Driver'
+                                        // при дропе шлёт ядру Poison и убивает сессию.
+                                        if let Some(d) = handle.driver.as_ref() {
+                                            d.lock().unwrap().mute(vs.self_mute || vs.self_deaf);
                                         }
                                         // Мьют-флаги — главный подозреваемый «меня не
                                         // слышно»: mute=true шлёт тишину вместо микрофона.
@@ -1204,9 +1206,10 @@ pub async fn handle_dispatch(
                                         VoiceControls::new(vs.self_mute, vs.self_deaf);
                                     // Мьют в songbird: движок шлёт тишину вместо микрофона
                                     // (деафиен тоже глушит передачу — как в оригинале).
-                                    // Driver — клон канала управления, mute уходит в задачи.
-                                    if let Some(mut driver) = handle.driver.clone() {
-                                        driver.mute(vs.self_mute || vs.self_deaf);
+                                    // ВАЖНО: через Arc<Mutex>, БЕЗ clone() — дроп клона
+                                    // Driver'а травит ядро Poison'ом и рвёт звонок.
+                                    if let Some(d) = handle.driver.as_ref() {
+                                        d.lock().unwrap().mute(vs.self_mute || vs.self_deaf);
                                     }
                                     // Мьют-флаги — главный подозреваемый «меня не слышно»:
                                     // mute=true шлёт тишину вместо микрофона.

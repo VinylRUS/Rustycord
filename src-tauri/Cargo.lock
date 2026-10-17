@@ -5239,7 +5239,7 @@ dependencies = [
 
 [[package]]
 name = "rustycord"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "anyhow",
  "async-trait",
