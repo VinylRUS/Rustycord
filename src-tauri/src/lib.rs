@@ -95,6 +95,10 @@ pub fn run() {
             commands::ban_member,
             commands::join_voice,
             commands::voice_loopback,
+            // голосовой DSP: шумодав + AGC
+            commands::get_voice_dsp,
+            commands::set_voice_dsp,
+            commands::get_voice_dsp_status,
             commands::start_stream,
             commands::stop_stream,
             commands::pause_stream,

@@ -2,12 +2,47 @@
   import { app } from '../stores/app.svelte';
   import Avatar from './Avatar.svelte';
   import Icon from './Icon.svelte';
+  import type { VoiceDspStatus } from '../types';
 
   const guild = $derived(app.activeGuild);
   const channel = $derived(app.activeChannel);
   const channelId = $derived(channel?.id ?? '');
   const participants = $derived(guild ? app.voiceUsers(guild.id, channelId) : []);
   const streams = $derived(app.streamsInMyChannel());
+  const connected = $derived(
+    !!app.myVoice && app.myVoice.guildId === (guild?.id ?? '') && app.myVoice.channelId === channelId,
+  );
+
+  /** Уровень своего микрофона после обработки (DSP-телеметрия, 7 Гц). */
+  let micLevel = $state<VoiceDspStatus | null>(null);
+  $effect(() => {
+    if (!connected || !app.backend) {
+      micLevel = null;
+      return;
+    }
+    let alive = true;
+    const poll = async () => {
+      try {
+        const st = await app.backend!.getVoiceDspStatus();
+        if (alive) micLevel = st;
+      } catch {
+        /* сессия закрылась — индикатор погаснет через connected */
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 150);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  });
+
+  /** dBFS → проценты шкалы (−60…0 → 0…100). */
+  const micPct = $derived(
+    micLevel?.active
+      ? Math.max(0, Math.min(100, ((micLevel.metrics.output_db + 60) / 60) * 100))
+      : 0,
+  );
 
   // Локальное превью своего захвата (экран/камера) — биндим MediaStream
   // к <video> и обновляем при смене источника.
@@ -25,23 +60,30 @@
   <header>
     <Icon name="speaker" size={22} color="#23a55a" />
     <h1>{channel?.name ?? 'Голосовой канал'}</h1>
-    {#if app.myVoice?.guildId === guild?.id && app.myVoice?.channelId === channelId}
+    {#if connected}
       <span class="connected"><Icon name="signal" size={14} color="#23a55a" /> Подключено</span>
-      <div class="mic-test" title="Уровень своего микрофона (данные Rust-я каждые 500 мс)">
-        <div class="meter"><div class="fill" style="width: {Math.round(Math.min(1, app.micLevel) * 100)}%"></div></div>
+      {#if micLevel?.active}
+        <div
+          class="mic-meter"
+          class:speaking={micLevel.metrics.speech}
+          title="Уровень микрофона после обработки (шумодав + AGC) — ровно то, что уходит собеседникам"
+        >
+          <Icon name="mic" size={14} color={micLevel.metrics.speech ? '#23a55a' : '#b5bac1'} />
+          <div class="mic-track"><div class="mic-fill" style:width="{micPct}%"></div></div>
+        </div>
         <button
           class="btn-test"
           class:on={app.micLoopback}
-          title="Слышать свой микрофон в наушниках — локально, без Discord. Слышно себя → захват жив, проблема в передаче."
+          title="Слышать свой голос в наушниках — локально, без Discord. Слышно себя (уже после шумодава и AGC) → захват и обработка живы, проблема в передаче."
           onclick={() => void app.setVoiceLoopback(!app.micLoopback)}
-        >{app.micLoopback ? 'Тест идёт' : 'Тест микрофона'}</button>
-      </div>
+        >{app.micLoopback ? 'Тест идёт' : 'Тест'}</button>
+      {/if}
     {:else}
       <button class="btn-blurple join" onclick={() => guild && channel && void app.toggleVoice(guild.id, channel.id)}>
         Подключиться к голосу
       </button>
     {/if}
-    {#if app.myVoice?.guildId === guild?.id && app.myVoice?.channelId === channelId}
+    {#if connected}
       <button class="leave" title="Отключиться" onclick={() => void app.leaveVoice()}>
         <Icon name="phone-off" size={20} color="#f23f43" />
       </button>
@@ -186,29 +228,34 @@
     font-size: 13px;
     font-weight: 600;
   }
-  .mic-test {
+  .mic-meter {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-secondary);
   }
-  .meter {
+  .mic-meter.speaking { box-shadow: inset 0 0 0 1px #23a55a66; }
+  .mic-track {
     width: 72px;
-    height: 6px;
+    height: 5px;
     border-radius: 3px;
-    background: #2b2d31;
+    background: #1e1f22;
     overflow: hidden;
-    flex-shrink: 0;
   }
-  .fill {
+  .mic-fill {
     height: 100%;
-    background: var(--green);
-    transition: width 80ms linear;
+    border-radius: 3px;
+    background: #23a55a;
+    transition: width 0.12s linear;
   }
   .btn-test {
     font-size: 12px;
     padding: 6px 10px;
     color: var(--text-normal);
     border-radius: var(--radius-md);
+    flex-shrink: 0;
   }
   .btn-test:hover { background: var(--bg-secondary); }
   .btn-test.on {

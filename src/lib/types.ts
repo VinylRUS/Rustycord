@@ -253,6 +253,38 @@ export interface SnowflakeInfo {
 
 export type ConnStage = 'connecting' | 'connected' | 'reconnecting' | 'disconnected' | 'shutdown';
 
+/* ---------- Голосовой DSP: шумоподавление + AGC ---------- */
+
+/** Настройки обработки микрофона (Rust get/set_voice_dsp). */
+export interface VoiceDspConfig {
+  ns_enabled: boolean;
+  /** Сила шумодава: low / medium / high. */
+  ns_strength: 'low' | 'medium' | 'high';
+  agc_enabled: boolean;
+}
+
+/** Живая телеметрия обработки (dBFS; −100 ≈ тишина). */
+export interface VoiceDspMetrics {
+  /** RMS входа до обработки. */
+  input_db: number;
+  /** RMS выхода — то, что уходит в Opus. */
+  output_db: number;
+  /** Текущая оценка шума. */
+  noise_db: number;
+  /** Текущее усиление AGC, dB. */
+  agc_db: number;
+  /** Сколько снял шумодав на последнем кадре, dB (0 — не давит). */
+  ns_db: number;
+  /** VAD: сейчас речь. */
+  speech: boolean;
+}
+
+/** Снимок для UI: метрики + открыта ли голосовая сессия. */
+export interface VoiceDspStatus {
+  active: boolean;
+  metrics: VoiceDspMetrics;
+}
+
 /* ---------- User auth (v0.3.0) ---------- */
 
 /** Ответ /auth/login: сразу токен или запрос 2FA-кода. */

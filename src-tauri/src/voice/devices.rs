@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 
+use crate::voice::dsp::{DspConfig, DspMetrics, VoiceDsp};
 use crate::voice::jitter::Mixer;
 use crate::voice::mic::MicTap;
 use crate::voice::resample::LinearResampler;
@@ -60,14 +61,22 @@ impl Drop for DeviceGuard {
 /// ни держать в асинхронной сессии. Создание, жизнь и дроп — один поток.
 ///
 /// Микрофон пишет в `MicTap` (мост в songbird Input), динамики читают
-/// из `Mixer` (заполняется VoiceTick'ами songbird).
+/// из `Mixer` (заполняется VoiceTick'ами songbird). Перед записью в
+/// MicTap сигнал проходит голосовой DSP (devices.rs → dsp.rs):
+/// шумоподавление + AGC с настройками из `dsp_cfg` (живое обновление)
+/// и телеметрией в `dsp_metrics`.
 pub fn open(
     mixer: &Arc<Mutex<Mixer>>,
     controls: &Arc<Mutex<VoiceControls>>,
     mic: &Arc<MicTap>,
-    // Локальный тест микрофона: при true захват дублируется в свой Mixer
-    // (пользователь слышит себя в наушниках, минуя Discord).
+    // Локальный тест микрофона: при true обработанный DSP-сигнал
+    // дублируется в свой Mixer (слышим себя в наушниках, минуя Discord) —
+    // тестируется весь тракт, как его слышат собеседники.
     loopback: &Arc<AtomicBool>,
+    // Голосовой DSP: шумодав + AGC — конфиг, телеметрия, флаг активности.
+    dsp_cfg: &Arc<Mutex<DspConfig>>,
+    dsp_metrics: &Arc<Mutex<DspMetrics>>,
+    dsp_active: &Arc<AtomicBool>,
 ) -> DeviceGuard {
     // Парковка: просыпается при дропе Guard'а (закрытие канала).
     let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -78,14 +87,18 @@ pub fn open(
     let controls = Arc::clone(controls);
     let mic = Arc::clone(mic);
     let loopback = Arc::clone(loopback);
+    let dsp_cfg = Arc::clone(dsp_cfg);
+    let dsp_metrics = Arc::clone(dsp_metrics);
+    let dsp_active = Arc::clone(dsp_active);
 
     let handle = std::thread::spawn(move || {
         let output = open_output(&mixer, &controls);
-        let input = open_input(&mic, &mixer, &loopback);
+        let input = open_input(&mic, &mixer, &loopback, &dsp_cfg, &dsp_metrics, &dsp_active);
         let _ = itx.send(input.is_some());
         // Stream'ы созданы, живут и будут дропнуты в этом же потоке.
         let _hold = (output, input);
         let _ = rx.recv(); // блок до закрытия канала (дроп Guard'а)
+        dsp_active.store(false, Ordering::Relaxed);
         mic.close(); // EOF в songbird-трек — источник завершается чисто
     });
     let has_input = irx.recv().unwrap_or(false);
@@ -296,15 +309,24 @@ fn pick_input(device: &cpal::Device) -> Option<(StreamConfig, SampleFormat)> {
     Some((cfg.into(), fmt))
 }
 
-/// Состояние колбэка ввода: устройство → моно 48k f32 → MicTap
-/// (мост в songbird: стерео-дублирование делает сам MicTap). При
-/// включённом лупбеке тот же кадр идёт и в свой Mixer — тест микрофона.
+/// Состояние колбэка ввода: устройство → моно 48k f32 → DSP (шумодав +
+/// AGC) → MicTap (мост в songbird: стерео-дублирование делает сам MicTap).
+/// При включённом лупбеке в свой Mixer идёт тот же ОБРАБОТАННЫЙ кадр —
+/// тест микрофона слышит ровно то, что уходит собеседникам.
 struct InTap {
     mic: Arc<MicTap>,
     dev_ch: usize,
     /// device-rate-моно → 48k-моно (None при 48k).
     res: Option<LinearResampler>,
-    /// Локальный лупбек: захват → свой Mixer (команда voice_loopback).
+    /// Голосовой DSP (шумодав + AGC + лимитер).
+    dsp: VoiceDsp,
+    /// Живые настройки (общие с командой set_voice_dsp).
+    cfg: Arc<Mutex<DspConfig>>,
+    /// Телеметрия для UI.
+    metrics: Arc<Mutex<DspMetrics>>,
+    /// Переиспользуемый буфер обработанных сэмплов (без аллокаций).
+    scratch: Vec<f32>,
+    /// Локальный лупбек: обработанный сигнал → свой Mixer (voice_loopback).
     mixer: Arc<Mutex<Mixer>>,
     loopback: Arc<AtomicBool>,
     /// seq дорожки лупбека (Mixer упорядочивает кадры по seq).
@@ -330,16 +352,24 @@ impl InTap {
         if at48k.is_empty() {
             return;
         }
-        // Лупбек: те же кадры — в свой микшер (слышим себя в наушниках).
+        // Шумодав + AGC (настройки читаем на лету — переключение
+        // применяется к следующему кадру без перезапуска сессии).
+        let cfg = *self.cfg.lock().unwrap();
+        self.dsp.set_config(cfg);
+        self.scratch.clear();
+        self.dsp.push(&at48k, &mut self.scratch);
+        *self.metrics.lock().unwrap() = self.dsp.metrics();
+        // Лупбек: обработанные кадры — в свой микшер (слышим себя в
+        // наушниках ровно теми, какими их слышат собеседники).
         if self.loopback.load(Ordering::Relaxed) {
-            let stereo: Vec<f32> = at48k.iter().flat_map(|s| [*s, *s]).collect();
+            let stereo: Vec<f32> = self.scratch.iter().flat_map(|s| [*s, *s]).collect();
             self.seq = self.seq.wrapping_add(1);
             self.mixer
                 .lock()
                 .unwrap()
                 .on_frame(LOOPBACK_SSRC, self.seq, stereo);
         }
-        self.mic.push_mono(&at48k);
+        self.mic.push_mono(&self.scratch);
     }
 }
 
@@ -347,6 +377,9 @@ fn open_input(
     mic: &Arc<MicTap>,
     mixer: &Arc<Mutex<Mixer>>,
     loopback: &Arc<AtomicBool>,
+    dsp_cfg: &Arc<Mutex<DspConfig>>,
+    dsp_metrics: &Arc<Mutex<DspMetrics>>,
+    dsp_active: &Arc<AtomicBool>,
 ) -> Option<Stream> {
     let host = cpal::default_host();
     let device = match host.default_input_device() {
@@ -378,10 +411,16 @@ fn open_input(
         mic: Arc::clone(mic),
         dev_ch,
         res,
+        dsp: VoiceDsp::new(*dsp_cfg.lock().unwrap()),
+        cfg: Arc::clone(dsp_cfg),
+        metrics: Arc::clone(dsp_metrics),
+        scratch: Vec::new(),
         mixer: Arc::clone(mixer),
         loopback: Arc::clone(loopback),
         seq: 0,
     };
+    // Снимок настроек для лога (tap уедет в замыкание колбэка).
+    let cfg_snapshot = tap.dsp.config();
     let err_fn = |e| tracing::warn!("voice: ошибка ввода: {e}");
 
     let stream = match fmt {
@@ -403,7 +442,23 @@ fn open_input(
     };
     match stream {
         Some(s) => match s.play() {
-            Ok(()) => Some(s),
+            Ok(()) => {
+                dsp_active.store(true, Ordering::Relaxed);
+                tracing::info!(
+                    "voice: микрофон открыт, DSP: шумодав {}, AGC {}",
+                    if cfg_snapshot.ns_enabled {
+                        "вкл"
+                    } else {
+                        "выкл"
+                    },
+                    if cfg_snapshot.agc_enabled {
+                        "вкл"
+                    } else {
+                        "выкл"
+                    }
+                );
+                Some(s)
+            }
             Err(e) => {
                 tracing::warn!("voice: не удалось запустить ввод: {e}");
                 None

@@ -31,6 +31,7 @@ import type {
   UpdateInfo,
   User,
   UserProfile,
+  VoiceDspConfig,
   VoiceState,
 } from '../types';
 import { displayName } from '../avatars';
@@ -40,6 +41,7 @@ const TYPING_TTL = 8000;
 const SPEAKING_TTL = 2500;
 const RECENT_EMOJI_KEY = 'rustycord.recentEmoji';
 const RECENT_EMOJI_MAX = 24;
+const VOICE_DSP_KEY = 'rustycord.voiceDsp';
 
 /** Объект обновления из plugin-updater (держим для installUpdate;
  *  сознательно вне $state — в рендере не участвует). */
@@ -157,6 +159,9 @@ export class AppStore {
   /** Участники звонков в ЛС/группах: channel_id → голосовые состояния
    *  (VOICE_STATE_UPDATE с guild_id = null — как у оригинального клиента). */
   dmCalls = $state<Record<string, VoiceState[]>>({});
+  /** Настройки голосового DSP (шумодав + AGC). Персистятся в localStorage
+   *  и применяются к Rust-состоянию при каждом подключении бэкенда. */
+  voiceDsp = $state<VoiceDspConfig>({ ns_enabled: true, ns_strength: 'medium', agc_enabled: true });
 
   /* ---------- ui ---------- */
   activeGuildId = $state<string | null>(null); // null → DM home
@@ -386,6 +391,7 @@ export class AppStore {
     if (this.booted) return;
     this.booted = true;
     this.loadRecentEmoji();
+    this.loadVoiceDsp();
     // Проверка обновлений при старте: свежий релиз на GitHub → уведомление.
     // Не блокирует загрузку и молчит при проблемах сети.
     void this.checkForUpdate();
@@ -395,6 +401,39 @@ export class AppStore {
     }
   }
 
+  /** Настройки голосового DSP из localStorage (тихо при отсутствии/мусоре). */
+  private loadVoiceDsp() {
+    try {
+      const raw = localStorage.getItem(VOICE_DSP_KEY);
+      if (!raw) return;
+      const cfg = JSON.parse(raw) as Partial<VoiceDspConfig>;
+      if (
+        typeof cfg.ns_enabled === 'boolean' &&
+        typeof cfg.agc_enabled === 'boolean' &&
+        (cfg.ns_strength === 'low' || cfg.ns_strength === 'medium' || cfg.ns_strength === 'high')
+      ) {
+        this.voiceDsp = {
+          ns_enabled: cfg.ns_enabled,
+          ns_strength: cfg.ns_strength,
+          agc_enabled: cfg.agc_enabled,
+        };
+      }
+    } catch {
+      /* битый JSON — живём с дефолтом */
+    }
+  }
+
+  /** Обновить настройки обработки микрофона: сохраняются локально и
+   *  применяются к живой сессии на лету (следующий аудиокадр). */
+  async setVoiceDsp(cfg: VoiceDspConfig) {
+    this.voiceDsp = cfg;
+    localStorage.setItem(VOICE_DSP_KEY, JSON.stringify(cfg));
+    try {
+      await this.backend?.setVoiceDsp(cfg);
+    } catch {
+      /* применится при следующем изменении/подключении */
+    }
+  }
   /** Проверить обновление: сначала подписанный latest.json (plugin-updater,
    *  умеет ставить «на место»), при неудаче — GitHub API (баннер со ссылкой).
    *  Не блокирует загрузку и молчит при проблемах сети. */
@@ -633,6 +672,8 @@ export class AppStore {
     this.backend = backend;
     this.mode = backend.mode;
     plugins.attach(backend);
+    // Настройки DSP живут в Rust-состоянии: восстанавливаем после перезапуска.
+    void backend.setVoiceDsp(this.voiceDsp).catch(() => undefined);
     this.unlisten = backend.onEvent((ev) => this.handleEvent(ev));
     this.unlistenToast = onPluginToast((text) => this.toast(text));
   }

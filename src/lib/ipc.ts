@@ -22,6 +22,8 @@ import type {
   StateSnapshot,
   UpdateInfo,
   User,
+  VoiceDspConfig,
+  VoiceDspStatus,
 } from './types';
 
 export interface GetMessageOptions {
@@ -86,6 +88,14 @@ export interface Backend {
   /** Запись ошибки/предупреждения фронтенда в файловый лог Rust
    *  (ошибки разбора dispatch'ей и пр. — иначе видны только в devtools). */
   logError(message: string, level?: 'error' | 'warn' | 'info'): Promise<void>;
+
+  // голосовой DSP (шумоподавление + AGC)
+  /** Текущие настройки обработки микрофона. */
+  getVoiceDsp(): Promise<VoiceDspConfig>;
+  /** Применить настройки на лету (без перезахода в канал). */
+  setVoiceDsp(cfg: VoiceDspConfig): Promise<void>;
+  /** Живая телеметрия обработки (уровни, VAD) — для индикаторов. */
+  getVoiceDspStatus(): Promise<VoiceDspStatus>;
 
   // друзья и личные беседы (v0.4.0)
   /** Открыть (или создать) DM с пользователем — POST /users/@me/channels. */
@@ -304,6 +314,22 @@ class TauriBackend implements Backend {
 
   async logError(message: string, level: 'error' | 'warn' | 'info' = 'error'): Promise<void> {
     await this.invoke('frontend_log', { level, message });
+  }
+
+  async getVoiceDsp(): Promise<VoiceDspConfig> {
+    return this.invoke<VoiceDspConfig>('get_voice_dsp');
+  }
+
+  async setVoiceDsp(cfg: VoiceDspConfig): Promise<void> {
+    await this.invoke('set_voice_dsp', {
+      nsEnabled: cfg.ns_enabled,
+      nsStrength: cfg.ns_strength,
+      agcEnabled: cfg.agc_enabled,
+    });
+  }
+
+  async getVoiceDspStatus(): Promise<VoiceDspStatus> {
+    return this.invoke<VoiceDspStatus>('get_voice_dsp_status');
   }
 
   onEvent(handler: (ev: BackendEvent) => void): () => void {
