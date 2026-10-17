@@ -1,6 +1,6 @@
 [package]
 name = "rustycord"
-version = "0.10.0"
+version = "0.10.1"
 description = "RustyCord — an unofficial Discord client built with Tauri, reverse-engineered architecture, native performance"
 authors = ["RustyCord contributors"]
 edition = "2021"
@@ -70,6 +70,15 @@ qrcode = { version = "0.14", default-features = false }
 # receive-модулю: dashmap для ssrc-трекера), «tungstenite»+«rustls» —
 # WS-бэкенд к медиасерверу.
 songbird = { version = "0.6", default-features = false, features = ["driver", "receive", "gateway", "tungstenite", "rustls"] }
+# Фикс «меня не слышат»: songbird подтягивает symphonia с default-features=false
+# и БЕЗ списка фич — в реестре кодеков (get_codec_registry) нет PCM-декодера.
+# Наш микрофонный мост — RawReader с кодеком CODEC_TYPE_PCM_F32LE: при promote
+# codecs.make() не находит декодер → DecodeError("no compatible track found")
+# → PlayMode::Errored → трек выкидывается из микшера мгновенно (get_info =
+# Err(Finished), позиция 0, sink моста выкачивает prebuffer в пустоту).
+# cargo объединяет фичи по дереву: включаем здесь — PcmDecoder попадает в
+# реестр songbird, promote проходит, тракт оживает.
+symphonia = { version = "0.5", default-features = false, features = ["pcm"] }
 # Аудиоустройства — только с фичей `audio` (см. [features]).
 cpal = { version = "0.15", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

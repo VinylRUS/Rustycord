@@ -322,7 +322,7 @@ async fn voice_session(
                             format!("{:?}, поз. {:.1} с, громкость {:.2}", i.playing, i.position.as_secs_f32(), i.volume),
                             i.position.as_secs_f32(),
                         ),
-                        Err(e) => (format!("хэндл недоступен ({e:?})"), last_pos),
+                        Err(e) => (format!("трек удалён из микшера ({e:?}) — ended/errored"), last_pos),
                     },
                     None => ("нет (headless/без микрофона)".to_string(), last_pos),
                 };
