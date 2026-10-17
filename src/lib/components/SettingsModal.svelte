@@ -1,12 +1,12 @@
 <script lang="ts">
   import { app } from '../stores/app.svelte';
   import { plugins } from '../plugins/manager';
-  import type { SnowflakeInfo } from '../types';
+  import type { SnowflakeInfo, VoiceDspStatus } from '../types';
   import { formatDuration } from '../time';
   import Avatar from './Avatar.svelte';
   import Icon from './Icon.svelte';
 
-  let tab = $state<'profile' | 'connection' | 'plugins' | 'snowflake' | 'protocol' | 'about'>('profile');
+  let tab = $state<'profile' | 'connection' | 'voice' | 'plugins' | 'snowflake' | 'protocol' | 'about'>('profile');
   let snowflakeInput = $state('');
   let snowflakeResult = $state<SnowflakeInfo | null>(null);
   let snowflakeError = $state('');
@@ -177,6 +177,45 @@
       rawStatus = { kind: 'err', text: e instanceof Error ? e.message : String(e) };
     }
   }
+
+  /* ---------- голос: шумоподавление + AGC ---------- */
+
+  /** Живая телеметрия DSP (опрос 4 раза в секунду, пока открыта вкладка). */
+  let dspStatus = $state<VoiceDspStatus | null>(null);
+
+  const NS_LEVELS = [
+    { id: 'low', label: 'Слабое' },
+    { id: 'medium', label: 'Среднее' },
+    { id: 'high', label: 'Сильное' },
+  ] as const;
+
+  $effect(() => {
+    if (!app.showSettings || tab !== 'voice' || !app.backend) return;
+    let alive = true;
+    const poll = async () => {
+      try {
+        const st = await app.backend!.getVoiceDspStatus();
+        if (alive) dspStatus = st;
+      } catch {
+        /* сессия закрылась — покажем «неактивно» на следующем опросе */
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 250);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  });
+
+  /** dBFS → проценты шкалы (−60 dBFS…0 → 0…100 %). */
+  function dbPct(db: number): number {
+    return Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
+  }
+
+  function fmtDb(db: number): string {
+    return db <= -95 ? '−∞' : db.toFixed(1);
+  }
 </script>
 
 {#if app.showSettings}
@@ -193,6 +232,7 @@
     <nav class="tabs">
       <button class:active={tab === 'profile'} onclick={() => (tab = 'profile')}>Профиль</button>
       <button class:active={tab === 'connection'} onclick={() => (tab = 'connection')}>Подключение</button>
+      <button class:active={tab === 'voice'} onclick={() => (tab = 'voice')}>Голос</button>
       <button class:active={tab === 'plugins'} onclick={() => (tab = 'plugins')}>Плагины</button>
       <button class:active={tab === 'snowflake'} onclick={() => (tab = 'snowflake')}>Инспектор Snowflake</button>
       <button class:active={tab === 'protocol'} onclick={() => (tab = 'protocol')}>Протокол</button>
@@ -264,6 +304,100 @@
             </span>
           </button>
         </div>
+      {:else if tab === 'voice'}
+        <section class="pane">
+          <h3>Обработка микрофона</h3>
+          <p class="hint">
+            Путь сигнала: микрофон → DC-блокер → шумоподавление (STFT + винеровский гейн)
+            → автоусиление → лимитер → Opus. Всё считается в Rust-колбеке захвата,
+            настройки применяются на лету — без перезахода в канал.
+          </p>
+
+          <div class="dsp-row">
+            <div class="dsp-main">
+              <div class="dsp-name">Шумоподавление</div>
+              <div class="dsp-desc">
+                Давит стационарный шум (вентиляторы, клавиатура, улица) и паузы.
+                Во время речи оценка шума замораживается — голос не трогается.
+              </div>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                checked={app.voiceDsp.ns_enabled}
+                onchange={(e) => void app.setVoiceDsp({ ...app.voiceDsp, ns_enabled: (e.target as HTMLInputElement).checked })}
+              />
+              <span></span>
+            </label>
+          </div>
+          {#if app.voiceDsp.ns_enabled}
+            <div class="seg">
+              {#each NS_LEVELS as lv (lv.id)}
+                <button
+                  class:on={app.voiceDsp.ns_strength === lv.id}
+                  onclick={() => void app.setVoiceDsp({ ...app.voiceDsp, ns_strength: lv.id })}
+                >{lv.label}</button>
+              {/each}
+            </div>
+            <p class="hint small">Сильное — для шумных мест; если голос «тонет» или звучит роботизированно — уменьши силу.</p>
+          {/if}
+
+          <div class="dsp-row">
+            <div class="dsp-main">
+              <div class="dsp-name">Автоусиление (AGC)</div>
+              <div class="dsp-desc">
+                Доводит речь до −20 dBFS: тихий микрофон подтягивается (до +30 dB),
+                громкий — приглушается. В паузах усиление заморожено, шум не разгоняется.
+              </div>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                checked={app.voiceDsp.agc_enabled}
+                onchange={(e) => void app.setVoiceDsp({ ...app.voiceDsp, agc_enabled: (e.target as HTMLInputElement).checked })}
+              />
+              <span></span>
+            </label>
+          </div>
+        </section>
+
+        <section class="pane">
+          <h3>Живые уровни</h3>
+          {#if dspStatus?.active}
+            <div class="meter">
+              <div class="meter-head">
+                <span>Вход · до обработки</span>
+                <span class="mono">{fmtDb(dspStatus.metrics.input_db)} dBFS</span>
+              </div>
+              <div class="meter-track">
+                <div class="meter-fill" style:width="{dbPct(dspStatus.metrics.input_db)}%"></div>
+              </div>
+            </div>
+            <div class="meter">
+              <div class="meter-head">
+                <span>Выход · уходит в Opus</span>
+                <span class="mono">{fmtDb(dspStatus.metrics.output_db)} dBFS</span>
+              </div>
+              <div class="meter-track">
+                <div class="meter-fill out" class:speaking={dspStatus.metrics.speech} style:width="{dbPct(dspStatus.metrics.output_db)}%"></div>
+              </div>
+            </div>
+            <table>
+              <tbody>
+              <tr><td>Детектор</td><td>{#if dspStatus.metrics.speech}<span class="vad on">речь</span>{:else}<span class="vad">тишина</span>{/if}</td></tr>
+              <tr><td>Оценка шума</td><td class="mono">{fmtDb(dspStatus.metrics.noise_db)} dBFS</td></tr>
+              <tr><td>Усиление AGC</td><td class="mono">{dspStatus.metrics.agc_db >= 0 ? '+' : ''}{fmtDb(dspStatus.metrics.agc_db)} dB</td></tr>
+              <tr><td>Шумодав снял</td><td class="mono">{fmtDb(dspStatus.metrics.ns_db)} dB</td></tr>
+              </tbody>
+            </table>
+            <p class="hint small">
+              Цель AGC — речь на выходе около −20 dBFS. Если после включения слышно
+              «дыхание» фона, добавь шумоподавление или прибавь силу.
+            </p>
+          {:else}
+            <p class="hint">Подключись к голосовому каналу — здесь появятся живые уровни микрофона и телеметрия обработки.</p>
+          {/if}
+        </section>
       {:else if tab === 'snowflake'}
         <p class="hint">
           Snowflake — 64-битный ID Discord: <b>42 бита</b> времени (эпоха 2015-01-01) + <b>5</b> worker +
@@ -629,5 +763,67 @@
     font-size: 14px;
     color: var(--text-normal);
   }
+
+  /* ---- голос: шумоподавление + AGC ---- */
+  .pane { margin-bottom: 22px; }
+  .pane h3 { color: var(--header-primary); font-size: 15px; margin-bottom: 10px; }
+  .dsp-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 12px 0;
+  }
+  .dsp-main { flex: 1; min-width: 0; }
+  .dsp-name { color: var(--header-primary); font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .dsp-desc { color: var(--text-muted); font-size: 13px; line-height: 1.5; }
+  .seg {
+    display: inline-flex;
+    background: #1e1f22;
+    border-radius: var(--radius-sm);
+    padding: 3px;
+    gap: 2px;
+    margin-bottom: 8px;
+  }
+  .seg button {
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    border-radius: calc(var(--radius-sm) - 2px);
+  }
+  .seg button:hover { color: var(--text-normal); }
+  .seg button.on { background: #5865f2; color: #fff; }
+  .hint.small { font-size: 12px; }
+
+  .meter { margin-bottom: 12px; }
+  .meter-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 5px;
+  }
+  .meter-head .mono { font-size: 12px; color: var(--text-normal); }
+  .meter-track {
+    height: 8px;
+    background: #1e1f22;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .meter-fill {
+    height: 100%;
+    border-radius: 4px;
+    background: linear-gradient(90deg, #23a55a 0%, #23a55a 62%, #f0b232 85%, #f23f43 100%);
+    transition: width 0.15s linear;
+  }
+  .meter-fill.out { background: #5865f2; }
+  .meter-fill.out.speaking { background: #23a55a; }
+  .vad {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+  .vad.on { color: #23a55a; }
 
 </style>

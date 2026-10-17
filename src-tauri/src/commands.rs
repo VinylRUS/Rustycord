@@ -18,6 +18,7 @@ use crate::state::{AppState, GatewayCommand, INTENTS_BOT};
 use crate::superprops;
 use crate::updater;
 use crate::voice::coordinator;
+use crate::voice::dsp::{DspConfig, DspStatus};
 
 fn es<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
@@ -778,6 +779,44 @@ pub async fn join_voice(
     .await
     .map_err(es)?;
     Ok(())
+}
+
+/* ------------------------- голосовой DSP ------------------------- */
+
+/// Текущие настройки шумодава и AGC (для экрана «Голос» в настройках).
+#[tauri::command]
+pub fn get_voice_dsp(state: State<'_, Arc<AppState>>) -> DspConfig {
+    *state.voice_dsp_cfg.lock().unwrap()
+}
+
+/// Обновить настройки DSP на лету — применяется к следующему кадру
+/// живой сессии без перезахода в канал.
+#[tauri::command]
+pub fn set_voice_dsp(
+    state: State<'_, Arc<AppState>>,
+    ns_enabled: bool,
+    ns_strength: String,
+    agc_enabled: bool,
+) -> Result<(), String> {
+    let strength = DspConfig::strength_from_str(&ns_strength).ok_or_else(|| {
+        format!("ns_strength должен быть low/medium/high, получено «{ns_strength}»")
+    })?;
+    *state.voice_dsp_cfg.lock().unwrap() = DspConfig {
+        ns_enabled,
+        ns_strength: strength,
+        agc_enabled,
+    };
+    Ok(())
+}
+
+/// Телеметрия DSP для индикаторов уровня микрофона
+/// (живая только при открытой голосовой сессии — см. `active`).
+#[tauri::command]
+pub fn get_voice_dsp_status(state: State<'_, Arc<AppState>>) -> DspStatus {
+    DspStatus {
+        active: state.voice_dsp_active.load(Ordering::Relaxed),
+        metrics: *state.voice_dsp_metrics.lock().unwrap(),
+    }
 }
 
 /// op 18 — начать трансляцию экрана/камеры в голосовом канале.

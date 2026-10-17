@@ -3,13 +3,14 @@
 //! plumbing handles for the gateway task and voice sessions.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::rest::models::{Channel, Member, Presence, Relationship, Role, User, VoiceState};
+use crate::voice::dsp::{DspConfig, DspMetrics};
 use crate::voice::VoiceControls;
 
 /// Интенты для БОТ-сессии (юзер-аккаунты их не шлют — см. `is_bot`).
@@ -264,6 +265,13 @@ pub struct AppState {
     /// Гильдии, на которые уже отправлены op 37 + op 14 (юзер-сессии).
     /// Дедуп: повторное открытие сервера не спамит gateway подписками.
     pub subscribed_guilds: Mutex<HashSet<String>>,
+    /// Настройки голосового DSP (шумодав + AGC). Пишутся командой
+    /// set_voice_dsp, читаются аудио-колбеком живой сессии на лету.
+    pub voice_dsp_cfg: Arc<Mutex<DspConfig>>,
+    /// Телеметрия DSP (уровни, усиление, VAD) — рисуется в настройках.
+    pub voice_dsp_metrics: Arc<Mutex<DspMetrics>>,
+    /// Открыт ли микрофон прямо сейчас (для честного «нет сессии» в UI).
+    pub voice_dsp_active: Arc<AtomicBool>,
     /// Ленивые списки участников (guild_id → снимок по текущему каналу).
     /// Заполняется GUILD_MEMBER_LIST_UPDATE; channel_id хранится и после
     /// обрыва — после переподключения READY-хендлер переигрывает подписку
@@ -292,6 +300,9 @@ impl AppState {
             voice_desired: Mutex::new(HashMap::new()),
             voice_notify: tokio::sync::Notify::new(),
             subscribed_guilds: Mutex::new(HashSet::new()),
+            voice_dsp_cfg: Arc::new(Mutex::new(DspConfig::default())),
+            voice_dsp_metrics: Arc::new(Mutex::new(DspMetrics::default())),
+            voice_dsp_active: Arc::new(AtomicBool::new(false)),
             member_lists: Mutex::new(HashMap::new()),
         }
     }

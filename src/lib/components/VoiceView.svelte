@@ -2,12 +2,47 @@
   import { app } from '../stores/app.svelte';
   import Avatar from './Avatar.svelte';
   import Icon from './Icon.svelte';
+  import type { VoiceDspStatus } from '../types';
 
   const guild = $derived(app.activeGuild);
   const channel = $derived(app.activeChannel);
   const channelId = $derived(channel?.id ?? '');
   const participants = $derived(guild ? app.voiceUsers(guild.id, channelId) : []);
   const streams = $derived(app.streamsInMyChannel());
+  const connected = $derived(
+    !!app.myVoice && app.myVoice.guildId === (guild?.id ?? '') && app.myVoice.channelId === channelId,
+  );
+
+  /** Уровень своего микрофона после обработки (DSP-телеметрия, 7 Гц). */
+  let micLevel = $state<VoiceDspStatus | null>(null);
+  $effect(() => {
+    if (!connected || !app.backend) {
+      micLevel = null;
+      return;
+    }
+    let alive = true;
+    const poll = async () => {
+      try {
+        const st = await app.backend!.getVoiceDspStatus();
+        if (alive) micLevel = st;
+      } catch {
+        /* сессия закрылась — индикатор погаснет через connected */
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 150);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  });
+
+  /** dBFS → проценты шкалы (−60…0 → 0…100). */
+  const micPct = $derived(
+    micLevel?.active
+      ? Math.max(0, Math.min(100, ((micLevel.metrics.output_db + 60) / 60) * 100))
+      : 0,
+  );
 
   // Локальное превью своего захвата (экран/камера) — биндим MediaStream
   // к <video> и обновляем при смене источника.
@@ -25,14 +60,24 @@
   <header>
     <Icon name="speaker" size={22} color="#23a55a" />
     <h1>{channel?.name ?? 'Голосовой канал'}</h1>
-    {#if app.myVoice?.guildId === guild?.id && app.myVoice?.channelId === channelId}
+    {#if connected}
       <span class="connected"><Icon name="signal" size={14} color="#23a55a" /> Подключено</span>
+      {#if micLevel?.active}
+        <div
+          class="mic-meter"
+          class:speaking={micLevel.metrics.speech}
+          title="Уровень микрофона после обработки · {app.voiceDsp.ns_enabled ? 'шумодав ' + app.voiceDsp.ns_strength : 'шумодав выкл'} · AGC {app.voiceDsp.agc_enabled ? 'вкл' : 'выкл'}"
+        >
+          <Icon name="mic" size={14} color={micLevel.metrics.speech ? '#23a55a' : '#b5bac1'} />
+          <div class="mic-track"><div class="mic-fill" style:width="{micPct}%"></div></div>
+        </div>
+      {/if}
     {:else}
       <button class="btn-blurple join" onclick={() => guild && channel && void app.toggleVoice(guild.id, channel.id)}>
         Подключиться к голосу
       </button>
     {/if}
-    {#if app.myVoice?.guildId === guild?.id && app.myVoice?.channelId === channelId}
+    {#if connected}
       <button class="leave" title="Отключиться" onclick={() => void app.leaveVoice()}>
         <Icon name="phone-off" size={20} color="#f23f43" />
       </button>
@@ -176,6 +221,28 @@
     color: var(--green);
     font-size: 13px;
     font-weight: 600;
+  }
+  .mic-meter {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-secondary);
+  }
+  .mic-meter.speaking { box-shadow: inset 0 0 0 1px #23a55a66; }
+  .mic-track {
+    width: 72px;
+    height: 5px;
+    border-radius: 3px;
+    background: #1e1f22;
+    overflow: hidden;
+  }
+  .mic-fill {
+    height: 100%;
+    border-radius: 3px;
+    background: #23a55a;
+    transition: width 0.12s linear;
   }
   .join { font-size: 13px; padding: 8px 14px; }
   .leave {

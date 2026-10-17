@@ -9,11 +9,13 @@
 //! при иных возможностях устройства подключается линейный ресемплер
 //! (48k ↔ device rate) и при необходимости — миксдаун/дабмикс каналов.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 
+use crate::voice::dsp::{DspConfig, DspMetrics, VoiceDsp};
 use crate::voice::jitter::Mixer;
 use crate::voice::mic::MicTap;
 use crate::voice::resample::LinearResampler;
@@ -55,11 +57,17 @@ impl Drop for DeviceGuard {
 /// ни держать в асинхронной сессии. Создание, жизнь и дроп — один поток.
 ///
 /// Микрофон пишет в `MicTap` (мост в songbird Input), динамики читают
-/// из `Mixer` (заполняется VoiceTick'ами songbird).
+/// из `Mixer` (заполняется VoiceTick'ами songbird). Перед записью в
+/// MicTap сигнал проходит голосовой DSP (devices.rs → dsp.rs):
+/// шумоподавление + AGC с настройками из `dsp_cfg` (живое обновление)
+/// и телеметрией в `dsp_metrics`.
 pub fn open(
     mixer: &Arc<Mutex<Mixer>>,
     controls: &Arc<Mutex<VoiceControls>>,
     mic: &Arc<MicTap>,
+    dsp_cfg: &Arc<Mutex<DspConfig>>,
+    dsp_metrics: &Arc<Mutex<DspMetrics>>,
+    dsp_active: &Arc<AtomicBool>,
 ) -> DeviceGuard {
     // Парковка: просыпается при дропе Guard'а (закрытие канала).
     let (tx, rx) = std::sync::mpsc::channel::<()>();
@@ -69,14 +77,18 @@ pub fn open(
     let mixer = Arc::clone(mixer);
     let controls = Arc::clone(controls);
     let mic = Arc::clone(mic);
+    let dsp_cfg = Arc::clone(dsp_cfg);
+    let dsp_metrics = Arc::clone(dsp_metrics);
+    let dsp_active = Arc::clone(dsp_active);
 
     let handle = std::thread::spawn(move || {
         let output = open_output(&mixer, &controls);
-        let input = open_input(&mic);
+        let input = open_input(&mic, &dsp_cfg, &dsp_metrics, &dsp_active);
         let _ = itx.send(input.is_some());
         // Stream'ы созданы, живут и будут дропнуты в этом же потоке.
         let _hold = (output, input);
         let _ = rx.recv(); // блок до закрытия канала (дроп Guard'а)
+        dsp_active.store(false, Ordering::Relaxed);
         mic.close(); // EOF в songbird-трек — источник завершается чисто
     });
     let has_input = irx.recv().unwrap_or(false);
@@ -287,13 +299,22 @@ fn pick_input(device: &cpal::Device) -> Option<(StreamConfig, SampleFormat)> {
     Some((cfg.into(), fmt))
 }
 
-/// Состояние колбэка ввода: устройство → моно 48k f32 → MicTap
-/// (мост в songbird: стерео-дублирование делает сам MicTap).
+/// Состояние колбэка ввода: устройство → моно 48k f32 → DSP
+/// (шумодав + AGC) → MicTap (мост в songbird: стерео-дублирование
+/// делает сам MicTap).
 struct InTap {
     mic: Arc<MicTap>,
     dev_ch: usize,
     /// device-rate-моно → 48k-моно (None при 48k).
     res: Option<LinearResampler>,
+    /// Голосовой DSP (шумодав + AGC + лимитер).
+    dsp: VoiceDsp,
+    /// Живые настройки (общие с командой set_voice_dsp).
+    cfg: Arc<Mutex<DspConfig>>,
+    /// Телеметрия для UI.
+    metrics: Arc<Mutex<DspMetrics>>,
+    /// Переиспользуемый буфер обработанных сэмплов (без аллокаций).
+    scratch: Vec<f32>,
 }
 
 impl InTap {
@@ -315,11 +336,23 @@ impl InTap {
         if at48k.is_empty() {
             return;
         }
-        self.mic.push_mono(&at48k);
+        // Шумодав + AGC (настройки читаем на лету — переключение
+        // применяется к следующему кадру без перезапуска сессии).
+        let cfg = *self.cfg.lock().unwrap();
+        self.dsp.set_config(cfg);
+        self.scratch.clear();
+        self.dsp.push(&at48k, &mut self.scratch);
+        *self.metrics.lock().unwrap() = self.dsp.metrics();
+        self.mic.push_mono(&self.scratch);
     }
 }
 
-fn open_input(mic: &Arc<MicTap>) -> Option<Stream> {
+fn open_input(
+    mic: &Arc<MicTap>,
+    dsp_cfg: &Arc<Mutex<DspConfig>>,
+    dsp_metrics: &Arc<Mutex<DspMetrics>>,
+    dsp_active: &Arc<AtomicBool>,
+) -> Option<Stream> {
     let host = cpal::default_host();
     let device = match host.default_input_device() {
         Some(d) => d,
@@ -350,7 +383,13 @@ fn open_input(mic: &Arc<MicTap>) -> Option<Stream> {
         mic: Arc::clone(mic),
         dev_ch,
         res,
+        dsp: VoiceDsp::new(*dsp_cfg.lock().unwrap()),
+        cfg: Arc::clone(dsp_cfg),
+        metrics: Arc::clone(dsp_metrics),
+        scratch: Vec::new(),
     };
+    // Снимок настроек для лога (tap уедет в замыкание колбэка).
+    let cfg_snapshot = tap.dsp.config();
     let err_fn = |e| tracing::warn!("voice: ошибка ввода: {e}");
 
     let stream = match fmt {
@@ -372,7 +411,23 @@ fn open_input(mic: &Arc<MicTap>) -> Option<Stream> {
     };
     match stream {
         Some(s) => match s.play() {
-            Ok(()) => Some(s),
+            Ok(()) => {
+                dsp_active.store(true, Ordering::Relaxed);
+                tracing::info!(
+                    "voice: микрофон открыт, DSP: шумодав {}, AGC {}",
+                    if cfg_snapshot.ns_enabled {
+                        "вкл"
+                    } else {
+                        "выкл"
+                    },
+                    if cfg_snapshot.agc_enabled {
+                        "вкл"
+                    } else {
+                        "выкл"
+                    }
+                );
+                Some(s)
+            }
             Err(e) => {
                 tracing::warn!("voice: не удалось запустить ввод: {e}");
                 None

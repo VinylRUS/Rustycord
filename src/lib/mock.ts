@@ -8,7 +8,7 @@
  *     is exactly what the Rust core receives from the real Gateway.
  */
 import type { Backend, GetMessageOptions } from './ipc';
-import type { BackendEvent, Channel, Guild, GuildFolder, LoginResult, Member, Message, PluginInfo, PluginMeta, Presence, RailOrderItem, Relationship, Role, SnowflakeInfo, StateSnapshot, UpdateInfo, User, UserProfile, VoiceState } from './types';
+import type { BackendEvent, Channel, Guild, GuildFolder, LoginResult, Member, Message, PluginInfo, PluginMeta, Presence, RailOrderItem, Relationship, Role, SnowflakeInfo, StateSnapshot, UpdateInfo, User, UserProfile, VoiceDspConfig, VoiceDspStatus, VoiceState } from './types';
 import { parseSnowflakeLocal } from './time';
 
 /* ---------- helpers ---------- */
@@ -439,6 +439,10 @@ export class MockBackend implements Backend {
   private olderServed = new Set<string>();
   private seq = 100;
   private running = false;
+  /** Настройки голосового DSP (демо: хранятся, «применяются» мгновенно). */
+  private dspCfg: VoiceDspConfig = { ns_enabled: true, ns_strength: 'medium', agc_enabled: true };
+  /** Момент входа в голосовой канал (0 — не в канале) — для симуляции уровней. */
+  private voiceJoinedAt = 0;
 
   private emit(ev: BackendEvent) {
     for (const h of this.handlers) h(ev);
@@ -741,6 +745,49 @@ export class MockBackend implements Backend {
     return 'демо-режим: логи пишутся только в приложении';
   }
 
+  async getVoiceDsp(): Promise<VoiceDspConfig> {
+    return { ...this.dspCfg };
+  }
+
+  async setVoiceDsp(cfg: VoiceDspConfig): Promise<void> {
+    this.dspCfg = { ...cfg };
+  }
+
+  /** Симуляция телеметрии: «речь» приходит волнами, шумодав душит паузы,
+   * AGC подтягивает речь к −20 dBFS — ровно как настоящий dsp.rs. */
+  async getVoiceDspStatus(): Promise<VoiceDspStatus> {
+    const idle: VoiceDspStatus = {
+      active: false,
+      metrics: { input_db: -100, output_db: -100, noise_db: -100, agc_db: 0, ns_db: 0, speech: false },
+    };
+    if (!this.voiceJoinedAt) return idle;
+    const t = (Date.now() - this.voiceJoinedAt) / 1000;
+    const cfg = this.dspCfg;
+    // «Речь» ~55 % времени: плавный переключатель с шумным фронтом.
+    const speaking = Math.sin(t / 2.8) > -0.3;
+    const input = speaking ? -30 + 4 * Math.sin(t * 1.7) : -46 + 2 * Math.sin(t * 0.9);
+    const noise = -45 + 1.5 * Math.sin(t * 0.31);
+    // Шумодав: в паузах давит сильно (сильнее — выше сила), на речи почти не трогает.
+    const nsCut = cfg.ns_enabled
+      ? (speaking ? -3 : ({ low: -8, medium: -14, high: -20 })[cfg.ns_strength])
+      : 0;
+    const afterNs = Math.max(input + nsCut, noise + nsCut);
+    // AGC: подтягивает речь к −20 dBFS, в тишине заморожен.
+    const agc = cfg.agc_enabled ? Math.min(30, Math.max(-12, -20 - afterNs)) : 0;
+    const output = speaking ? afterNs + agc : afterNs;
+    return {
+      active: true,
+      metrics: {
+        input_db: Math.round(input * 10) / 10,
+        output_db: Math.round(Math.max(output, -60) * 10) / 10,
+        noise_db: Math.round(noise * 10) / 10,
+        agc_db: Math.round(agc * 10) / 10,
+        ns_db: nsCut,
+        speech: speaking,
+      },
+    };
+  }
+
   async gatewaySendRaw(frame: string): Promise<void> {
     // В демо-режиме настоящего websocket нет — валидируем JSON и «отправляем»
     // обратно как dispatch, чтобы UI-консоль протокола была живой.
@@ -769,6 +816,7 @@ export class MockBackend implements Backend {
 
   async joinVoice(guildId: string | null, channelId: string | null, selfMute: boolean, selfDeaf: boolean, selfVideo?: boolean): Promise<void> {
     const gid = guildId ?? channelId ?? 'dm';
+    this.voiceJoinedAt = channelId ? Date.now() : 0;
     this.emit({
       type: 'dispatch',
       t: 'VOICE_STATE_UPDATE',

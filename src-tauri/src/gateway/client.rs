@@ -115,6 +115,13 @@ fn redact(v: &Value) -> String {
 /// команд за 60 секунд. Реальный трафик клиента далёк от лимита (десятки
 /// в минуту при активном скролле) — бакет нужен как страховка от шторма
 /// подписок, а не как ретрай-механика.
+///
+/// ВАЖНО (урок v0.9.4): занятие слота НЕ блокирует select-петлю. Урок
+/// простой — async-пауза до 60 с внутри ветки rx.recv() замораживала
+/// ВСЁ: входящие кадры не читались, heartbeat не отправлялся, шлюз
+/// умирал «зомби» → реконнект → replay подписок → снова шторм. Теперь
+/// при нехватке слотов команда уходит в отложенную очередь (см. run_session),
+/// а петля продолжает читать сокет и слать пульсы.
 struct CmdBucket {
     window: VecDeque<std::time::Instant>,
 }
@@ -139,20 +146,36 @@ impl CmdBucket {
         CMD_LIMIT.saturating_sub(self.window.len())
     }
 
-    /// Занять слот; при переполнении — пауза до самого старого слота
-    /// (соединение сами не рвём: пауза безопаснее реконнекта).
-    async fn acquire(&mut self) {
-        loop {
-            let now = std::time::Instant::now();
-            if self.prune(now) > 0 {
-                self.window.push_back(now);
-                return;
-            }
-            let oldest = self.window.front().copied().unwrap_or(now);
-            let wait = CMD_WINDOW.saturating_sub(now.duration_since(oldest));
-            tracing::warn!("gateway: лимит команд {CMD_LIMIT}/60с — пауза {wait:?}");
-            tokio::time::sleep(wait).await;
+    /// Занять `n` слотов в момент `now`, если свободно достаточно.
+    /// Атомарно: при нехватке не занимается ни один слот (команда —
+    /// единое целое, частичная отправка мульти-кадрового bulk недопустима).
+    fn try_acquire_at(&mut self, now: std::time::Instant, n: usize) -> bool {
+        if n == 0 {
+            return true;
         }
+        if self.prune(now) >= n {
+            for _ in 0..n {
+                self.window.push_back(now);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Синхронная обёртка для боевого кода.
+    fn try_acquire(&mut self, n: usize) -> bool {
+        self.try_acquire_at(std::time::Instant::now(), n)
+    }
+
+    /// Момент, когда освободится следующий слот (самый старый + окно).
+    /// Пустое окно — «сейчас». До этого момента отложенные команды
+    /// будить бессмысленно.
+    fn next_free_at(&self) -> std::time::Instant {
+        self.window
+            .front()
+            .map(|t| *t + CMD_WINDOW)
+            .unwrap_or_else(std::time::Instant::now)
     }
 }
 
@@ -400,6 +423,13 @@ async fn run_session(
     // replay подписок в events.rs (READY/RESUMED → flush из кэша).
     let mut ready = false;
     let mut pending_cmds: Vec<GatewayCommand> = Vec::new();
+    // Отложенные команды: лимит 120/60с исчерпан. Ждут освобождения слотов
+    // БЕЗ блокировки select-петли — пульсы и входящие кадры обрабатываются
+    // как ни в чём не бывало. Подписки списков участников коалесятся по
+    // ключу «гильдия:канал»: шторм скролла большого сервера (десятки
+    // обновлений диапазонов в минуту) схлопывается до последнего набора.
+    let mut deferred: VecDeque<GatewayCommand> = VecDeque::new();
+    let mut wake = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -415,7 +445,24 @@ async fn run_session(
                     pending_cmds.push(cmd);
                     continue;
                 }
-                send_command(app, &mut writer, &cmd, &mut frames, &mut bucket).await?;
+                dispatch_cmd(app, &mut writer, cmd, &mut frames, &mut bucket,
+                             &mut deferred, &mut wake).await?;
+            }
+
+            // Будильник отложенной очереди: как только старейший слот
+            // протух — выливаем сколько влезает (обычно всё).
+            _ = tokio::time::sleep_until(wake), if !deferred.is_empty() => {
+                while !deferred.is_empty() {
+                    let need = frames_needed(deferred.front().expect("deferred непуст"));
+                    if !bucket.try_acquire(need) {
+                        break;
+                    }
+                    let cmd = deferred.pop_front().expect("deferred непуст");
+                    send_command(app, &mut writer, &cmd, &mut frames).await?;
+                }
+                if !deferred.is_empty() {
+                    wake = tokio::time::Instant::from_std(bucket.next_free_at());
+                }
             }
             _ = heartbeat.tick() => {
                 if !acked {
@@ -460,8 +507,9 @@ async fn run_session(
                                             "gateway: после READY отправляем {} отложенных команд",
                                             queued.len()
                                         );
-                                        for cmd in &queued {
-                                            send_command(app, &mut writer, cmd, &mut frames, &mut bucket).await?;
+                                        for cmd in queued {
+                                            dispatch_cmd(app, &mut writer, cmd, &mut frames,
+                                                         &mut bucket, &mut deferred, &mut wake).await?;
                                         }
                                     }
                                 }
@@ -562,26 +610,108 @@ async fn run_session(
     }
 }
 
+/// Разбить bulk-подписку (op 37) на кадры по весу: сумма JSON-весов пар
+/// [gid, sub] не должна превышать 15 360 байт на кадр — так чанкует
+/// updateGuildSubscriptions официальный клиент (вес пары — длина её
+/// JSON-записи [gid, {…}] вместе с квадратными скобками).
+fn build_bulk_frames(guild_ids: &[String]) -> Vec<Value> {
+    const BULK_BUDGET: usize = 15_360;
+    let mut out = Vec::new();
+    let mut subs = serde_json::Map::new();
+    let mut weight = 0usize;
+    for gid in guild_ids {
+        let sub = json!({
+            "typing": true, "threads": true,
+            "activities": true, "member_updates": true
+        });
+        let w = serde_json::to_string(&json!([gid, sub]))
+            .map(|s| s.len())
+            .unwrap_or(usize::MAX);
+        if !subs.is_empty() && weight + w > BULK_BUDGET {
+            out.push(json!({ "op": 37, "d": { "subscriptions": subs } }));
+            subs = serde_json::Map::new();
+            weight = 0;
+        }
+        subs.insert(gid.clone(), sub);
+        weight += w;
+    }
+    if !subs.is_empty() {
+        out.push(json!({ "op": 37, "d": { "subscriptions": subs } }));
+    }
+    out
+}
+
+/// Сколько кадров займёт команда — столько слотов лимита 120/60с
+/// занимает отправка (bulk — по числу чанков, остальное — один кадр).
+fn frames_needed(cmd: &GatewayCommand) -> usize {
+    match cmd {
+        GatewayCommand::BulkGuildSubscribe { guild_ids } => build_bulk_frames(guild_ids).len(),
+        _ => 1,
+    }
+}
+
+/// Провести команду через лимит 120/60с: есть слоты — отправить сразу,
+/// нет — в отложенную очередь (select-петля не блокируется, пульсы и
+/// входящие кадры живут своей жизнью). Подписки списков участников
+/// коалесятся по ключу «гильдия:канал»: шторм скролла большого сервера
+/// схлопывается до последнего набора диапазонов (новая редакция
+/// заменяет старую прямо в очереди, позиция сохраняется).
+async fn dispatch_cmd(
+    app: &tauri::AppHandle,
+    writer: &mut crate::wsutil::WsWriter,
+    cmd: GatewayCommand,
+    frames: &mut FrameLog,
+    bucket: &mut CmdBucket,
+    deferred: &mut VecDeque<GatewayCommand>,
+    wake: &mut tokio::time::Instant,
+) -> Result<()> {
+    let need = frames_needed(&cmd);
+    if bucket.try_acquire(need) {
+        send_command(app, writer, &cmd, frames).await?;
+    } else {
+        tracing::warn!(
+            "gateway: лимит 120/60с исчерпан — команда ({} кадров) отложена, в очереди {}",
+            need,
+            deferred.len() + 1
+        );
+        let key = |c: &GatewayCommand| match c {
+            GatewayCommand::SubscribeMemberList {
+                guild_id,
+                channel_id,
+                ..
+            } => Some((guild_id.clone(), channel_id.clone())),
+            _ => None,
+        };
+        if let Some(k) = key(&cmd) {
+            if let Some(slot) = deferred.iter_mut().find(|c| key(c).as_ref() == Some(&k)) {
+                *slot = cmd;
+                return Ok(());
+            }
+        }
+        deferred.push_back(cmd);
+        *wake = tokio::time::Instant::from_std(bucket.next_free_at());
+    }
+    Ok(())
+}
+
 /// Отправка одного gateway-команды как кадра JSON. Вынесено из select-петли,
 /// чтобы один и тот же код обслуживал и live-команды, и отложенные
-/// (накопленные до READY и вылитые после первого dispatch). Каждый кадр
-/// проходит через лимит 120/60с и попадает в кольцевый буфер (дамп при 4002).
+/// (накопленные до READY и ждущие слотов лимита). Каждый кадр попадает
+/// в кольцевой буфер (дамп при 4002); слоты лимита занимается вызывающий
+/// (dispatch_cmd / будильник отложенной очереди) — по числу кадров команды.
 async fn send_command(
     app: &tauri::AppHandle,
     writer: &mut crate::wsutil::WsWriter,
     cmd: &GatewayCommand,
     frames: &mut FrameLog,
-    bucket: &mut CmdBucket,
 ) -> Result<()> {
-    /// Занять слот лимита, записать кадр в буфер, отправить.
+    /// Записать кадр в буфер и отправить.
     async fn send_frame(
         writer: &mut crate::wsutil::WsWriter,
         frames: &mut FrameLog,
-        bucket: &mut CmdBucket,
         label: &str,
         payload: &Value,
     ) -> Result<()> {
-        bucket.acquire().await;
         frames.record(label, payload);
         wsutil::send_json(writer, payload).await
     }
@@ -592,7 +722,7 @@ async fn send_command(
             // ДО отправки и ругаемся в UI, не трогая соединение.
             match serde_json::from_str::<Value>(text) {
                 Ok(v) => {
-                    send_frame(writer, frames, bucket, "SendText (консоль)", &v).await?;
+                    send_frame(writer, frames, "SendText (консоль)", &v).await?;
                 }
                 Err(e) => {
                     tracing::warn!("gateway: SendText отклонён — не JSON: {e}");
@@ -608,7 +738,6 @@ async fn send_command(
             send_frame(
                 writer,
                 frames,
-                bucket,
                 "op 8 RequestMembers",
                 &json!({
                     "op": 8,
@@ -623,32 +752,12 @@ async fn send_command(
             // Чанкование как в официальном клиенте
             // (updateGuildSubscriptions): сумма JSON-весов пар
             // [gid, sub] не должна превышать 15 360 байт на кадр.
-            let mut out_frames: Vec<Value> = Vec::new();
-            let mut subs = serde_json::Map::new();
-            let mut budget = 0usize;
-            for gid in guild_ids {
-                let sub = json!({
-                    "typing": true, "threads": true,
-                    "activities": true, "member_updates": true
-                });
-                let cost = format!("[{gid:?},{sub}]").len();
-                if budget + cost > 15_360 {
-                    out_frames.push(json!({ "op": 37, "d": { "subscriptions": subs } }));
-                    subs = serde_json::Map::new();
-                    budget = 0;
-                }
-                subs.insert(gid.clone(), sub);
-                budget += cost;
-            }
-            if !subs.is_empty() {
-                out_frames.push(json!({ "op": 37, "d": { "subscriptions": subs } }));
-            }
+            let out_frames = build_bulk_frames(guild_ids);
             let n_frames = out_frames.len();
             for (i, frame) in out_frames.iter().enumerate() {
                 send_frame(
                     writer,
                     frames,
-                    bucket,
                     &format!("op 37 bulk [{}/{}]", i + 1, n_frames),
                     frame,
                 )
@@ -706,7 +815,7 @@ async fn send_command(
                 "op": 37,
                 "d": { "subscriptions": subs }
             });
-            send_frame(writer, frames, bucket, "op 37 member-list", &payload).await?;
+            send_frame(writer, frames, "op 37 member-list", &payload).await?;
             let last = ranges.last().map(|(_, b)| b + 1).unwrap_or(0);
             tracing::info!(
                 "gateway: op 37 список участников {guild_id} · канал {cid} · {} диапазон(ов), строк до {last}",
@@ -726,7 +835,6 @@ async fn send_command(
             send_frame(
                 writer,
                 frames,
-                bucket,
                 "op 4 VoiceStateUpdate",
                 &json!({
                     "op": 4,
@@ -752,7 +860,6 @@ async fn send_command(
             send_frame(
                 writer,
                 frames,
-                bucket,
                 "op 18 StreamCreate",
                 &json!({
                     "op": 18,
@@ -771,7 +878,6 @@ async fn send_command(
             send_frame(
                 writer,
                 frames,
-                bucket,
                 "op 20 StreamDelete",
                 &json!({ "op": 20, "d": { "stream_key": stream_key } }),
             )
@@ -782,7 +888,6 @@ async fn send_command(
             send_frame(
                 writer,
                 frames,
-                bucket,
                 "op 22 StreamSetPaused",
                 &json!({ "op": 22, "d": { "stream_key": stream_key, "paused": paused } }),
             )

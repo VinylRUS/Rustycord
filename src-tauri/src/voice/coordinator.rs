@@ -170,11 +170,18 @@ async fn voice_session(
     #[cfg(feature = "audio")]
     let stream = mic_pair.1;
 
-    // Устройства: динамики (Mixer) + микрофон (MicTap). Guard держит живые
-    // Stream'ы в отдельном std-потоке (cpal::Stream не Send на части
+    // Устройства: динамики (Mixer) + микрофон (MicTap → DSP). Guard держит
+    // живые Stream'ы в отдельном std-потоке (cpal::Stream не Send на части
     // платформ) — ровно до конца сессии.
     #[cfg(feature = "audio")]
-    let _dev_guard = devices::open(&mixer, &controls, &tap);
+    let _dev_guard = devices::open(
+        &mixer,
+        &controls,
+        &tap,
+        &state.voice_dsp_cfg,
+        &state.voice_dsp_metrics,
+        &state.voice_dsp_active,
+    );
 
     // ---- Driver ----
     // DecodeMode::Decode — songbird декодирует входящий opus в PCM
