@@ -30,7 +30,7 @@
     "@tsconfig/svelte": "^5.0.4",
     "esbuild": "^0.28.2",
     "svelte": "^5.16.0",
-    "svelte-check": "^4.1.1",
+    "svelte-check": "^4.7.7",
     "typescript": "^5.7.2",
     "vite": "^8.3.4"
   },
