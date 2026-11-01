@@ -81,7 +81,7 @@ jobs:
           fi
 
       - name: Upload installers
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rustycord-dev-${{ matrix.platform }}
           if-no-files-found: error
