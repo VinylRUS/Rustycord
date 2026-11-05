@@ -9,3 +9,5 @@ src-tauri/gen/
 .env
 .gh_token
 .vite/
+# локальный референс-клон для реверса, не часть проекта
+discord-client-rs/

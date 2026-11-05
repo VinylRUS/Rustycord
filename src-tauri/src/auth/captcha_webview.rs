@@ -107,7 +107,8 @@ const INIT_SCRIPT: &str = r#"
 
   // X-Super-Properties из НАСТОЯЩЕГО navigator: браузерный контекст окна
   // консистентен сам с собой (UA страницы = UA запроса = UA в XSP).
-  function xsp(build) {
+  function xsp(cfg) {
+    var build = cfg.build;
     var ua = navigator.userAgent || '';
     var os = 'Unknown', osv = '';
     var mnt = ua.match(/Windows NT ([0-9.]+)/);
@@ -125,11 +126,16 @@ const INIT_SCRIPT: &str = r#"
     var p = {
       os: os, browser: browser, device: '',
       system_locale: (navigator.language || 'en-US'),
+      has_client_mods: false,
       browser_user_agent: ua, browser_version: bv, os_version: osv,
       referrer: '', referring_domain: '', referrer_current: '', referring_domain_current: '',
       release_channel: 'stable',
       client_build_number: build || 0,
-      client_event_source: null, design_id: 0
+      native_build_number: null,
+      client_event_source: null,
+      client_launch_id: (cfg.launchId || ''),
+      launch_signature: (cfg.launchSignature || ''),
+      client_app_state: 'focused'
     };
     try { return btoa(unescape(encodeURIComponent(JSON.stringify(p)))); } catch (e) { return ''; }
   }
@@ -138,7 +144,7 @@ const INIT_SCRIPT: &str = r#"
     var h = {
       'Content-Type': 'application/json',
       'X-Discord-Locale': cfg.locale || 'ru-RU',
-      'X-Super-Properties': xsp(cfg.build)
+      'X-Super-Properties': xsp(cfg)
     };
     if (cfg.contextProperties) h['X-Context-Properties'] = cfg.contextProperties;
     if (cfg.captchaKey) h['X-Captcha-Key'] = cfg.captchaKey;
@@ -343,6 +349,8 @@ fn request_js(
         "body": body,
         "build": build,
         "locale": "ru-RU",
+        "launchId": crate::superprops::launch_id(),
+        "launchSignature": crate::superprops::launch_signature(),
         "contextProperties": context_properties,
         "captchaKey": captcha_key,
         "sessionId": session_id,

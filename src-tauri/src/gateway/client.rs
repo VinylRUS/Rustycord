@@ -181,12 +181,17 @@ impl CmdBucket {
 
 /// Properties-набор как у браузерного клиента discord.com/app — совпадает
 /// с нашим X-Super-Properties, чтобы сессия выглядела консистентно.
+/// Формат октября 2026 (реверс discord-client-rs): добавлены
+/// `device_model_name`, `has_client_mods`, `client_launch_id`,
+/// `is_fast_connect`; `design_id` удалён.
 fn client_properties(build: u64) -> serde_json::Value {
     json!({
         "os": "Windows",
         "browser": "Chrome",
         "device": "",
+        "device_model_name": "",
         "system_locale": "ru-RU",
+        "has_client_mods": false,
         "browser_user_agent": crate::superprops::BROWSER_UA,
         "browser_version": crate::superprops::BROWSER_VERSION,
         "os_version": "10",
@@ -197,7 +202,8 @@ fn client_properties(build: u64) -> serde_json::Value {
         "release_channel": "stable",
         "client_build_number": build,
         "client_event_source": null,
-        "design_id": 0
+        "client_launch_id": crate::superprops::launch_id(),
+        "is_fast_connect": true
     })
 }
 
@@ -389,19 +395,17 @@ async fn run_session(
             })
         } else {
             tracing::info!(
-                "gateway: IDENTIFY (юзер) capabilities={USER_CAPABILITIES} без интентов, presence=unknown"
+                "gateway: IDENTIFY (юзер) capabilities={USER_CAPABILITIES} без интентов (fast-connect формат октября 2026)"
             );
+            // Октябрь 2026: официальный клиент НЕ шлёт presence/compress в
+            // IDENTIFY — только token+capabilities+properties+client_state
+            // (реверс discord-client-rs, фикс «gateway auth payload» от
+            // 21.10.2026). Лишние поля не ломают шлюз, но выдают устаревший
+            // клиент.
             json!({
                 "token": token,
                 "capabilities": USER_CAPABILITIES,
                 "properties": client_properties(build),
-                "presence": {
-                    "status": "unknown",
-                    "since": 0,
-                    "activities": [],
-                    "afk": false
-                },
-                "compress": false,
                 "client_state": { "guild_versions": {} }
             })
         };

@@ -5239,7 +5239,7 @@ dependencies = [
 
 [[package]]
 name = "rustycord"
-version = "0.10.4"
+version = "0.10.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5267,6 +5267,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

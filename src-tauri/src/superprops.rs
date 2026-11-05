@@ -9,6 +9,8 @@
 
 use base64::Engine;
 use serde_json::json;
+use std::sync::OnceLock;
+use uuid::Uuid;
 
 /// Дефолт на случай, если discord.com недоступен. Обновляется автоматически
 /// при каждом `connect` — здесь просто правдоподобное значение.
@@ -16,24 +18,55 @@ pub const FALLBACK_BUILD_NUMBER: u64 = 4173;
 
 /// Браузерная личина: Chrome на Windows — самый распространённый профиль
 /// пользователя Discord, наименьшие шансы попасть под эвристики.
+/// Октябрь 2026: официальный веб-клиент ходит с Chrome 154 (реверс
+/// discord-client-rs, коммит «Bump to Chrome 154» от 21.10.2026).
 pub const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-     (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
+     (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
 
 /// Версия браузера из BROWSER_UA — должна совпадать и в X-Super-Properties,
 /// и в gateway properties, иначе сессия выглядит подозрительной.
-pub const BROWSER_VERSION: &str = "149.0.0.0";
+pub const BROWSER_VERSION: &str = "154.0.0.0";
+
+/// Маска launch_signature из реверса официального клиента (октябрь 2026):
+/// v4-UUID, у которого очищены биты этой маски.
+const LAUNCH_SIGNATURE_MASK: u128 = 0x0080_1010_0810_0800_2081_0040_0100_0800;
+
+/// `client_launch_id` — один UUID на запуск процесса. Живёт и в
+/// X-Super-Properties (REST), и в gateway IDENTIFY properties: сервер видит
+/// «один запуск клиента», а не пачку несвязанных сессий. Рождается при
+/// первом обращении, стабилен до конца процесса.
+pub fn launch_id() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| Uuid::new_v4().to_string())
+}
+
+/// `launch_signature` — «подпись запуска»: v4-UUID с занулёнными битами
+/// маски (формат подсмотрен в реверсе; что именно сервер из неё читает,
+/// неизвестно — важна форма). Стабильна, как и launch_id.
+pub fn launch_signature() -> &'static str {
+    static SIG: OnceLock<String> = OnceLock::new();
+    SIG.get_or_init(|| {
+        Uuid::from_u128(Uuid::new_v4().as_u128() & !LAUNCH_SIGNATURE_MASK).to_string()
+    })
+}
 
 fn b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
 /// base64(X-Super-Properties JSON) с конкретным build number.
+///
+/// Формат — октябрь 2026 (реверс discord-client-rs, `build_super_props`):
+/// добавлены `has_client_mods`, `client_launch_id`, `launch_signature`,
+/// `client_app_state`, `native_build_number`; `design_id` удалён.
+/// Локаль оставляем ru-RU — это пер-пользовательское поле, а не отпечаток.
 pub fn super_properties(build_number: u64) -> String {
     let props = json!({
         "os": "Windows",
         "browser": "Chrome",
         "device": "",
         "system_locale": "ru-RU",
+        "has_client_mods": false,
         "browser_user_agent": BROWSER_UA,
         "browser_version": BROWSER_VERSION,
         "os_version": "10",
@@ -43,8 +76,11 @@ pub fn super_properties(build_number: u64) -> String {
         "referring_domain_current": "",
         "release_channel": "stable",
         "client_build_number": build_number,
+        "native_build_number": null,
         "client_event_source": null,
-        "design_id": 0
+        "client_launch_id": launch_id(),
+        "launch_signature": launch_signature(),
+        "client_app_state": "focused"
     });
     b64(props.to_string().as_bytes())
 }

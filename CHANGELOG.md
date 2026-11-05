@@ -5,6 +5,37 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [0.10.5] — 2026-11-06
+
+### Changed
+- **Свежий отпечаток клиента (октябрь 2026)** — по реверсу живого референса
+  `discord-client-rs` (коммиты «Fixed gateway auth payload» / «Bump to
+  Chrome 154» от 21.10.2026, на 4 дня новее нашего v0.10.4):
+  - X-Super-Properties: добавлены `has_client_mods`, `client_launch_id`,
+    `launch_signature`, `client_app_state`, `native_build_number`;
+    `design_id` удалён; Chrome 149 → 154.
+  - Gateway IDENTIFY (юзер-сессия): `presence` и `compress` больше не
+    шлются (официальный клиент их не отправляет), properties дополнены
+    `device_model_name`, `has_client_mods`, `client_launch_id`,
+    `is_fast_connect`.
+  - `client_launch_id` — один UUID на запуск процесса, общий для REST и
+    шлюза: сервер видит единую сессию клиента, а не пачку несвязанных
+    запросов. `launch_signature` — v4-UUID с маской из реверса.
+  - Вебвью логина строит X-Super-Properties тем же форматом (поля
+    приходят из Rust через cfg).
+  - Бот-сессия не тронута: там классический v10-протокол с intents,
+    presence и compress — это документированный API.
+- Референс-клон `discord-client-rs` подтянут до master (23 коммита:
+    READY-десериализация, op 40 game activity, Turnstile-инструменты,
+    science-события, детектабл-игры, бейджи).
+
+### Заметки
+- op 41 (клиентская телеметрия: initialization_timestamp, session_id,
+  client_launch_id) пока НЕ отправляется: формат кадра известен, но
+  периодичность отправки из реверса не ясна. Урок v0.10.4 — неверный
+  кадр убивает сессию; лучше подождать более полного реверса. RESUME
+  из v0.10.4 страхует, если сервер когда-нибудь начнёт требовать op 41.
+
 ## [0.10.4] — 2026-10-17
 
 ### Fixed

@@ -1,6 +1,6 @@
 [package]
 name = "rustycord"
-version = "0.10.4"
+version = "0.10.5"
 description = "RustyCord — an unofficial Discord client built with Tauri, reverse-engineered architecture, native performance"
 authors = ["RustyCord contributors"]
 edition = "2021"
@@ -88,6 +88,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Суточные файлы логов в app_log_dir — без консоли релизная сборка
 # иначе не diagnosируемая (баг «gateway отваливается» без логов не поймать).
 tracing-appender = "0.2"
+# client_launch_id / launch_signature в X-Super-Properties и IDENTIFY.
+# Уже в дереве зависимостей (serenity/songbird) — прямой dep только ради
+# генерации UUID запуска.
+uuid = { version = "1", features = ["v4"] }
 
 # Примечание: в Tauri 2 фича `tauri/custom-protocol` (встраивание ассетов фронтенда в
 # бинарник) включается самим CLI при `tauri build` — отдельный passthrough здесь не нужен.
