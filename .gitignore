@@ -4,3 +4,8 @@ src-tauri/target/
 src-tauri/gen/
 .DS_Store
 *.local
+
+# локальные секреты/пути — не коммитить
+.env
+.gh_token
+.vite/
