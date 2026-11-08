@@ -14,7 +14,7 @@
 //!   EventSink (после рефакторинга emit-транспорта на main).
 
 use gpui::{
-    prelude::*, px, relative, rgb, rgba, size, App, Application, Bounds, Context, FontWeight,
+    prelude::*, div, px, relative, rgb, rgba, size, App, Application, Bounds, Context, FontWeight,
     TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 
