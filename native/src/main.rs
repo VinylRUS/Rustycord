@@ -14,7 +14,7 @@
 //!   EventSink (после рефакторинга emit-транспорта на main).
 
 use gpui::{
-    prelude::*, px, rgb, rgba, relative, size, App, Application, Bounds, Context, FontWeight,
+    prelude::*, px, relative, rgb, rgba, size, App, Application, Bounds, Context, FontWeight,
     TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 
@@ -260,12 +260,7 @@ impl RustyApp {
                                     .text_color(rgb(m.color))
                                     .child(m.author),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(TEXT_MUTED))
-                                    .child(m.time),
-                            ),
+                            .child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(m.time)),
                     )
                     .child(
                         div()
@@ -315,21 +310,18 @@ impl RustyApp {
             .child(
                 // Поле ввода: пока визуал; интерактивный ввод с IME —
                 // адаптация input-примера GPUI, следующая итерация.
-                div()
-                    .px_4()
-                    .pb_4()
-                    .child(
-                        div()
-                            .h(px(44.))
-                            .flex()
-                            .items_center()
-                            .px_4()
-                            .rounded(px(8.))
-                            .bg(rgb(INPUT_BG))
-                            .text_sm()
-                            .text_color(rgb(TEXT_MUTED))
-                            .child(format!("Написать на #{}", channel.name)),
-                    ),
+                div().px_4().pb_4().child(
+                    div()
+                        .h(px(44.))
+                        .flex()
+                        .items_center()
+                        .px_4()
+                        .rounded(px(8.))
+                        .bg(rgb(INPUT_BG))
+                        .text_sm()
+                        .text_color(rgb(TEXT_MUTED))
+                        .child(format!("Написать на #{}", channel.name)),
+                ),
             )
     }
 }
@@ -355,7 +347,11 @@ fn initials_of(name: &str) -> String {
     let words: Vec<&str> = name.split_whitespace().collect();
     match words.len() {
         0 => "?".into(),
-        1 => words[0].chars().take(2).flat_map(|c| c.to_uppercase()).collect(),
+        1 => words[0]
+            .chars()
+            .take(2)
+            .flat_map(|c| c.to_uppercase())
+            .collect(),
         _ => {
             let first = words[0].chars().next().unwrap_or('?');
             let second = words[1].chars().next().unwrap_or('?');
