@@ -1,0 +1,19 @@
+[package]
+name = "rustycord-native"
+version = "0.1.0"
+edition = "2021"
+description = "RustyCord Native — GPUI-интерфейс (спайк-ветка gpui-spike, не продукт)"
+
+[dependencies]
+# 0.2.2 — опубликована 30.10.2026, синхронизирована с zed-индустриз.
+# Пока НЕ git-зависимость: у крейта регулярные релизы на crates.io.
+gpui = "0.2.2"
+
+# GPUI тяжеловат в debug-сборке (GPU-обход кадров) — лёгкая оптимизация
+# делает dev-окно отзывчивым без ущерба времени инкрементальной сборки.
+[profile.dev]
+opt-level = 1
+
+[[bin]]
+name = "rustycord-native"
+path = "src/main.rs"

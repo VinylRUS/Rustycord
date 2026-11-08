@@ -4,6 +4,7 @@ name: CI
 #   frontend — svelte-check + production-сборка Vite
 #   rustfmt  — форматирование (не требует системных библиотек)
 #   rust     — clippy (3 платформы) + cargo test
+#   native   — GPUI-спайк (ветка gpui-spike): check/clippy в Linux
 
 on:
   push:
@@ -54,9 +55,45 @@ jobs:
           components: rustfmt
 
       # cargo fmt ничего не компилирует — системные зависимости не нужны
-      - name: cargo fmt --check
+      - name: cargo fmt --check (src-tauri)
         run: cargo fmt --all -- --check
         working-directory: src-tauri
+
+      - name: cargo fmt --check (native/gpui-spike)
+        run: cargo fmt --all -- --check
+        working-directory: native
+
+  # GPUI-спайк: независимый крейт native/ (rustycord-native).
+  # Linux: GPUI рендерится через blade/wgpu → Vulkan; для сборки
+  # нужны wayland/xkbcommon/fontconfig/freetype/vulkan-заголовки.
+  # cargo clippy НЕ линкует бинарник — этого набора хватает для проверки.
+  native:
+    name: Native (GPUI spike)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies (GPUI)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev libx11-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: native
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: native
+
+      - name: Tests
+        run: cargo test
+        working-directory: native
 
   rust:
     name: Rust ${{ matrix.platform }} (clippy + tests)
