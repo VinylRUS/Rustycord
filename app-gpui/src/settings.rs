@@ -304,6 +304,7 @@ pub fn render(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> gpui::A
         .child(sidebar)
         .child(
             gpui::div()
+                .id("settings-scroll")
                 .flex()
                 .flex_col()
                 .flex_1()

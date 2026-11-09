@@ -507,20 +507,13 @@ pub fn voice_toggle(model: &mut AppModel, mute: bool, cx: &mut gpui::Context<App
 /// Триггер typing (перед отправкой, как официальный клиент).
 /// Silent Typing (нативный порт плагина): флаг глушит отправку.
 pub fn trigger_typing(model: &AppModel) {
-    {
-        let Screen::Main(m) = &model.screen else {
-            return;
-        };
-        if m.suppress_typing {
-            return;
-        }
+    let Screen::Main(m) = &model.screen else {
+        return;
+    };
+    if m.suppress_typing {
+        return;
     }
-    let Some(cid) = {
-        let Screen::Main(m) = &model.screen else {
-            return;
-        };
-        m.selected_channel.clone()
-    } else {
+    let Some(cid) = m.selected_channel.clone() else {
         return;
     };
     let core = model.core.clone();
@@ -616,7 +609,7 @@ pub fn edit_save(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) {
 pub fn delete_message(
     model: &mut AppModel,
     message_id: &str,
-    cx: &mut gpui::Context<AppModel>,
+    _cx: &mut gpui::Context<AppModel>,
 ) {
     let Screen::Main(m) = &mut model.screen else {
         return;
@@ -825,10 +818,11 @@ pub fn member_action(
     let tx = model.ui_tx.clone();
     crate::bridge::spawn_tokio(async move {
         let Ok(rest) = core.rest() else { return };
-        let res = match action {
-            crate::state::ModAction::Kick => {
-                rest.delete::<Value>(&format!("/guilds/{gid}/members/{uid}")).await
-            }
+        let res: Result<(), anyhow::Error> = match action {
+            crate::state::ModAction::Kick => rest
+                .delete::<Value>(&format!("/guilds/{gid}/members/{uid}"))
+                .await
+                .map(|_| ()),
             crate::state::ModAction::Ban => {
                 rest.put_empty(&format!("/guilds/{gid}/bans/{uid}")).await
             }
@@ -886,7 +880,6 @@ pub fn stream_toggle(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) {
         return;
     };
     let core = model.core.clone();
-    let tx = model.ui_tx.clone();
     let (gid, cid) = (t.guild_id.clone(), t.channel_id.clone());
     crate::bridge::spawn_tokio(async move {
         let _ = send_gateway(
@@ -901,7 +894,7 @@ pub fn stream_toggle(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) {
     // Локальное превью — тот же UX, что в Tauri (getDisplayMedia в webview).
     #[cfg(feature = "captcha-webview")]
     {
-        let tx = tx.clone();
+        let tx = model.ui_tx.clone();
         crate::preview::open(
             crate::preview::PreviewKind::Screen,
             Box::new(move || {
