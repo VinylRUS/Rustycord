@@ -1031,7 +1031,7 @@ pub async fn upload_files(
                 "{name}: больше 25 МБ (лимит загрузки Discord — 25 МБ без Nitro)"
             ));
         }
-        let mime = mime_for(&name);
+        let mime = rustycord_core::rest::client::mime_for(&name);
         files.push((name, mime, bytes));
     }
     let path = format!("/channels/{channel_id}/messages");
@@ -1042,30 +1042,7 @@ pub async fn upload_files(
     Ok(msg)
 }
 
-/// Простая карта расширение → MIME (угадываем, иначе octet-stream).
-fn mime_for(name: &str) -> String {
-    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        "mp4" | "m4v" => "video/mp4",
-        "webm" => "video/webm",
-        "mov" => "video/quicktime",
-        "mp3" => "audio/mpeg",
-        "ogg" | "oga" | "opus" => "audio/ogg",
-        "wav" => "audio/wav",
-        "flac" => "audio/flac",
-        "txt" => "text/plain",
-        "pdf" => "application/pdf",
-        "zip" => "application/zip",
-        "json" => "application/json",
-        _ => "application/octet-stream",
-    }
-    .to_string()
-}
+// mime_for переехал в rustycord_core::rest::client (общий с GPUI-фронтом).
 
 /// Путь к файлу логов — показываем в настройках, чтобы баг-репорты
 /// можно было прикладывать к issue на GitHub.

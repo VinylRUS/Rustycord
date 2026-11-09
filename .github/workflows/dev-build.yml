@@ -53,10 +53,11 @@ jobs:
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
+      # Корневой Cargo workspace: target/ общий для src-tauri и app-gpui
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: .
 
       - name: Install frontend dependencies
         run: npm ci
@@ -85,10 +86,13 @@ jobs:
         with:
           name: rustycord-dev-${{ matrix.platform }}
           if-no-files-found: error
+          # Cargo workspace: бандлы падают в корневой target/, а не src-tauri/target/
+          # (на macOS с --target universal путь target/universal-apple-darwin/release/bundle/,
+          #  глоб target/**/bundle/** покрывает оба случая)
           path: |
-            src-tauri/target/**/bundle/**/*.deb
-            src-tauri/target/**/bundle/**/*.rpm
-            src-tauri/target/**/bundle/**/*.AppImage
-            src-tauri/target/**/bundle/**/*.dmg
-            src-tauri/target/**/bundle/**/*.exe
-            src-tauri/target/**/bundle/**/*.msi
+            target/**/bundle/**/*.deb
+            target/**/bundle/**/*.rpm
+            target/**/bundle/**/*.AppImage
+            target/**/bundle/**/*.dmg
+            target/**/bundle/**/*.exe
+            target/**/bundle/**/*.msi

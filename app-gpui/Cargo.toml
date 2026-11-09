@@ -12,14 +12,20 @@ name = "rustycord-gpui"
 path = "src/main.rs"
 
 [features]
-default = ["audio", "captcha-webview"]
+default = ["audio", "captcha-webview", "file-dialogs"]
 # Голосовые аудиоустройства (cpal: WASAPI/CoreAudio/ALSA). Без фичи —
 # headless-сборка для CI-проверки без libasound2-dev.
 audio = ["rustycord-core/audio"]
-# Окно капчи hCaptcha/Turnstile (standalone wry + winit). Linux требует
-# webkit2gtk-4.1, Windows — WebView2, macOS — WKWebView. Без фичи вход
-# email/QR с капчей отдаёт понятную ошибку (токен-логин работает).
+# Окна webview (standalone wry + winit): капча hCaptcha/Turnstile и
+# локальное превью «Показать экран»/«Камера» (getDisplayMedia/getUserMedia,
+# как в Tauri-версии). Linux требует webkit2gtk-4.1, Windows — WebView2,
+# macOS — WKWebView (нужен главный поток — превью/капча недоступны).
+# Без фичи: вход email с капчей отдаёт понятную ошибку (токен/QR работают),
+# Go Live/камера — только сигналинг без превью.
 captcha-webview = ["dep:wry", "dep:winit"]
+# Нативный файловый диалог (вложения в сообщениях). Linux-бэкенд —
+# xdg-desktop-portal (pure Rust, без gtk-девелоперских зависимостей).
+file-dialogs = ["dep:rfd"]
 
 [dependencies]
 rustycord-core = { path = "../crates/rustycord-core", default-features = false }
@@ -40,6 +46,9 @@ qrcode = { version = "0.14", default-features = false }
 unicode-segmentation = "1"
 # HTTP-клиент gpui (аватарки/эмодзи через img()) на reqwest.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
-# Окно капчи: standalone wry + winit (EventLoop в отдельном потоке).
+# Окно капчи/превью: standalone wry + winit (EventLoop в отдельном потоке).
 wry = { version = "0.57", optional = true }
 winit = { version = "0.30", optional = true, features = ["rwh_06"] }
+# Файловый диалог для вложений: Windows/macOS — нативный, Linux —
+# xdg-desktop-portal (не тянет gtk в headless-сборку CI).
+rfd = { version = "0.18", optional = true, default-features = false, features = ["xdg-portal"] }

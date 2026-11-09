@@ -140,11 +140,20 @@ pub fn render(
     model: &mut AppModel,
     _window: &mut Window,
     cx: &mut gpui::Context<AppModel>,
-) -> impl IntoElement {
-    let (sel_guild, sel_channel) = match &model.screen {
-        Screen::Main(m) => (m.selected_guild.clone(), m.selected_channel.clone()),
-        _ => (None, None),
+) -> gpui::AnyElement {
+    let (sel_guild, sel_channel, settings_open) = match &model.screen {
+        Screen::Main(m) => (
+            m.selected_guild.clone(),
+            m.selected_channel.clone(),
+            m.settings_open,
+        ),
+        _ => (None, None, false),
     };
+
+    // Настройки — полностраничный экран (как в официальном клиенте).
+    if settings_open {
+        return crate::settings::render(model, cx).into_any_element();
+    }
 
     gpui::div()
         .flex()
@@ -166,6 +175,7 @@ pub fn render(
             sel_guild.as_deref(),
             sel_channel.as_deref(),
         ))
+        .into_any_element()
 }
 
 /* --------------------------- Рейл гильдий --------------------------- */
@@ -555,7 +565,8 @@ fn channel_sidebar(
                     .text_color(rgb(TEXT_FADED))
                     .child("ДРУЗЬЯ"),
             );
-            for (_uid, name, status) in friends {
+            for (uid, name, status) in friends {
+                let dm_uid = uid.clone();
                 col = col.child(
                     gpui::div()
                         .flex()
@@ -572,6 +583,24 @@ fn channel_sidebar(
                                 .text_size(px(11.))
                                 .text_color(rgb(TEXT_FADED))
                                 .child(status_label(&status)),
+                        )
+                        // «Написать»: создать/открыть ЛС с другом.
+                        .child(
+                            gpui::div()
+                                .id(gpui::SharedString::from(format!("fr-dm-{uid}")))
+                                .px_1()
+                                .rounded_md()
+                                .text_size(px(11.))
+                                .text_color(rgb(TEXT_FADED))
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(rgb(TEXT_PRIMARY)))
+                                .child("✉")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |m: &mut AppModel, _, _, cx| {
+                                        crate::actions::create_dm(m, &dm_uid.clone(), cx);
+                                    }),
+                                ),
                         ),
                 );
             }
@@ -787,16 +816,26 @@ fn user_panel(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl In
         .as_ref()
         .and_then(|u| u.avatar.as_ref().map(|h| avatar_url(&u.id, h)));
 
-    let mut panel = gpui::div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .px_2()
-        .py_2()
-        .bg(rgb(0x1e1f22));
+    // Состояние стрима/камеры — для кнопок голосовой панели.
+    let (streaming, stream_paused) = match &model.screen {
+        Screen::Main(m) => {
+            let paused = m
+                .my_stream_key
+                .as_ref()
+                .and_then(|k| m.streams.get(k))
+                .map(|st| st.paused)
+                .unwrap_or(false);
+            (m.my_stream_key.is_some(), paused)
+        }
+        _ => (false, false),
+    };
+    let camera_on = matches!(&model.screen, Screen::Main(m) if m.camera_on);
+
+    let mut panel = gpui::div().flex().flex_col().bg(rgb(0x1e1f22));
 
     if in_voice {
-        panel = panel.child(
+        let mut voice_row = gpui::div().flex().items_center().gap_2().px_2().pt_2();
+        voice_row = voice_row.child(
             gpui::div()
                 .flex()
                 .flex_col()
@@ -813,108 +852,220 @@ fn user_panel(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl In
                         .child(voice_channel_name),
                 ),
         );
+        // Кнопки трансляции: Go Live (op 18), пауза (op 22), камера (op 4).
+        let mut btns = gpui::div().flex().items_center().gap_1().ml_auto();
+        btns = btns.child(
+            gpui::div()
+                .id("btn-golive")
+                .size(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .text_size(px(12.))
+                .cursor_pointer()
+                .map(|el| {
+                    if streaming {
+                        el.bg(rgb(RED)).text_color(gpui::white())
+                    } else {
+                        el.bg(rgb(BG_INPUT)).text_color(rgb(TEXT_MUTED))
+                    }
+                })
+                .child("🖥")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|m: &mut AppModel, _, _, cx| {
+                        crate::actions::stream_toggle(m, cx);
+                    }),
+                ),
+        );
+        if streaming {
+            btns = btns.child(
+                gpui::div()
+                    .id("btn-stream-pause")
+                    .size(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .text_size(px(12.))
+                    .cursor_pointer()
+                    .map(|el| {
+                        if stream_paused {
+                            el.bg(rgb(BLURPLE)).text_color(gpui::white())
+                        } else {
+                            el.bg(rgb(BG_INPUT)).text_color(rgb(TEXT_MUTED))
+                        }
+                    })
+                    .child("⏸")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|m: &mut AppModel, _, _, cx| {
+                            crate::actions::stream_pause_toggle(m, cx);
+                        }),
+                    ),
+            );
+        }
+        btns = btns.child(
+            gpui::div()
+                .id("btn-camera")
+                .size(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .text_size(px(12.))
+                .cursor_pointer()
+                .map(|el| {
+                    if camera_on {
+                        el.bg(rgb(GREEN)).text_color(gpui::white())
+                    } else {
+                        el.bg(rgb(BG_INPUT)).text_color(rgb(TEXT_MUTED))
+                    }
+                })
+                .child("📷")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|m: &mut AppModel, _, _, cx| {
+                        crate::actions::camera_toggle(m, cx);
+                    }),
+                ),
+        );
+        voice_row = voice_row.child(btns);
+        panel = panel.child(voice_row);
     }
 
-    panel
-        .child(avatar_or_initial(
-            &me.as_ref().map(|u| u.id.clone()).unwrap_or_default(),
-            avatar.as_deref(),
-            &name,
-            px(32.),
-        ))
-        .child(
-            gpui::div()
-                .flex()
-                .flex_col()
-                .child(gpui::div().text_size(px(13.)).child(name))
-                .child(
-                    gpui::div()
-                        .text_size(px(11.))
-                        .text_color(rgb(TEXT_FADED))
-                        .child(if in_voice {
-                            "в голосовом канале"
-                        } else {
-                            "онлайн"
-                        }),
-                ),
-        )
-        .child(
-            gpui::div()
-                .flex()
-                .ml_auto()
-                .gap_1()
-                .child(
-                    gpui::div()
-                        .id("btn-mute")
-                        .size(px(28.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_size(px(14.))
-                        .map(|el| {
-                            if self_mute {
-                                el.bg(rgb(RED)).text_color(gpui::white())
+    panel.child(
+        gpui::div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_2()
+            .child(avatar_or_initial(
+                &me.as_ref().map(|u| u.id.clone()).unwrap_or_default(),
+                avatar.as_deref(),
+                &name,
+                px(32.),
+            ))
+            .child(
+                gpui::div()
+                    .flex()
+                    .flex_col()
+                    .child(gpui::div().text_size(px(13.)).child(name))
+                    .child(
+                        gpui::div()
+                            .text_size(px(11.))
+                            .text_color(rgb(TEXT_FADED))
+                            .child(if in_voice {
+                                "в голосовом канале"
                             } else {
-                                el.bg(rgb(BG_INPUT)).text_color(rgb(TEXT_MUTED))
-                            }
-                        })
-                        .child("🎙")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|m: &mut AppModel, _, _, cx| {
-                                crate::actions::voice_toggle(m, true, cx);
+                                "онлайн"
                             }),
-                        ),
-                )
-                .child(
-                    gpui::div()
-                        .id("btn-deaf")
-                        .size(px(28.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_size(px(14.))
-                        .map(|el| {
-                            if self_deaf {
-                                el.bg(rgb(RED)).text_color(gpui::white())
-                            } else {
-                                el.bg(rgb(BG_INPUT)).text_color(rgb(TEXT_MUTED))
-                            }
-                        })
-                        .child("🎧")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|m: &mut AppModel, _, _, cx| {
-                                crate::actions::voice_toggle(m, false, cx);
-                            }),
-                        ),
-                )
-                .child(
-                    gpui::div()
-                        .id("btn-logout")
-                        .size(px(28.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_size(px(14.))
-                        .bg(rgb(BG_INPUT))
-                        .text_color(rgb(TEXT_MUTED))
-                        .hover(|s| s.text_color(rgb(RED)))
-                        .child("⏻")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|m: &mut AppModel, _, _, cx| {
-                                crate::actions::logout(m, cx);
-                            }),
-                        ),
-                ),
-        )
+                    ),
+            )
+            .child(
+                gpui::div()
+                    .flex()
+                    .ml_auto()
+                    .gap_1()
+                    .child(
+                        gpui::div()
+                            .id("btn-mute")
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_size(px(14.))
+                            .map(|el| {
+                                if self_mute {
+                                    el.bg(rgb(RED)).text_color(gpui::white())
+                                } else {
+                                    el.bg(rgb(BG_INPUT)).text_color(rgb(TEXT_MUTED))
+                                }
+                            })
+                            .child("🎙")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|m: &mut AppModel, _, _, cx| {
+                                    crate::actions::voice_toggle(m, true, cx);
+                                }),
+                            ),
+                    )
+                    .child(
+                        gpui::div()
+                            .id("btn-deaf")
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_size(px(14.))
+                            .map(|el| {
+                                if self_deaf {
+                                    el.bg(rgb(RED)).text_color(gpui::white())
+                                } else {
+                                    el.bg(rgb(BG_INPUT)).text_color(rgb(TEXT_MUTED))
+                                }
+                            })
+                            .child("🎧")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|m: &mut AppModel, _, _, cx| {
+                                    crate::actions::voice_toggle(m, false, cx);
+                                }),
+                            ),
+                    )
+                    .child(
+                        gpui::div()
+                            .id("btn-settings")
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_size(px(14.))
+                            .bg(rgb(BG_INPUT))
+                            .text_color(rgb(TEXT_MUTED))
+                            .hover(|s| s.text_color(rgb(TEXT_PRIMARY)))
+                            .child("⚙")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|m: &mut AppModel, _, _, cx| {
+                                    if let Screen::Main(st) = &mut m.screen {
+                                        st.settings_open = true;
+                                    }
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+                    .child(
+                        gpui::div()
+                            .id("btn-logout")
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_size(px(14.))
+                            .bg(rgb(BG_INPUT))
+                            .text_color(rgb(TEXT_MUTED))
+                            .hover(|s| s.text_color(rgb(RED)))
+                            .child("⏻")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|m: &mut AppModel, _, _, cx| {
+                                    crate::actions::logout(m, cx);
+                                }),
+                            ),
+                    ),
+            ),
+    )
 }
 
 fn m_core_desired(core: &AppState, key: &str) -> (bool, bool) {
@@ -992,6 +1143,97 @@ fn chat_pane(
             .child(channel_name),
     );
 
+    // Трансляции Go Live в этом канале (сигналинг op 18/19/22):
+    // свои и чужие — чипы под заголовком.
+    if let Some(cid) = selected_channel {
+        let self_id = model.core.self_id();
+        // m (главный экран) уже заимствован выше — читаем его напрямую,
+        // без повторного заимствования model.screen.
+        let live: Vec<crate::state::StreamUi> = m
+            .streams
+            .values()
+            .filter(|st| st.channel_id == cid)
+            .cloned()
+            .collect();
+        let mut chips = gpui::div().flex().flex_col().gap_1().px_4().py_2();
+        let mut any = false;
+        for st in live {
+            any = true;
+            let mine = Some(st.user_id.as_str()) == self_id.as_deref();
+            let title = if mine {
+                format!("🔴 Твой стрим · {} смотрят", st.viewers)
+            } else {
+                format!("🔴 Стрим · {} смотрят", st.viewers)
+            };
+            let mut chip = gpui::div()
+                .id(gpui::SharedString::from(format!(
+                    "stream-{}",
+                    st.stream_key
+                )))
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(rgb(BG_PANEL))
+                .text_size(px(12.))
+                .text_color(rgb(TEXT_MUTED))
+                .map(|el| {
+                    if st.paused {
+                        el.text_color(rgb(TEXT_FADED))
+                    } else {
+                        el.text_color(rgb(TEXT_PRIMARY))
+                    }
+                })
+                .child(if st.paused { "⏸".to_string() } else { title });
+            if mine {
+                chip = chip
+                    .child(
+                        gpui::div()
+                            .id("stream-pause")
+                            .ml_auto()
+                            .px_2()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_color(rgb(BLURPLE))
+                            .hover(|s| s.text_color(gpui::white()))
+                            .child(if st.paused {
+                                "Продолжить"
+                            } else {
+                                "Пауза"
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|m: &mut AppModel, _, _, cx| {
+                                    crate::actions::stream_pause_toggle(m, cx);
+                                }),
+                            ),
+                    )
+                    .child(
+                        gpui::div()
+                            .id("stream-stop")
+                            .px_2()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_color(rgb(RED))
+                            .hover(|s| s.text_color(gpui::white()))
+                            .child("Стоп")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|m: &mut AppModel, _, _, cx| {
+                                    crate::actions::stop_my_stream(m, cx);
+                                }),
+                            ),
+                    );
+            }
+            chips = chips.child(chip);
+        }
+        if any {
+            col = col.child(chips);
+        }
+    }
+
     if let Some(cid) = selected_channel {
         // Лента сообщений.
         let history_len = m.messages.get(cid).map(Vec::len).unwrap_or(0);
@@ -1038,6 +1280,7 @@ fn chat_pane(
             );
         }
 
+        let self_id = model.core.self_id();
         // Группировка: тот же автор, < 5 минут, без ответа.
         let mut prev: Option<(String, Option<String>)> = None;
         let mut prev_day = String::new();
@@ -1077,7 +1320,12 @@ fn chat_pane(
                         && same_minute_window(ts, &msg.timestamp)
                 })
                 .unwrap_or(false);
-            feed = feed.child(message_row(cx, msg, grouped));
+            let own = msg
+                .author
+                .as_ref()
+                .map(|a| Some(a.id.as_str()) == self_id.as_deref())
+                .unwrap_or(false);
+            feed = feed.child(message_row(cx, msg, grouped, own));
             prev = Some((
                 msg.author
                     .as_ref()
@@ -1128,6 +1376,8 @@ fn chat_pane(
         // Композер.
         let composer = m.composer.clone();
         let reply = m.reply_to.clone();
+        let edit = m.edit_target.clone();
+        let uploading = m.uploading;
         let send_error = m.send_error.clone();
         let mut composer_wrap = gpui::div().flex().flex_col().px_4().pb_4().pt_1().gap_1();
         if let Some(err) = send_error {
@@ -1138,7 +1388,39 @@ fn chat_pane(
                     .child(err),
             );
         }
-        if let Some(r) = reply {
+        // Режим редактирования: баннер + подсказка (Enter = сохранить).
+        if edit.is_some() {
+            composer_wrap = composer_wrap.child(
+                gpui::div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .text_color(rgb(YELLOW))
+                    .child("✏ Редактирование сообщения")
+                    .child(
+                        gpui::div()
+                            .text_color(rgb(TEXT_FADED))
+                            .child("(Enter — сохранить)"),
+                    )
+                    .child(
+                        gpui::div()
+                            .id("edit-cancel")
+                            .ml_auto()
+                            .cursor_pointer()
+                            .text_color(rgb(TEXT_FADED))
+                            .hover(|s| s.text_color(rgb(TEXT_PRIMARY)))
+                            .child("✕ Отмена")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|m: &mut AppModel, _, _, cx| {
+                                    crate::actions::edit_cancel(m, cx);
+                                }),
+                            ),
+                    ),
+            );
+        }
+        if let Some(r) = reply.filter(|_| edit.is_none()) {
             composer_wrap = composer_wrap.child(
                 gpui::div()
                     .flex()
@@ -1182,6 +1464,37 @@ fn chat_pane(
                     .rounded_lg()
                     .bg(rgb(BG_INPUT))
                     .child(gpui::div().flex_1().child(composer))
+                    // 📎 Вложения: нативный файловый диалог → multipart.
+                    .child(
+                        gpui::div()
+                            .id("btn-upload")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(30.))
+                            .rounded_full()
+                            .text_size(px(15.))
+                            .text_color(if uploading {
+                                rgb(TEXT_FADED)
+                            } else {
+                                rgb(TEXT_MUTED)
+                            })
+                            .map(|el| {
+                                if uploading {
+                                    el
+                                } else {
+                                    el.cursor_pointer()
+                                        .hover(|s| s.text_color(rgb(TEXT_PRIMARY)))
+                                }
+                            })
+                            .child("📎")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|m: &mut AppModel, _, _, cx| {
+                                    crate::actions::upload_pick(m, cx);
+                                }),
+                            ),
+                    )
                     .child(
                         gpui::div()
                             .id("btn-send")
@@ -1193,20 +1506,33 @@ fn chat_pane(
                             .bg(rgb(BLURPLE))
                             .text_color(gpui::white())
                             .cursor_pointer()
-                            .child("➤")
+                            .child(if edit.is_some() { "✓" } else { "➤" })
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|m: &mut AppModel, _, _, cx| {
-                                    crate::actions::trigger_typing(m);
-                                    crate::actions::send_message(m, cx);
+                                    // В режиме правки Enter/✓ сохраняет,
+                                    // typing триггерить не нужно.
+                                    if matches!(
+                                        &m.screen,
+                                        Screen::Main(st) if st.edit_target.is_some()
+                                    ) {
+                                        crate::actions::edit_save(m, cx);
+                                    } else {
+                                        crate::actions::trigger_typing(m);
+                                        crate::actions::send_message(m, cx);
+                                    }
                                 }),
                             ),
                     ),
             )
-            // Enter = отправка (действие Submit всплывает от поля).
+            // Enter = отправка/сохранение правки (Submit всплывает от поля).
             .on_action(cx.listener(|m: &mut AppModel, _: &Submit, _w, cx| {
-                crate::actions::trigger_typing(m);
-                crate::actions::send_message(m, cx);
+                if matches!(&m.screen, Screen::Main(st) if st.edit_target.is_some()) {
+                    crate::actions::edit_save(m, cx);
+                } else {
+                    crate::actions::trigger_typing(m);
+                    crate::actions::send_message(m, cx);
+                }
             }));
         col = col.child(composer_wrap);
     } else {
@@ -1237,7 +1563,12 @@ fn same_minute_window(a: &Option<String>, b: &Option<String>) -> bool {
     (b - a).num_minutes().abs() < 5
 }
 
-fn message_row(cx: &mut gpui::Context<AppModel>, msg: &Message, grouped: bool) -> impl IntoElement {
+fn message_row(
+    cx: &mut gpui::Context<AppModel>,
+    msg: &Message,
+    grouped: bool,
+    own: bool,
+) -> impl IntoElement {
     let author = display_name(msg);
     let time = time_hm(&msg.timestamp);
     let avatar = msg
@@ -1418,14 +1749,79 @@ fn message_row(cx: &mut gpui::Context<AppModel>, msg: &Message, grouped: bool) -
             body = body.child(chips);
         }
     }
-    row.child(body)
+    // Действия строки: ответ всем, своим — правка и удаление (как в
+    // официале, только всегда видимы — мелкие и приглушённые).
+    let mut actions = gpui::div().flex().items_center().gap_1();
+    {
+        let reply_msg = msg.clone();
+        actions = actions.child(
+            gpui::div()
+                .id(gpui::SharedString::from(format!("act-reply-{}", msg.id)))
+                .px_1()
+                .rounded_md()
+                .text_size(px(12.))
+                .text_color(rgb(TEXT_FADED))
+                .cursor_pointer()
+                .hover(|s| s.text_color(rgb(TEXT_PRIMARY)))
+                .child("↩")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |m: &mut AppModel, _, _, cx| {
+                        if let Screen::Main(st) = &mut m.screen {
+                            st.reply_to = Some(reply_msg.clone());
+                            st.edit_target = None;
+                        }
+                        cx.notify();
+                    }),
+                ),
+        );
+        if own {
+            let edit_id = msg.id.clone();
+            actions = actions.child(
+                gpui::div()
+                    .id(gpui::SharedString::from(format!("act-edit-{}", msg.id)))
+                    .px_1()
+                    .rounded_md()
+                    .text_size(px(12.))
+                    .text_color(rgb(TEXT_FADED))
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(rgb(TEXT_PRIMARY)))
+                    .child("✏")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |m: &mut AppModel, _, _, cx| {
+                            crate::actions::edit_start(m, &edit_id.clone(), cx);
+                        }),
+                    ),
+            );
+            let del_id = msg.id.clone();
+            actions = actions.child(
+                gpui::div()
+                    .id(gpui::SharedString::from(format!("act-del-{}", msg.id)))
+                    .px_1()
+                    .rounded_md()
+                    .text_size(px(12.))
+                    .text_color(rgb(TEXT_FADED))
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(rgb(RED)))
+                    .child("🗑")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |m: &mut AppModel, _, _, cx| {
+                            crate::actions::delete_message(m, &del_id.clone(), cx);
+                        }),
+                    ),
+            );
+        }
+    }
+    row.child(body).child(actions)
 }
 
 /* --------------------------- Участники --------------------------- */
 
 fn member_pane(
     model: &mut AppModel,
-    _cx: &mut gpui::Context<AppModel>,
+    cx: &mut gpui::Context<AppModel>,
     selected_guild: Option<&str>,
     _selected_channel: Option<&str>,
 ) -> impl IntoElement {
@@ -1437,6 +1833,11 @@ fn member_pane(
         _ => Vec::new(),
     };
     let is_bot = model.core.is_bot.load(std::sync::atomic::Ordering::SeqCst);
+    let self_id = model.core.self_id();
+    let confirm_mod = match &model.screen {
+        Screen::Main(m) => m.confirm_mod.clone(),
+        _ => None,
+    };
     let total = match selected_guild {
         Some(gid) => model
             .core
@@ -1524,7 +1925,86 @@ fn member_pane(
                                         .child(a)
                                 })),
                         )
-                        .child(gpui::div().ml_auto().child(status_dot(&status, px(8.))))
+                        // Действия (только юзер-сессии и не по себе):
+                        // ЛС, кик, бан — кик/бан с подтверждением вторым кликом.
+                        .when(
+                            !is_bot && Some(user_id.as_str()) != self_id.as_deref(),
+                            |el| {
+                                let mut acts = gpui::div().flex().items_center().gap_1().ml_auto();
+                                let dm_uid = user_id.clone();
+                                acts = acts.child(
+                                    gpui::div()
+                                        .id(gpui::SharedString::from(format!("mem-dm-{user_id}")))
+                                        .px_1()
+                                        .rounded_md()
+                                        .text_size(px(11.))
+                                        .text_color(rgb(TEXT_FADED))
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(rgb(TEXT_PRIMARY)))
+                                        .child("✉")
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |m: &mut AppModel, _, _, cx| {
+                                                crate::actions::create_dm(m, &dm_uid.clone(), cx);
+                                            }),
+                                        ),
+                                );
+                                for (act, icon, idpart) in [
+                                    (crate::state::ModAction::Kick, "⏏", "kick"),
+                                    (crate::state::ModAction::Ban, "⛔", "ban"),
+                                ] {
+                                    let armed =
+                                        confirm_mod.as_ref() == Some(&(user_id.clone(), act));
+                                    let uid = user_id.clone();
+                                    acts = acts.child(
+                                        gpui::div()
+                                            .id(gpui::SharedString::from(format!(
+                                                "mem-{idpart}-{user_id}"
+                                            )))
+                                            .px_1()
+                                            .rounded_md()
+                                            .text_size(px(11.))
+                                            .cursor_pointer()
+                                            .map(|el| {
+                                                if armed {
+                                                    el.bg(rgb(RED))
+                                                        .text_color(gpui::white())
+                                                        .child("Точно?")
+                                                } else {
+                                                    el.text_color(rgb(TEXT_FADED))
+                                                        .hover(|s| s.text_color(rgb(RED)))
+                                                        .child(icon)
+                                                }
+                                            })
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |m: &mut AppModel, _, _, cx| {
+                                                    crate::actions::member_action(
+                                                        m,
+                                                        &uid.clone(),
+                                                        act,
+                                                        cx,
+                                                    );
+                                                }),
+                                            ),
+                                    );
+                                }
+                                el.child(acts)
+                            },
+                        )
+                        .child(
+                            // Без кнопок (бот-сессия/сам себе) точку прижимаем
+                            // вправо; с кнопками ml_auto уже на контейнере действий.
+                            gpui::div()
+                                .map(|el| {
+                                    if is_bot || Some(user_id.as_str()) == self_id.as_deref() {
+                                        el.ml_auto()
+                                    } else {
+                                        el
+                                    }
+                                })
+                                .child(status_dot(&status, px(8.))),
+                        )
                 }
             });
         }
@@ -1604,7 +2084,7 @@ fn status_label(status: &str) -> &'static str {
 }
 
 /// Аватарка (картинка) или цветной круг с инициалом.
-fn avatar_or_initial(
+pub(crate) fn avatar_or_initial(
     user_id: &str,
     avatar_url: Option<&str>,
     name: &str,
