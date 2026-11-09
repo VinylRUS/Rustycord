@@ -40,11 +40,12 @@
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use rustycord_core::auth::captcha::{
+    BrowserPostOutcome, CaptchaChallenge, CaptchaSolver, CAPTCHA_MAX_ATTEMPTS,
+};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::sync::mpsc;
-
-use super::captcha::{CaptchaChallenge, CAPTCHA_MAX_ATTEMPTS};
 
 /// Метка окна авторизации (одно на приложение).
 const LABEL: &str = "rustycord-auth";
@@ -349,8 +350,8 @@ fn request_js(
         "body": body,
         "build": build,
         "locale": "ru-RU",
-        "launchId": crate::superprops::launch_id(),
-        "launchSignature": crate::superprops::launch_signature(),
+        "launchId": rustycord_core::superprops::launch_id(),
+        "launchSignature": rustycord_core::superprops::launch_signature(),
         "contextProperties": context_properties,
         "captchaKey": captcha_key,
         "sessionId": session_id,
@@ -434,12 +435,23 @@ fn reveal(window: &WebviewWindow) {
     let _ = window.set_focus();
 }
 
-/// Исход «браузерного» запроса.
-pub enum BrowserPost {
-    /// 2xx — сырой текст тела ответа.
-    Ok(String),
-    /// Отказ без капчи (форма/429/5xx) — тело для человекочитаемой ошибки.
-    Rejected(String),
+/// Tauri-реализация [`CaptchaSolver`]: окно-Webview на discord.com.
+/// Хранит [`AppHandle`] — окно авторизации создаётся через Tauri-менеджер
+/// окон (см. `browser_post_impl`).
+pub struct TauriCaptcha(pub AppHandle);
+
+#[async_trait::async_trait]
+impl CaptchaSolver for TauriCaptcha {
+    async fn browser_post(
+        &self,
+        context: &str,
+        urls: &[&str],
+        body: &Value,
+        context_properties: Option<&str>,
+        build: u64,
+    ) -> Result<BrowserPostOutcome> {
+        browser_post_impl(&self.0, context, urls, body, context_properties, build).await
+    }
 }
 
 /// POST к API Discord из браузерного окна discord.com с капча-обвязкой.
@@ -450,19 +462,14 @@ pub enum BrowserPost {
 /// и заголовками X-Captcha-Key/-Session-Id/-Rqtoken, и полями тела
 /// captcha_key/captcha_rqtoken/captcha_session_id
 /// (≤ CAPTCHA_MAX_ATTEMPTS решений подряд).
-///
-/// * `context` — qr | login | mfa: подпись карточки капчи;
-/// * `urls` — эндпоинты по приоритету: 404 → следующий (v9 → v10);
-/// * `body` — JSON-тело запроса;
-/// * `context_properties` — b64 X-Context-Properties, если нужен.
-pub async fn browser_post(
+async fn browser_post_impl(
     app: &AppHandle,
     context: &str,
     urls: &[&str],
     body: &Value,
     context_properties: Option<&str>,
     build: u64,
-) -> Result<BrowserPost> {
+) -> Result<BrowserPostOutcome> {
     let (window, mut rx) = open_auth_window(app).await?;
     let outcome = drive(
         &window,
@@ -487,7 +494,7 @@ async fn drive(
     body: &Value,
     context_properties: Option<&str>,
     build: u64,
-) -> Result<BrowserPost> {
+) -> Result<BrowserPostOutcome> {
     let flow = tokio::time::sleep(FLOW_TIMEOUT);
     tokio::pin!(flow);
 
@@ -519,7 +526,7 @@ async fn drive(
                         let status = v["status"].as_u64().unwrap_or(0);
                         let text = v["body"].as_str().unwrap_or_default().to_string();
                         if (200..300).contains(&status) {
-                            return Ok(BrowserPost::Ok(text));
+                            return Ok(BrowserPostOutcome::Ok(text));
                         }
                         let parsed: Value =
                             serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -556,7 +563,7 @@ async fn drive(
                         }
                         let snippet: String = text.chars().take(300).collect();
                         tracing::warn!("captcha-webview: HTTP {status} — {snippet}");
-                        return Ok(BrowserPost::Rejected(text));
+                        return Ok(BrowserPostOutcome::Rejected(text));
                     }
                     "captcha" => {
                         // Решение получено: повторяем POST — captcha-поля

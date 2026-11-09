@@ -12,8 +12,7 @@
 
 use serde_json::{json, Value};
 
-use crate::auth::captcha;
-use crate::auth::captcha_webview;
+use crate::auth::captcha::{self, BrowserPostOutcome, CaptchaSolver};
 use crate::superprops::{self, BROWSER_UA};
 
 const LOGIN_URL: &str = "https://discord.com/api/v10/auth/login";
@@ -52,7 +51,7 @@ enum AuthPost {
 /// (≤ CAPTCHA_MAX_ATTEMPTS решений). `build_body` пересобирает тело на
 /// каждую попытку (значения не Copy).
 async fn post_with_captcha(
-    app: &tauri::AppHandle,
+    solver: &dyn CaptchaSolver,
     url: &str,
     path: &str,
     context: &str,
@@ -99,18 +98,12 @@ async fn post_with_captcha(
             let build = superprops::fetch_build_number()
                 .await
                 .unwrap_or(superprops::FALLBACK_BUILD_NUMBER);
-            let outcome = captcha_webview::browser_post(
-                app,
-                context,
-                &[path],
-                &build_body(),
-                ctx_props.as_deref(),
-                build,
-            )
-            .await?;
+            let outcome = solver
+                .browser_post(context, &[path], &build_body(), ctx_props.as_deref(), build)
+                .await?;
             return match outcome {
-                captcha_webview::BrowserPost::Ok(text) => Ok(AuthPost::Ok(text)),
-                captcha_webview::BrowserPost::Rejected(raw) => Ok(AuthPost::Rejected(raw)),
+                BrowserPostOutcome::Ok(text) => Ok(AuthPost::Ok(text)),
+                BrowserPostOutcome::Rejected(raw) => Ok(AuthPost::Rejected(raw)),
             };
         }
     }
@@ -139,7 +132,7 @@ fn reject_message(raw: &str) -> String {
 
 /// POST /auth/login (email+пароль; капча решается в окне discord.com).
 pub async fn login(
-    app: &tauri::AppHandle,
+    solver: &dyn CaptchaSolver,
     email: &str,
     password: &str,
 ) -> anyhow::Result<LoginOutcome> {
@@ -152,7 +145,7 @@ pub async fn login(
             "gift_code_sku_id": null
         })
     };
-    match post_with_captcha(app, LOGIN_URL, LOGIN_PATH, "login", &body).await? {
+    match post_with_captcha(solver, LOGIN_URL, LOGIN_PATH, "login", &body).await? {
         AuthPost::Ok(text) => {
             let outcome: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             outcome_from_response(outcome)
@@ -163,12 +156,12 @@ pub async fn login(
 
 /// Второй шаг 2FA: POST /auth/mfa/totp {code, ticket} → {token}.
 pub async fn submit_mfa(
-    app: &tauri::AppHandle,
+    solver: &dyn CaptchaSolver,
     code: &str,
     ticket: &str,
 ) -> anyhow::Result<LoginOutcome> {
     let body = || json!({ "code": code, "ticket": ticket });
-    match post_with_captcha(app, MFA_URL, MFA_PATH, "mfa", &body).await? {
+    match post_with_captcha(solver, MFA_URL, MFA_PATH, "mfa", &body).await? {
         AuthPost::Ok(text) => {
             let outcome: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             outcome_from_response(outcome)

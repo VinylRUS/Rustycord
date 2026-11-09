@@ -1,18 +1,27 @@
-mod auth;
-mod commands;
-mod gateway;
-mod rest;
-mod settings_proto;
-mod snowflake;
-mod state;
-mod superprops;
-mod updater;
-mod voice;
-mod wsutil;
+//! Tauri-фронтенд RustyCord: вся логика протокола — в крейте
+//! `rustycord-core`, здесь только обвязка IPC (commands.rs), окно капчи
+//! (captcha_webview.rs) и мостик событий TauriSink.
 
-use state::AppState;
+mod captcha_webview;
+mod commands;
+
 use std::sync::Arc;
+
+use rustycord_core::state::AppState;
+use rustycord_core::EventSink;
+use serde_json::Value;
 use tauri::Manager;
+
+/// Мост событий ядра → Tauri: `EventSink::emit` → `tauri::Emitter::emit`
+/// (фронтенд слушает через `listen()` из @tauri-apps/api).
+struct TauriSink(tauri::AppHandle);
+
+impl EventSink for TauriSink {
+    fn emit(&self, event: &str, payload: Value) {
+        use tauri::Emitter;
+        let _ = self.0.emit(event, payload);
+    }
+}
 
 /// Куда пишем файловый лог (инициализируется в setup).
 static LOG_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -34,7 +43,10 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
-            app.manage(Arc::new(AppState::new(handle)));
+            app.manage(Arc::new(AppState::new(
+                Arc::new(TauriSink(handle.clone())),
+                Arc::new(captcha_webview::TauriCaptcha(handle.clone())),
+            )));
 
             // ---- Логирование: stdout + суточный файл в app_log_dir ----
             // Релизная сборка на Windows не имеет консоли — без файла логов
@@ -75,7 +87,11 @@ pub fn run() {
                 std::mem::forget(g);
             }
 
-            tracing::info!("RustyCord core is up (Tauri {})", tauri::VERSION);
+            tracing::info!(
+                "RustyCord core is up (Tauri {}, protocol {})",
+                tauri::VERSION,
+                rustycord_core::VERSION
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

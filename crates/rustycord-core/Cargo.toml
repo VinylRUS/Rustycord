@@ -1,0 +1,47 @@
+[package]
+name = "rustycord-core"
+version = "0.11.0"
+description = "RustyCord protocol core — Discord gateway/REST/voice/auth, UI-agnostic (Tauri and GPUI frontends share it)"
+edition = "2021"
+rust-version = "1.77.2"
+license = "MIT"
+repository = "https://github.com/VinylRUS/Rustycord"
+keywords = ["discord", "gateway", "voice", "protocol", "reverse-engineering"]
+categories = ["network-programming"]
+
+# `audio` — работа с системными аудиоустройствами (cpal: WASAPI/CoreAudio/ALSA).
+# Сборка с --no-default-features даёт «headless»-вариант: сигналинг и
+# голосовой движок songbird работают, но звук не выводится и не пишется —
+# удобно для серверов, CI-проверок без устройств и разработки UI-слоя.
+[features]
+default = ["audio"]
+audio = ["dep:cpal"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+tokio-util = "0.7"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "multipart", "cookies"] }
+futures-util = "0.3"
+# async_trait — нужен для impl AsyncMediaSource (songbird), EventHandler и
+# объекта-безопасного CaptchaSolver.
+async-trait = "0.1"
+# User-auth: QR remote-auth (RSA-OAEP-SHA256), /auth/login.
+rsa = "0.9"
+sha2 = "0.10"
+base64 = "0.23"
+# QR-матрица для remote-auth (SVG собираем сами — без тяжёлых зависимостей).
+qrcode = { version = "0.14", default-features = false }
+# Голосовой движок: songbird (драйвер Discord voice v4/v5).
+songbird = { version = "0.6", default-features = false, features = ["driver", "receive", "gateway", "tungstenite", "rustls"] }
+# PCM-декодер для микрофонного моста (см. комментарий в src-tauri/Cargo.toml).
+symphonia = { version = "0.5", default-features = false, features = ["pcm"] }
+# Аудиоустройства — только с фичей `audio`.
+cpal = { version = "0.15", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+anyhow = "1"
+tracing = "0.1"
+# client_launch_id / launch_signature в X-Super-Properties и IDENTIFY.
+uuid = { version = "1", features = ["v4"] }

@@ -14,7 +14,6 @@ use songbird::driver::{DecodeConfig, DecodeMode, Driver};
 use songbird::events::{CoreEvent, Event, EventContext, EventHandler};
 use songbird::id::{ChannelId as SbChannelId, GuildId as SbGuildId, UserId as SbUserId};
 use songbird::{Config, ConnectionInfo};
-use tauri::Emitter;
 use tokio_util::sync::CancellationToken;
 
 use crate::state::{GatewayCommand, SharedState, VoiceHandshake, VoiceSessionHandle};
@@ -26,8 +25,9 @@ use crate::voice::VoiceControls;
 
 #[cfg(feature = "audio")]
 use crate::voice::devices;
+use crate::SharedSink;
 
-pub async fn coordinator(app: tauri::AppHandle, state: SharedState, shutdown: CancellationToken) {
+pub async fn coordinator(sink: SharedSink, state: SharedState, shutdown: CancellationToken) {
     let mut ticker = tokio::time::interval(Duration::from_secs(2));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await; // consume immediate tick
@@ -35,14 +35,14 @@ pub async fn coordinator(app: tauri::AppHandle, state: SharedState, shutdown: Ca
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => break,
-            _ = state.voice_notify.notified() => { poll_and_dial(&app, &state).await; }
-            _ = ticker.tick() => { poll_and_dial(&app, &state).await; }
+            _ = state.voice_notify.notified() => { poll_and_dial(&sink, &state).await; }
+            _ = ticker.tick() => { poll_and_dial(&sink, &state).await; }
         }
     }
     tracing::info!("voice: координатор остановлен");
 }
 
-async fn poll_and_dial(app: &tauri::AppHandle, state: &SharedState) {
+async fn poll_and_dial(sink: &SharedSink, state: &SharedState) {
     // 1. Забираем все завершённые рукопожатия.
     let ready: Vec<VoiceHandshake> = {
         let mut map = state.voice_handshake.lock().unwrap();
@@ -72,8 +72,8 @@ async fn poll_and_dial(app: &tauri::AppHandle, state: &SharedState) {
         let gen = state.voice_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let token = CancellationToken::new();
         let guild_id = hs.guild_id.clone();
-        let task = tauri::async_runtime::spawn(run_session(
-            app.clone(),
+        let task = tokio::spawn(run_session(
+            sink.clone(),
             Arc::clone(state),
             hs,
             token.clone(),
@@ -89,7 +89,7 @@ async fn poll_and_dial(app: &tauri::AppHandle, state: &SharedState) {
 
 /// Одна голосовая сессия: Driver + устройства + события → UI.
 async fn run_session(
-    app: tauri::AppHandle,
+    sink: SharedSink,
     state: SharedState,
     hs: VoiceHandshake,
     cancel: CancellationToken,
@@ -102,10 +102,10 @@ async fn run_session(
         "гильдия"
     };
     tracing::info!("voice[songbird]: сессия ({kind}) для {guild_id} (поколение {gen})");
-    let res = voice_session(&app, &state, &hs, &cancel, gen).await;
+    let res = voice_session(&sink, &state, &hs, &cancel, gen).await;
     if let Err(e) = res {
         tracing::error!("voice[songbird]: ошибка сессии: {e:#}");
-        let _ = app.emit(
+        sink.emit(
             "discord://voice",
             json!({ "kind": "disconnected", "data": { "guild_id": guild_id, "dm": hs.is_dm } }),
         );
@@ -118,7 +118,7 @@ async fn run_session(
 }
 
 async fn voice_session(
-    app: &tauri::AppHandle,
+    sink: &SharedSink,
     state: &SharedState,
     hs: &VoiceHandshake,
     cancel: &CancellationToken,
@@ -212,7 +212,7 @@ async fn voice_session(
     driver.add_global_event(
         Event::Core(CoreEvent::VoiceTick),
         TickHandler {
-            app: app.clone(),
+            sink: sink.clone(),
             guild_id: hs.guild_id.clone(),
             mixer: Arc::clone(&mixer),
             ssrc_map: Arc::clone(&ssrc_map),
@@ -222,7 +222,7 @@ async fn voice_session(
     driver.add_global_event(
         Event::Core(CoreEvent::SpeakingStateUpdate),
         SpeakHandler {
-            app: app.clone(),
+            sink: sink.clone(),
             guild_id: hs.guild_id.clone(),
             ssrc_map: Arc::clone(&ssrc_map),
         },
@@ -230,7 +230,7 @@ async fn voice_session(
     driver.add_global_event(
         Event::Core(CoreEvent::ClientDisconnect),
         DisconnectHandler {
-            app: app.clone(),
+            sink: sink.clone(),
             guild_id: hs.guild_id.clone(),
             ssrc_map: Arc::clone(&ssrc_map),
             mixer: Arc::clone(&mixer),
@@ -239,14 +239,14 @@ async fn voice_session(
     driver.add_global_event(
         Event::Core(CoreEvent::DriverConnect),
         ConnectedHandler {
-            app: app.clone(),
+            sink: sink.clone(),
             guild_id: hs.guild_id.clone(),
         },
     );
     driver.add_global_event(
         Event::Core(CoreEvent::DriverDisconnect),
         DisconnectedHandler {
-            app: app.clone(),
+            sink: sink.clone(),
             guild_id: hs.guild_id.clone(),
             state: Arc::clone(state),
             gen,
@@ -326,7 +326,7 @@ async fn voice_session(
                 tick += 1;
                 let peak = mic_stats.take_peak();
                 win_peak = win_peak.max(peak);
-                let _ = app.emit(
+                sink.emit(
                     "discord://voice",
                     json!({
                         "kind": "mic_level",
@@ -394,7 +394,7 @@ async fn voice_session(
 
 /// VoiceTick: декодированный PCM всех говорящих → микшер.
 struct TickHandler {
-    app: tauri::AppHandle,
+    sink: SharedSink,
     guild_id: String,
     mixer: Arc<Mutex<Mixer>>,
     ssrc_map: Arc<Mutex<HashMap<u32, String>>>,
@@ -418,7 +418,7 @@ impl EventHandler for TickHandler {
                 mixer.on_frame(*ssrc, seq, frame);
                 // Дебаг-трейс говорящего — только при первом кадре всплеска
                 // не пишем (шумно); сам факт говорения едет из SPEAKING.
-                let _ = &self.app;
+                let _ = &self.sink;
                 let _ = &self.guild_id;
             }
             let _ = &self.ssrc_map;
@@ -429,7 +429,7 @@ impl EventHandler for TickHandler {
 
 /// SPEAKING (op 5 от медиасервера): ssrc ↔ user_id + событие UI.
 struct SpeakHandler {
-    app: tauri::AppHandle,
+    sink: SharedSink,
     guild_id: String,
     ssrc_map: Arc<Mutex<HashMap<u32, String>>>,
 }
@@ -444,7 +444,7 @@ impl EventHandler for SpeakHandler {
             if let Some(uid) = spk.user_id {
                 let uid = uid.0.to_string();
                 self.ssrc_map.lock().unwrap().insert(spk.ssrc, uid.clone());
-                let _ = self.app.emit(
+                let _ = self.sink.emit(
                     "discord://voice",
                     json!({
                         "kind": "speaking",
@@ -459,7 +459,7 @@ impl EventHandler for SpeakHandler {
 
 /// ClientDisconnect (op 13): убрать дорожку и погасить индикатор.
 struct DisconnectHandler {
-    app: tauri::AppHandle,
+    sink: SharedSink,
     guild_id: String,
     ssrc_map: Arc<Mutex<HashMap<u32, String>>>,
     mixer: Arc<Mutex<Mixer>>,
@@ -475,7 +475,7 @@ impl EventHandler for DisconnectHandler {
                 map.remove(&k);
                 self.mixer.lock().unwrap().remove_channel(k);
             }
-            let _ = self.app.emit(
+            let _ = self.sink.emit(
                 "discord://voice",
                 json!({
                     "kind": "speaking",
@@ -489,7 +489,7 @@ impl EventHandler for DisconnectHandler {
 
 /// Успешное подключение к медиасерверу.
 struct ConnectedHandler {
-    app: tauri::AppHandle,
+    sink: SharedSink,
     guild_id: String,
 }
 
@@ -497,7 +497,7 @@ struct ConnectedHandler {
 impl EventHandler for ConnectedHandler {
     async fn act(&self, _ctx: &EventContext<'_>) -> Option<Event> {
         tracing::info!("voice[songbird]: подключено к {}", self.guild_id);
-        let _ = self.app.emit(
+        let _ = self.sink.emit(
             "discord://voice",
             json!({
                 "kind": "connected",
@@ -513,7 +513,7 @@ impl EventHandler for ConnectedHandler {
 
 /// Разрыв соединения с медиасервером.
 struct DisconnectedHandler {
-    app: tauri::AppHandle,
+    sink: SharedSink,
     guild_id: String,
     state: SharedState,
     /// Поколение сессии: если она уже заменена (переход в другой канал),
@@ -525,7 +525,7 @@ struct DisconnectedHandler {
 impl EventHandler for DisconnectedHandler {
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
         tracing::warn!("voice[songbird]: соединение потеряно ({:?})", ctx);
-        let _ = self.app.emit(
+        let _ = self.sink.emit(
             "discord://voice",
             json!({ "kind": "disconnected", "data": { "guild_id": self.guild_id } }),
         );
@@ -569,7 +569,7 @@ fn schedule_voice_rejoin(state: &SharedState, session_key: &str) {
     };
     tracing::info!("voice[songbird]: авто-реджойн — повторяем op4 для {session_key}");
     let state2 = Arc::clone(state);
-    tauri::async_runtime::spawn(async move {
+    tokio::spawn(async move {
         // Небольшая пауза: за это время юзер может сам уйти, а gateway —
         // завершить реконнект (RESUME), чтобы op4 не потерялся.
         tokio::time::sleep(Duration::from_millis(1500)).await;

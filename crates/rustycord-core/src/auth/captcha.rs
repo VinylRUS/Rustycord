@@ -35,6 +35,38 @@ use serde_json::Value;
 /// присылает новый вызов — зацикливаться нельзя).
 pub const CAPTCHA_MAX_ATTEMPTS: u8 = 3;
 
+/// Исход POST, выполненного целиком в браузерном контексте.
+#[derive(Debug)]
+pub enum BrowserPostOutcome {
+    /// 2xx — тело ответа (текст JSON).
+    Ok(String),
+    /// Отказ: сырой JSON-текст для человекочитаемой ошибки.
+    Rejected(String),
+}
+
+/// Решатель капчи в браузерном контексте. Контракт — «весь POST уезжает в
+/// окно discord.com»: страница сама делает запрос, показывает виджет с
+/// rqdata из СВОЕГО ответа и повторяет с заголовками X-Captcha-*
+/// (≤ [`CAPTCHA_MAX_ATTEMPTS`] решений). Реализации:
+///  * Tauri — `src-tauri/src/captcha_webview.rs` (WebviewWindow);
+///  * GPUI — `app-gpui/src/captcha.rs` (standalone wry).
+///
+/// `context` — место вызова ("login" | "mfa" | "qr"), `paths` — API-пути
+/// для повтора (первый рабочий выигрывает), `body` — JSON-тело, `ctx_props`
+/// — X-Context-Properties (форма логина), `build` — свежий
+/// client_build_number для X-Super-Properties.
+#[async_trait::async_trait]
+pub trait CaptchaSolver: Send + Sync + 'static {
+    async fn browser_post(
+        &self,
+        context: &str,
+        paths: &[&str],
+        body: &Value,
+        ctx_props: Option<&str>,
+        build: u64,
+    ) -> anyhow::Result<BrowserPostOutcome>;
+}
+
 /// Один вызов hCaptcha, разобранный из тела ответа Discord.
 #[derive(Debug, Clone)]
 pub struct CaptchaChallenge {

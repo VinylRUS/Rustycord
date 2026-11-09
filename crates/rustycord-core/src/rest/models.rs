@@ -393,6 +393,13 @@ pub struct Message {
     pub reactions: Option<Vec<Reaction>>,
     #[serde(default)]
     pub pinned: bool,
+    /// Ссылка на сообщение-родитель (ответ): {message_id, channel_id, …}.
+    #[serde(default)]
+    pub message_reference: Option<serde_json::Value>,
+    /// Полное сообщение, на которое отвечаем (приходит в MESSAGE_CREATE
+    /// с message_reference — UI рисует линию ответа).
+    #[serde(default)]
+    pub referenced_message: Option<Box<Message>>,
     #[serde(rename = "type", default)]
     pub kind: u8,
 }
