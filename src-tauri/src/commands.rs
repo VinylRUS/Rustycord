@@ -24,11 +24,6 @@ fn rest_of(state: &State<'_, Arc<AppState>>) -> Result<RestClient, String> {
     state.rest()
 }
 
-/// Stop gateway + voice tasks (if running).
-async fn stop_tasks(state: &State<'_, Arc<AppState>>) {
-    state.stop_tasks().await;
-}
-
 /* ============================ AUTH ============================ */
 
 /// Шаг 1 входа по email+паролю. Возможен второй шаг (2FA) — тогда
