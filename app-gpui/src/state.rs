@@ -22,6 +22,45 @@ pub enum Screen {
     Main(Box<MainState>),
 }
 
+/// Секции экрана настроек (оверлей над главным экраном).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSection {
+    Voice,
+    Behavior,
+    Account,
+    About,
+}
+
+/// Живая трансляция Go Live (сигналинг op 18/19/22; d обогащён ядром —
+/// guild_id/channel_id/user_id распарсены из stream_key).
+#[derive(Clone)]
+pub struct StreamUi {
+    pub stream_key: String,
+    pub user_id: String,
+    pub guild_id: Option<String>,
+    pub channel_id: String,
+    pub paused: bool,
+    pub viewers: u64,
+}
+
+/// Модерация участника (контекстные кнопки в списке участников).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ModAction {
+    Kick,
+    Ban,
+}
+
+/// Результат проверки обновлений (для раздела «О программе»).
+#[derive(Clone)]
+pub struct UpdateStatus {
+    pub checking: bool,
+    /// Человекочитаемый итог («актуальная версия» / «доступна 0.12.0» / ошибка).
+    pub text: String,
+    /// Ссылка на релиз, если есть обновление (кнопка «Скачать»).
+    pub url: String,
+    pub is_newer: bool,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum LoginTab {
     Token,
@@ -88,6 +127,32 @@ pub struct MainState {
     pub banner: Option<String>,
     /// Прокрутить ленту чата вниз при следующем рендере.
     pub scroll_bottom_pending: bool,
+    /* ------- Редактирование/удаление/вложения (паритет с Tauri) ------- */
+    /// Активное редактирование: (id сообщения, исходный текст).
+    pub edit_target: Option<(String, String)>,
+    /// Идёт загрузка вложений (кнопка 📎 заблокирована).
+    pub uploading: bool,
+    /* --------------------------- Стримы/камера --------------------------- */
+    /// Все живые трансляции: stream_key → инфо (свои и чужие).
+    pub streams: HashMap<String, StreamUi>,
+    /// Ключ СВОЕЙ активной трансляции (владелец = self).
+    pub my_stream_key: Option<String>,
+    /// Камера включена (op 4 self_video). Превью — окно preview.rs.
+    pub camera_on: bool,
+    /// Лупбек микрофона включён (UI-зеркало флагов сессий).
+    pub loopback_on: bool,
+    /* ----------------------- Поведение (бывшие плагины) ----------------------- */
+    /// Silent Typing: не отправлять индикатор «печатает…».
+    pub suppress_typing: bool,
+    /// Message Logger: показывать удалённые сообщения в баннере.
+    pub log_deleted: bool,
+    /* --------------------------- Модерация --------------------------- */
+    /// Подтверждение кика/бана: (user_id, действие) — второй клик исполняет.
+    pub confirm_mod: Option<(String, ModAction)>,
+    /* --------------------------- Настройки --------------------------- */
+    pub settings_open: bool,
+    pub settings_section: SettingsSection,
+    pub update_status: UpdateStatus,
 }
 
 impl MainState {
@@ -108,6 +173,23 @@ impl MainState {
             mic_level: 0.0,
             banner: None,
             scroll_bottom_pending: true,
+            edit_target: None,
+            uploading: false,
+            streams: HashMap::new(),
+            my_stream_key: None,
+            camera_on: false,
+            loopback_on: false,
+            suppress_typing: false,
+            log_deleted: false,
+            confirm_mod: None,
+            settings_open: false,
+            settings_section: SettingsSection::Voice,
+            update_status: UpdateStatus {
+                checking: false,
+                text: String::new(),
+                url: String::new(),
+                is_newer: false,
+            },
         }
     }
 
@@ -188,7 +270,7 @@ impl AppModel {
             "discord://ready" => cx.notify(),
             "discord://guild-layout" => self.apply_guild_layout(&payload),
             "discord://member-list" => cx.notify(),
-            "discord://voice" => self.apply_voice(&payload),
+            "discord://voice" => self.apply_voice(&payload, cx),
             "discord://qr" => self.apply_qr(&payload, cx),
             "discord://dispatch" => self.apply_dispatch(&payload, cx),
             "ui://login-token" => self.ui_login_token(&payload, cx),
@@ -224,6 +306,78 @@ impl AppModel {
                     if let Screen::Main(m) = &mut self.screen {
                         m.send_error = Some(e.to_string());
                     }
+                }
+                cx.notify();
+            }
+            "ui://upload-done" => {
+                if let Screen::Main(m) = &mut self.screen {
+                    m.uploading = false;
+                }
+                cx.notify();
+            }
+            "ui://upload-picked" => {
+                // Файлы выбраны: текст композера уже уехал в multipart — чистим.
+                if let Screen::Main(m) = &mut self.screen {
+                    m.composer.update(cx, |f, cx| f.clear(cx));
+                }
+                cx.notify();
+            }
+            "ui://dm-created" => {
+                let cid = payload
+                    .get("channel_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if !cid.is_empty() {
+                    if let Screen::Main(m) = &mut self.screen {
+                        m.selected_guild = None;
+                    }
+                    crate::actions::select_channel(self, &cid, cx);
+                }
+            }
+            "ui://banner" => {
+                if let Some(e) = payload.get("text").and_then(|v| v.as_str()) {
+                    if let Screen::Main(m) = &mut self.screen {
+                        m.banner = Some(e.to_string());
+                    }
+                }
+                cx.notify();
+            }
+            // Окно превью закрыто/остановлено (кнопка, нативный стоп,
+            // отмена выбора источника) — гасим соответствующий сигналинг.
+            "ui://preview-stopped" => {
+                let kind = payload
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match kind {
+                    "screen" => crate::actions::stop_my_stream(self, cx),
+                    "camera" => crate::actions::camera_set(self, false, cx),
+                    _ => {}
+                }
+            }
+            "ui://update-checked" => {
+                let text = payload
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let url = payload
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let is_newer = payload
+                    .get("is_newer")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if let Screen::Main(m) = &mut self.screen {
+                    m.update_status = UpdateStatus {
+                        checking: false,
+                        text,
+                        url,
+                        is_newer,
+                    };
                 }
                 cx.notify();
             }
@@ -275,7 +429,7 @@ impl AppModel {
         }
     }
 
-    fn apply_voice(&mut self, payload: &Value) {
+    fn apply_voice(&mut self, payload: &Value, cx: &mut gpui::Context<Self>) {
         let kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
         let data = payload.get("data").cloned().unwrap_or(Value::Null);
         if let Screen::Main(m) = &mut self.screen {
@@ -290,6 +444,11 @@ impl AppModel {
                         m.voice_connected.remove(gid);
                         m.speaking.clear();
                         m.mic_level = 0.0;
+                        // Выход из войса убивает и нашу трансляцию/камеру
+                        // (медиа-сервер завершит их сам — синхронизируем UI).
+                        m.my_stream_key = None;
+                        m.camera_on = false;
+                        m.streams.retain(|_, s| s.guild_id.as_deref() != Some(gid));
                     }
                 }
                 "speaking" => {
@@ -307,15 +466,18 @@ impl AppModel {
                     } else {
                         m.speaking.remove(&uid);
                     }
+                    // Индикаторы говорящих — перерисовываем.
+                    cx.notify();
                 }
                 "mic_level" => {
-                    // Телеметрия 20 Гц — рендер не дёргаем (индикатор уровня
-                    // появится со спец-элементом).
+                    // Телеметрия 20 Гц: в настройках «Голос» по ней живёт
+                    // индикатор уровня — перерисовываем (лёгкий div-рендер).
                     m.mic_level = data
                         .get("level")
                         .and_then(|v| v.as_f64())
                         .map(|v| v as f32)
                         .unwrap_or(0.0);
+                    cx.notify();
                 }
                 _ => {}
             }
@@ -421,6 +583,32 @@ impl AppModel {
                 let ch = d.get("channel_id").and_then(|v| v.as_str()).unwrap_or("");
                 let id = d.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 if let Screen::Main(m) = &mut self.screen {
+                    // Message Logger (нативный порт плагина): до удаления
+                    // помним текст и автора — показываем в баннере.
+                    if m.log_deleted {
+                        if let Some(msg) = m
+                            .messages
+                            .get(ch)
+                            .and_then(|list| list.iter().find(|x| x.id == id).cloned())
+                        {
+                            let author = msg
+                                .author
+                                .as_ref()
+                                .map(|a| {
+                                    a.global_name
+                                        .clone()
+                                        .or_else(|| Some(a.username.clone()))
+                                        .unwrap_or_else(|| "?".into())
+                                })
+                                .unwrap_or_else(|| "?".into());
+                            let preview: String =
+                                msg.content.chars().take(80).collect();
+                            if !preview.is_empty() {
+                                m.banner =
+                                    Some(format!("🗑 {author} удалил: {preview}"));
+                            }
+                        }
+                    }
                     m.remove_message(ch, id);
                 }
             }
@@ -473,6 +661,66 @@ impl AppModel {
                         if !m.guild_order.iter().any(|g| g == gid) {
                             m.guild_order.push(gid.to_string());
                         }
+                    }
+                }
+            }
+            // Go Live: op 18 создаёт трансляцию, сервер рассылает STREAM_CREATE
+            // с stream_key (ядро уже распарсило guild/channel/user в поля d).
+            // STREAM_UPDATE несёт paused/viewer_count, STREAM_DELETE — конец.
+            "STREAM_CREATE" => {
+                if let Screen::Main(m) = &mut self.screen {
+                    if let Some(key) = d.get("stream_key").and_then(|v| v.as_str()) {
+                        let me = self.core.self_id();
+                        let user_id = d
+                            .get("user_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let info = StreamUi {
+                            stream_key: key.to_string(),
+                            user_id: user_id.clone(),
+                            guild_id: d
+                                .get("guild_id")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
+                            channel_id: d
+                                .get("channel_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            paused: false,
+                            viewers: 0,
+                        };
+                        if me.as_deref() == Some(user_id.as_str()) {
+                            m.my_stream_key = Some(key.to_string());
+                        }
+                        m.streams.insert(key.to_string(), info);
+                    }
+                }
+            }
+            "STREAM_UPDATE" => {
+                if let Screen::Main(m) = &mut self.screen {
+                    if let Some(key) = d.get("stream_key").and_then(|v| v.as_str()) {
+                        if let Some(info) = m.streams.get_mut(key) {
+                            info.paused = d
+                                .get("paused")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(info.paused);
+                            info.viewers = d
+                                .get("viewer_count")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(info.viewers);
+                        }
+                    }
+                }
+            }
+            "STREAM_DELETE" => {
+                if let Screen::Main(m) = &mut self.screen {
+                    if let Some(key) = d.get("stream_key").and_then(|v| v.as_str()) {
+                        if m.my_stream_key.as_deref() == Some(key) {
+                            m.my_stream_key = None;
+                        }
+                        m.streams.remove(key);
                     }
                 }
             }

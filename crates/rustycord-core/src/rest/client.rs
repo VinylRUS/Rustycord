@@ -108,6 +108,32 @@ pub fn urlencode(s: &str) -> String {
     out
 }
 
+/// MIME-тип вложения по расширению имени файла (upload_files):
+/// один источник для Tauri- и GPUI-фронтендов, чтобы списки не расходились.
+pub fn mime_for(name: &str) -> String {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mp3" => "audio/mpeg",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "txt" => "text/plain",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "json" => "application/json",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
 impl RestClient {
     /// Клиент для **пользовательской** сессии: Authorization без префикса
     /// `Bot`, плюс «паспорт браузера» — X-Super-Properties и браузерный UA.
