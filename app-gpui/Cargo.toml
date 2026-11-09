@@ -41,5 +41,5 @@ unicode-segmentation = "1"
 # HTTP-клиент gpui (аватарки/эмодзи через img()) на reqwest.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 # Окно капчи: standalone wry + winit (EventLoop в отдельном потоке).
-wry = { version = "0.53", optional = true }
+wry = { version = "0.57", optional = true }
 winit = { version = "0.30", optional = true, features = ["rwh_06"] }
