@@ -105,7 +105,7 @@ async fn run_session(
     let res = voice_session(&sink, &state, &hs, &cancel, gen).await;
     if let Err(e) = res {
         tracing::error!("voice[songbird]: ошибка сессии: {e:#}");
-        let _ = sink.emit(
+        sink.emit(
             "discord://voice",
             json!({ "kind": "disconnected", "data": { "guild_id": guild_id, "dm": hs.is_dm } }),
         );
@@ -326,7 +326,7 @@ async fn voice_session(
                 tick += 1;
                 let peak = mic_stats.take_peak();
                 win_peak = win_peak.max(peak);
-                let _ = sink.emit(
+                sink.emit(
                     "discord://voice",
                     json!({
                         "kind": "mic_level",

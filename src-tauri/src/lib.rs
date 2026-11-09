@@ -7,8 +7,8 @@ mod commands;
 
 use std::sync::Arc;
 
-use rustycord_core::EventSink;
 use rustycord_core::state::AppState;
+use rustycord_core::EventSink;
 use serde_json::Value;
 use tauri::Manager;
 

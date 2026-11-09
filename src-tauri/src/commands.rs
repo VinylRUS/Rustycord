@@ -935,8 +935,11 @@ pub async fn subscribe_channel(
                 privacy,
                 guild_list.as_deref(),
             );
-            list.tracker =
-                rustycord_core::state::tracker_for_switch(known.as_deref(), privacy, guild_list.as_deref());
+            list.tracker = rustycord_core::state::tracker_for_switch(
+                known.as_deref(),
+                privacy,
+                guild_list.as_deref(),
+            );
             // УРОК v0.9.6: сервер шлёт SYNC только для НОВЫХ пар
             // (список, диапазон) — обычные каналы делят один 'everyone',
             // и при переключении новый SYNC НЕ приедет. Строки НЕ стираем:

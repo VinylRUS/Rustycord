@@ -225,7 +225,7 @@ pub async fn handle_dispatch(
                 "gateway: READY — {username} ({user_id}), session {session_id}, {guild_n} гильдий, {rel_count} отношений, {dm_count} ЛС",
                 guild_n = stub_ids.len(),
             );
-            let _ = sink.emit(
+            sink.emit(
                 "discord://ready",
                 json!({ "user": d["user"], "session_id": session_id }),
             );
@@ -279,7 +279,7 @@ pub async fn handle_dispatch(
             // Полный READY вперёд как dispatch: фронтенду нужны
             // private_channels (recipient_ids!), users, relationships
             // и presences, которых нет в коротком ready-событии выше.
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
             state.emit_status("connected", None);
         }
 
@@ -288,7 +288,7 @@ pub async fn handle_dispatch(
             // подписки ленивых списков — официальный клиент делает flush
             // подписок на CONNECTION_RESUMED ровно как на CONNECTION_OPEN.
             replay_member_list_subscriptions(state);
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
             state.emit_status("connected", None);
         }
 
@@ -316,7 +316,7 @@ pub async fn handle_dispatch(
                 }
             }
             apply_merged(state, &d);
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "RELATIONSHIP_ADD" => {
@@ -332,7 +332,7 @@ pub async fn handle_dispatch(
                     .insert(uid.clone(), rel);
                 tracing::debug!("gateway: RELATIONSHIP_ADD {uid} (type {kind})");
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "RELATIONSHIP_REMOVE" => {
@@ -342,7 +342,7 @@ pub async fn handle_dispatch(
                 cache.relationships.remove(&uid);
                 cache.friend_presences.remove(&uid);
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "GUILD_CREATE" => {
@@ -469,7 +469,7 @@ pub async fn handle_dispatch(
                     "gateway: GUILD_CREATE не разобран даже salvage (нет id) — прокидываем сырое событие в UI"
                 );
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "GUILD_MEMBERS_CHUNK" => {
@@ -501,7 +501,7 @@ pub async fn handle_dispatch(
                 chunk_count,
                 guild_id
             );
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "GUILD_MEMBER_LIST_UPDATE" => {
@@ -859,7 +859,7 @@ pub async fn handle_dispatch(
                 if is_current {
                     let lists = state.member_lists.lock().unwrap();
                     if let Some(list) = lists.get(&guild_id) {
-                        let _ = sink.emit(
+                        sink.emit(
                             "discord://member-list",
                             json!({
                                 "guild_id": guild_id,
@@ -895,7 +895,7 @@ pub async fn handle_dispatch(
                     }
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "GUILD_MEMBER_UPDATE" => {
@@ -908,7 +908,7 @@ pub async fn handle_dispatch(
                     }
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "GUILD_MEMBER_REMOVE" => {
@@ -921,7 +921,7 @@ pub async fn handle_dispatch(
                     gs.member_count = gs.member_count.saturating_sub(1);
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "GUILD_UPDATE" => {
@@ -936,13 +936,13 @@ pub async fn handle_dispatch(
                     gs.emojis = g.emojis.unwrap_or_default();
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "GUILD_DELETE" => {
             let gid = d["id"].as_str().unwrap_or_default().to_string();
             state.cache.write().unwrap().guilds.remove(&gid);
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" => {
@@ -955,7 +955,7 @@ pub async fn handle_dispatch(
                     gs.roles.push(role);
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "GUILD_ROLE_DELETE" => {
@@ -966,7 +966,7 @@ pub async fn handle_dispatch(
                 gs.roles.retain(|r| r.id != role_id);
             }
             drop(cache);
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "CHANNEL_CREATE" => {
@@ -986,7 +986,7 @@ pub async fn handle_dispatch(
                     }
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "CHANNEL_UPDATE" => {
@@ -1000,7 +1000,7 @@ pub async fn handle_dispatch(
                     }
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "CHANNEL_DELETE" => {
@@ -1019,7 +1019,7 @@ pub async fn handle_dispatch(
                     }
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         // Треды (v0.8.0): живут отдельной коллекцией гильдии.
@@ -1033,7 +1033,7 @@ pub async fn handle_dispatch(
                     }
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "THREAD_UPDATE" => {
@@ -1047,7 +1047,7 @@ pub async fn handle_dispatch(
                     }
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "THREAD_DELETE" => {
@@ -1059,7 +1059,7 @@ pub async fn handle_dispatch(
                     gs.threads.retain(|x| x.id != tid);
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "THREAD_LIST_SYNC" => {
@@ -1082,7 +1082,7 @@ pub async fn handle_dispatch(
                     }
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "PRESENCE_UPDATE" => {
@@ -1102,7 +1102,7 @@ pub async fn handle_dispatch(
                     }
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "VOICE_STATE_UPDATE" => {
@@ -1166,7 +1166,7 @@ pub async fn handle_dispatch(
                                             token.cancel();
                                             handle.abort();
                                         }
-                                        let _ = sink.emit(
+                                        sink.emit(
                                             "discord://voice",
                                             json!({ "kind": "disconnected", "data": { "guild_id": k, "dm": true } }),
                                         );
@@ -1237,7 +1237,7 @@ pub async fn handle_dispatch(
                                     token.cancel();
                                     handle.abort();
                                 }
-                                let _ = sink.emit(
+                                sink.emit(
                                     "discord://voice",
                                     json!({ "kind": "disconnected", "data": { "guild_id": gid } }),
                                 );
@@ -1247,7 +1247,7 @@ pub async fn handle_dispatch(
                     }
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         "VOICE_SERVER_UPDATE" => {
@@ -1279,7 +1279,7 @@ pub async fn handle_dispatch(
                 }
             }
             state.voice_notify.notify_one();
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         // Go Live-стрим создан (нами или соседом по каналу). Payload несёт
@@ -1312,7 +1312,7 @@ pub async fn handle_dispatch(
                     }
                 }
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
 
         // Сообщения, реакции, typing и всё остальное идут в UI напрямую —
@@ -1323,17 +1323,17 @@ pub async fn handle_dispatch(
             if !state.is_bot.load(Ordering::SeqCst) {
                 emit_guild_layout(sink, &d);
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
         "USER_SETTINGS_UPDATE" => {
             // Legacy-формат: раскладка может прийти прямо JSON'ом.
             if !state.is_bot.load(Ordering::SeqCst) {
                 emit_guild_layout(sink, &d);
             }
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
         _ => {
-            let _ = sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
+            sink.emit("discord://dispatch", json!({ "t": t, "d": d }));
         }
     }
 }
@@ -1368,7 +1368,7 @@ fn emit_guild_layout(sink: &SharedSink, d: &Value) {
             if let Some(obj) = value.as_object_mut() {
                 obj.insert("rail_order".to_string(), Value::Array(order));
             }
-            let _ = sink.emit("discord://guild-layout", value);
+            sink.emit("discord://guild-layout", value);
             tracing::info!(
                 "gateway: раскладка рейла (proto): {} папок, {} отдельных гильдий",
                 layout.folders.len(),
@@ -1414,7 +1414,7 @@ fn emit_guild_layout(sink: &SharedSink, d: &Value) {
                 positions.push(gid.clone());
             }
         }
-        let _ = sink.emit(
+        sink.emit(
             "discord://guild-layout",
             json!({
                 "folders": norm,

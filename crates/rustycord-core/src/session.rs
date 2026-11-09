@@ -26,7 +26,11 @@ impl AppState {
             .clone()
             .ok_or_else(|| "Не подключено — войди в аккаунт".to_string())?;
         let build = self.build_number.load(Ordering::SeqCst);
-        let version = if self.is_bot.load(Ordering::SeqCst) { 10 } else { 9 };
+        let version = if self.is_bot.load(Ordering::SeqCst) {
+            10
+        } else {
+            9
+        };
         RestClient::new(&token, build, version).map_err(|e| e.to_string())
     }
 
@@ -102,7 +106,11 @@ pub async fn connect(state: &Arc<AppState>, token: &str) -> Result<CurrentUser, 
     // это бот-эндпоинт — юзеру он вернёт 401).
     *state.gateway_url.write().unwrap() = "wss://gateway.discord.gg".to_string();
     if me.bot {
-        tracing::info!("connect: бот @{} (id {}) — gateway с intents", me.username, me.id);
+        tracing::info!(
+            "connect: бот @{} (id {}) — gateway с intents",
+            me.username,
+            me.id
+        );
     } else {
         tracing::info!(
             "connect: пользователь @{} (id {}) — gateway с capabilities",
@@ -139,6 +147,80 @@ pub async fn disconnect(state: &Arc<AppState>) {
     state.cache.write().unwrap().reset();
     *state.token.write().unwrap() = None;
     state.emit_status("shutdown", None);
+}
+
+/* ------------------------------ Голос ------------------------------ */
+
+/// op 4 — войти/выйти из голосового канала (channel_id = None → выход),
+/// флаги mute/deaf/video едут в том же кадре. Общий код для обоих
+/// фронтендов: поддерживает `voice_desired`/`voice_target` (автовосстановление
+/// сессии и мьют-флаги старта) и рассылает команду в gateway.
+///
+/// guild_id = None → звонок в ЛС/группе: op4 уходит с guild_id:null,
+/// voice-сервер идентифицирует сессию по channel_id (server_id = канал).
+pub fn join_voice(
+    state: &Arc<AppState>,
+    guild_id: Option<String>,
+    channel_id: Option<String>,
+    self_mute: bool,
+    self_deaf: bool,
+    self_video: bool,
+) -> Result<(), String> {
+    let tx = state
+        .gateway_tx
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or("Gateway не подключён")?;
+    // Ключ состояния (мьют-флаги и рукопожатие): гильдия для серверного
+    // войса, канал — для звонков ЛС (session_id-эхо придёт с guild_id:null
+    // и ляжет под тем же ключом — см. events.rs).
+    let state_key = guild_id.clone().or_else(|| channel_id.clone());
+    if let Some(key) = &state_key {
+        let desired = if channel_id.is_some() {
+            (self_mute, self_deaf)
+        } else {
+            (false, false)
+        };
+        state
+            .voice_desired
+            .lock()
+            .unwrap()
+            .insert(key.clone(), desired);
+    }
+    // Помним «где мы должны быть»: автовосстановление голоса после
+    // внешней смерти медиа-WS повторяет op4 по этой цели.
+    {
+        let mut target = state.voice_target.lock().unwrap();
+        match (&guild_id, &channel_id) {
+            (g, Some(c)) => {
+                *target = Some(crate::state::VoiceTarget {
+                    guild_id: g.clone(),
+                    channel_id: c.clone(),
+                    self_mute,
+                    self_deaf,
+                    self_video,
+                })
+            }
+            _ => *target = None,
+        }
+    }
+    tracing::info!(
+        "voice: op4 → guild={:?} channel={:?} self_mute={self_mute} \
+         self_deaf={self_deaf} self_video={self_video}",
+        guild_id,
+        channel_id
+    );
+    // Канал ограничен (64 кадра) — try_send из синхронного контекста UI;
+    // полнота буфера означает мёртвый gateway, это переживём.
+    tx.try_send(crate::state::GatewayCommand::VoiceStateUpdate {
+        guild_id,
+        channel_id,
+        self_mute,
+        self_deaf,
+        self_video,
+    })
+    .map_err(|e| e.to_string())
 }
 
 /* ------------------------- QR remote-auth ------------------------- */

@@ -275,7 +275,7 @@ pub async fn run_gateway(
                                Сессия остановлена, чтобы не спамить IDENTIFY — \
                                детали последних кадров в лог-файле.";
                     tracing::error!("gateway: {msg}\n{dump}");
-                    let _ = sink.emit(
+                    sink.emit(
                         "discord://warning",
                         json!({ "message": format!("{msg} Путь к логу: Настройки → Логи.") }),
                     );
@@ -590,7 +590,7 @@ async fn run_session(
                                 state.intents.store(INTENTS_FALLBACK, Ordering::SeqCst);
                                 session.id = None;
                                 tracing::warn!("gateway: интенты запрещены (4014) — деградируем на fallback-набор");
-                                let _ = sink.emit(
+                                sink.emit(
                                     "discord://warning",
                                     json!({ "message": "Privileged Intents выключены в Developer Portal — перезапускаюсь без Presence/Members/MessageContent. Включи их для полной функциональности." }),
                                 );
@@ -795,7 +795,7 @@ async fn send_command(
                 }
                 Err(e) => {
                     tracing::warn!("gateway: SendText отклонён — не JSON: {e}");
-                    let _ = sink.emit(
+                    sink.emit(
                         "discord://warning",
                         json!({ "message": format!("Протокол-консоль: кадр не отправлен — это не JSON ({e}).") }),
                     );

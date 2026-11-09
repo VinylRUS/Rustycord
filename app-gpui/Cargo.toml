@@ -16,10 +16,10 @@ default = ["audio", "captcha-webview"]
 # Голосовые аудиоустройства (cpal: WASAPI/CoreAudio/ALSA). Без фичи —
 # headless-сборка для CI-проверки без libasound2-dev.
 audio = ["rustycord-core/audio"]
-# Окно капчи hCaptcha/Turnstile (standalone wry). Linux требует
+# Окно капчи hCaptcha/Turnstile (standalone wry + winit). Linux требует
 # webkit2gtk-4.1, Windows — WebView2, macOS — WKWebView. Без фичи вход
 # email/QR с капчей отдаёт понятную ошибку (токен-логин работает).
-captcha-webview = ["dep:wry"]
+captcha-webview = ["dep:wry", "dep:winit"]
 
 [dependencies]
 rustycord-core = { path = "../crates/rustycord-core", default-features = false }
@@ -33,11 +33,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
 async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # QR-матрица (renderим модулями div — без ассетов).
 qrcode = { version = "0.14", default-features = false }
 # Курсор-графемика для текстовых полей (как в примере gpui).
 unicode-segmentation = "1"
 # HTTP-клиент gpui (аватарки/эмодзи через img()) на reqwest.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
-# Окно капчи: standalone wry (без Tauri) — hCaptcha на discord.com.
+# Окно капчи: standalone wry + winit (EventLoop в отдельном потоке).
 wry = { version = "0.53", default-features = false, optional = true }
+winit = { version = "0.30", optional = true, features = ["rwh_06"] }
