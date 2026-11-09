@@ -52,6 +52,15 @@ impl CaptchaSolver for WryCaptcha {
 
 #[cfg(feature = "captcha-webview")]
 mod solver {
+    use std::time::Duration;
+
+    use rustycord_core::auth::captcha::{
+        BrowserPostOutcome, CaptchaChallenge, CaptchaSolver, CAPTCHA_MAX_ATTEMPTS,
+    };
+    use serde_json::{json, Value};
+    use tokio::sync::mpsc;
+
+    use super::percent_decode;
 
     /* ------------------------- Инжектируемый JS ------------------------- */
     /* Порт INIT_SCRIPT из Tauri-версии (v0.8.3): менять можно только вместе
