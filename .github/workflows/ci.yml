@@ -167,6 +167,6 @@ jobs:
           workspaces: .
           prefix-key: gpui-full
 
-      - name: Cargo check (default features: audio + captcha-webview)
+      - name: Cargo check (default features — audio + captcha-webview)
         run: cargo check -p rustycord-gpui
 
