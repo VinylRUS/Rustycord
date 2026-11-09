@@ -60,8 +60,6 @@ mod solver {
     use serde_json::{json, Value};
     use tokio::sync::mpsc;
 
-    use super::percent_decode;
-
     /* ------------------------- Инжектируемый JS ------------------------- */
     /* Порт INIT_SCRIPT из Tauri-версии (v0.8.3): менять можно только вместе
      * с ней — виджет hCaptcha Enterprise требует setData, а не render-опцию. */
@@ -313,6 +311,8 @@ mod solver {
         ready_tx: Option<
             std::sync::mpsc::Sender<anyhow::Result<winit::event_loop::EventLoopProxy<WinMsg>>>,
         >,
+        /// Прокси создаётся у EventLoop до run_app (у ActiveEventLoop его нет).
+        proxy: Option<winit::event_loop::EventLoopProxy<WinMsg>>,
     }
 
     impl winit::application::ApplicationHandler<WinMsg> for CaptchaApp {
@@ -364,17 +364,14 @@ mod solver {
                     true
                 });
 
-            #[cfg(target_os = "linux")]
-            let build_result = builder.build(&window);
-            #[cfg(not(target_os = "linux"))]
             let build_result = builder.build(&window);
 
             match build_result {
                 Ok(webview) => {
                     self.webview = Some(webview);
                     self.window = Some(window);
-                    if let Some(tx) = self.ready_tx.take() {
-                        let _ = tx.send(Ok(event_loop.create_proxy()));
+                    if let (Some(tx), Some(proxy)) = (self.ready_tx.take(), self.proxy.clone()) {
+                        let _ = tx.send(Ok(proxy));
                     }
                 }
                 Err(e) => {
@@ -433,11 +430,13 @@ mod solver {
                 return;
             }
         };
+        let proxy = event_loop.create_proxy();
         let mut app = CaptchaApp {
             nav_tx,
             window: None,
             webview: None,
             ready_tx: Some(ready_tx),
+            proxy: Some(proxy),
         };
         let _ = event_loop.run_app(&mut app);
     }
