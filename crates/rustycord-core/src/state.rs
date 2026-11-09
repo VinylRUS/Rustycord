@@ -9,9 +9,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::auth::captcha::CaptchaSolver;
 use crate::rest::models::{Channel, Member, Presence, Relationship, Role, User, VoiceState};
 use crate::voice::dsp::{DspConfig, DspMetrics};
 use crate::voice::VoiceControls;
+use crate::EventSink;
 
 /// Интенты для БОТ-сессии (юзер-аккаунты их не шлют — см. `is_bot`).
 ///   0..14 — GUILDS … DIRECT_MESSAGE_TYPING
@@ -445,7 +447,10 @@ pub struct VoiceSessionHandle {
 }
 
 pub struct AppState {
-    pub app: tauri::AppHandle,
+    /// Куда протокол-слой отправляет события UI (Tauri emit / GPUI канал).
+    pub sink: Arc<dyn EventSink>,
+    /// Решатель капчи в браузерном контексте (Tauri WebviewWindow / wry).
+    pub captcha: Arc<dyn CaptchaSolver>,
     pub cache: RwLock<Cache>,
     pub token: RwLock<Option<String>>,
     /// Бот-аккаунт? Юзер-сессии шлют capabilities вместо intents и получают
@@ -457,17 +462,16 @@ pub struct AppState {
     pub build_number: AtomicU64,
     pub gateway_url: RwLock<String>,
     pub gateway_tx: RwLock<Option<mpsc::Sender<GatewayCommand>>>,
-    pub gateway_task: tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    pub gateway_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub shutdown: RwLock<CancellationToken>,
     /// QR remote-auth: таск + токен отмены (живёт только на экране логина).
-    pub qr_task: tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    pub qr_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     pub qr_cancel: RwLock<Option<CancellationToken>>,
     /// guild_id → partially assembled voice handshake.
     pub voice_handshake: Mutex<HashMap<String, VoiceHandshake>>,
     /// guild_id → running voice session.
-    pub voice_tasks: tokio::sync::Mutex<
-        HashMap<String, (tauri::async_runtime::JoinHandle<()>, CancellationToken)>,
-    >,
+    pub voice_tasks:
+        tokio::sync::Mutex<HashMap<String, (tokio::task::JoinHandle<()>, CancellationToken)>>,
     /// guild_id → controls for a live voice session (mute flags + WS commands).
     pub voice_sessions: Mutex<HashMap<String, VoiceSessionHandle>>,
     /// Last desired op4 flags (written by join_voice, read by a starting session).
@@ -500,9 +504,10 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(app: tauri::AppHandle) -> Self {
+    pub fn new(sink: Arc<dyn EventSink>, captcha: Arc<dyn CaptchaSolver>) -> Self {
         Self {
-            app,
+            sink,
+            captcha,
             cache: RwLock::new(Cache::default()),
             token: RwLock::new(None),
             is_bot: std::sync::atomic::AtomicBool::new(false),
@@ -542,8 +547,7 @@ impl AppState {
 
     /// Broadcast a status frame to the UI.
     pub fn emit_status(&self, stage: &str, detail: Option<String>) {
-        use tauri::Emitter;
-        let _ = self.app.emit(
+        self.sink.emit(
             "discord://status",
             serde_json::json!({ "stage": stage, "detail": detail }),
         );

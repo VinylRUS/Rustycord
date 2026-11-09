@@ -13,7 +13,9 @@ keywords = ["discord", "tauri", "svelte", "client", "reverse-engineering"]
 categories = ["gui", "network-programming"]
 exclude = ["/target", "/gen"]
 
-# См. больше ключей и их значений: https://doc.rust-lang.org/cargo/reference/manifest.html
+# Протокол Discord живёт в `crates/rustycord-core` и shared с GPUI-фронтендом
+# (`app-gpui`). Здесь — только Tauri-обвязка: IPC-команды, окно капчи,
+# автообновления, файловые диалоги.
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
@@ -22,18 +24,8 @@ exclude = ["/target", "/gen"]
 name = "rustycord_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-[features]
-# `audio` — работа с системными аудиоустройствами (cpal: WASAPI/CoreAudio/ALSA).
-# Сборка с --no-default-features даёт «headless»-вариант: сигналинг и
-# голосовой движок songbird работают, но звук не выводится и не пишется —
-# удобно для серверов и проверки логики без устройств.
-default = ["audio"]
-audio = ["dep:cpal"]
-
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
-
 [dependencies]
+rustycord-core = { path = "../crates/rustycord-core" }
 tauri = { version = "2", features = [] }
 # Диалог выбора файлов (загрузка вложений) и открытие внешних ссылок
 # (страница релиза при проверке обновлений).
@@ -45,61 +37,20 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+# IPC-команды живут на токио-рантайме Tauri: tokio::spawn/fs/time/sync.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-util = "0.7"
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "multipart", "cookies"] }
-futures-util = "0.3"
-# async_trait — нужен для impl AsyncMediaSource (songbird) и EventHandler.
+# Объект-безопасный CaptchaSolver для TauriCaptcha.
 async-trait = "0.1"
-# User-auth: QR remote-auth (RSA-OAEP-SHA256), /auth/login.
-# OsRng берём из реэкспорта rsa (rsa::rand_core) — прямая зависимость
-# rand не нужна и регулярно ломалась major-бампами dependabot'а.
-# sha2 держим на 0.10: 0.11 перешёл на digest 0.11-трейты, с которыми
-# rsa 0.9 несовместим (rsa ждёт digest 0.10). hmac удалён — протокол
-# remote-auth v2 proof-эхом (nonce_proof) больше HMAC не использует.
-rsa = "0.9"
-sha2 = "0.10"
-base64 = "0.23"
-# QR-матрица для remote-auth (SVG собираем сами — без тяжёлых зависимостей).
-qrcode = { version = "0.14", default-features = false }
-# Голосовой движок: songbird (драйвер Discord voice v4/v5: современное
-# шифрование aead_aes256_gcm / xchacha20, jitter-буфер, opus, микшер).
-# «driver» — сам движок, «receive» — декодирование входящего аудио
-# (CoreEvent::VoiceTick), «gateway» — зависимости менеджера (нужен
-# receive-модулю: dashmap для ssrc-трекера), «tungstenite»+«rustls» —
-# WS-бэкенд к медиасерверу.
-songbird = { version = "0.6", default-features = false, features = ["driver", "receive", "gateway", "tungstenite", "rustls"] }
-# Фикс «меня не слышат»: songbird подтягивает symphonia с default-features=false
-# и БЕЗ списка фич — в реестре кодеков (get_codec_registry) нет PCM-декодера.
-# Наш микрофонный мост — RawReader с кодеком CODEC_TYPE_PCM_F32LE: при promote
-# codecs.make() не находит декодер → DecodeError("no compatible track found")
-# → PlayMode::Errored → трек выкидывается из микшера мгновенно (get_info =
-# Err(Finished), позиция 0, sink моста выкачивает prebuffer в пустоту).
-# cargo объединяет фичи по дереву: включаем здесь — PcmDecoder попадает в
-# реестр songbird, promote проходит, тракт оживает.
-symphonia = { version = "0.5", default-features = false, features = ["pcm"] }
-# Аудиоустройства — только с фичей `audio` (см. [features]).
-cpal = { version = "0.15", optional = true }
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Суточные файлы логов в app_log_dir — без консоли релизная сборка
 # иначе не diagnosируемая (баг «gateway отваливается» без логов не поймать).
 tracing-appender = "0.2"
-# client_launch_id / launch_signature в X-Super-Properties и IDENTIFY.
-# Уже в дереве зависимостей (serenity/songbird) — прямой dep только ради
-# генерации UUID запуска.
-uuid = { version = "1", features = ["v4"] }
 
 # Примечание: в Tauri 2 фича `tauri/custom-protocol` (встраивание ассетов фронтенда в
 # бинарник) включается самим CLI при `tauri build` — отдельный passthrough здесь не нужен.
 
-[profile.release]
-# Меньше и быстрее релизный бинарник — уместно для клиента, заменяющего 200-мегабайтный Electron.
-codegen-units = 1
-lto = true
-opt-level = "s"
-panic = "abort"
-strip = true
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

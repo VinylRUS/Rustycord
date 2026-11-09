@@ -1,0 +1,43 @@
+[package]
+name = "rustycord-gpui"
+version = "0.11.0"
+description = "RustyCord GPUI — нативный Discord-клиент на GPUI (Zed), общий протокол с Tauri-версией через rustycord-core"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+repository = "https://github.com/VinylRUS/Rustycord"
+
+[[bin]]
+name = "rustycord-gpui"
+path = "src/main.rs"
+
+[features]
+default = ["audio", "captcha-webview"]
+# Голосовые аудиоустройства (cpal: WASAPI/CoreAudio/ALSA). Без фичи —
+# headless-сборка для CI-проверки без libasound2-dev.
+audio = ["rustycord-core/audio"]
+# Окно капчи hCaptcha/Turnstile (standalone wry). Linux требует
+# webkit2gtk-4.1, Windows — WebView2, macOS — WKWebView. Без фичи вход
+# email/QR с капчей отдаёт понятную ошибку (токен-логин работает).
+captcha-webview = ["dep:wry"]
+
+[dependencies]
+rustycord-core = { path = "../crates/rustycord-core", default-features = false }
+gpui = "0.2.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+tokio-util = "0.7"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-util = "0.3"
+async-trait = "0.1"
+# QR-матрица (renderим модулями div — без ассетов).
+qrcode = { version = "0.14", default-features = false }
+# Курсор-графемика для текстовых полей (как в примере gpui).
+unicode-segmentation = "1"
+# HTTP-клиент gpui (аватарки/эмодзи через img()) на reqwest.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+# Окно капчи: standalone wry (без Tauri) — hCaptcha на discord.com.
+wry = { version = "0.53", default-features = false, optional = true }

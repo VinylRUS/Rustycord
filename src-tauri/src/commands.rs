@@ -6,56 +6,27 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tauri::{Emitter, State};
-use tokio_util::sync::CancellationToken;
+use tauri::State;
 
-use crate::auth;
-use crate::gateway::client::run_gateway;
-use crate::rest::client::{urlencode, RestClient};
-use crate::rest::models::{Channel, CurrentUser, Message, Relationship};
-use crate::snowflake;
-use crate::state::{AppState, GatewayCommand, INTENTS_BOT};
-use crate::superprops;
-use crate::updater;
-use crate::voice::coordinator;
-use crate::voice::dsp::{DspConfig, DspStatus};
+use rustycord_core::auth;
+use rustycord_core::rest::client::{urlencode, RestClient};
+use rustycord_core::rest::models::{Channel, CurrentUser, Message, Relationship};
+use rustycord_core::snowflake;
+use rustycord_core::state::{AppState, GatewayCommand};
+use rustycord_core::updater;
+use rustycord_core::voice::dsp::{DspConfig, DspStatus};
 
 fn es<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
 fn rest_of(state: &State<'_, Arc<AppState>>) -> Result<RestClient, String> {
-    let token = state
-        .token
-        .read()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| "Не подключено — войди в аккаунт".to_string())?;
-    let build = state.build_number.load(Ordering::SeqCst);
-    // Юзер-сессии — REST v9 (как официальный веб-клиент; v10 отдаёт
-    // юзер-токенам 403 на ресурсных эндпоинтах — см. rest/client.rs).
-    // Ботам оставляем v10.
-    let version = if state.is_bot.load(std::sync::atomic::Ordering::SeqCst) {
-        10
-    } else {
-        9
-    };
-    RestClient::new(&token, build, version).map_err(es)
+    state.rest()
 }
 
 /// Stop gateway + voice tasks (if running).
 async fn stop_tasks(state: &State<'_, Arc<AppState>>) {
-    if let Some(task) = state.gateway_task.lock().await.take() {
-        task.abort();
-    }
-    state.shutdown.read().unwrap().cancel();
-    *state.gateway_tx.write().unwrap() = None;
-    let mut voices = state.voice_tasks.lock().await;
-    for (_, (handle, token)) in voices.drain() {
-        token.cancel();
-        handle.abort();
-    }
-    state.voice_handshake.lock().unwrap().clear();
+    state.stop_tasks().await;
 }
 
 /* ============================ AUTH ============================ */
@@ -66,7 +37,7 @@ async fn stop_tasks(state: &State<'_, Arc<AppState>>) {
 /// уходит в ждущий запрос заголовками X-Captcha-*.
 #[tauri::command]
 pub async fn auth_login_email(
-    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
     email: String,
     password: String,
 ) -> Result<Value, String> {
@@ -74,7 +45,7 @@ pub async fn auth_login_email(
     if email.is_empty() || password.is_empty() {
         return Err("Заполни email и пароль".into());
     }
-    match auth::login::login(&app, &email, &password).await {
+    match auth::login::login(state.captcha.as_ref(), &email, &password).await {
         Ok(auth::login::LoginOutcome::Token(token)) => {
             Ok(json!({ "status": "ok", "token": token }))
         }
@@ -88,11 +59,11 @@ pub async fn auth_login_email(
 /// Шаг 2: код из приложения-аутентификатора (TOTP).
 #[tauri::command]
 pub async fn auth_submit_mfa(
-    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
     code: String,
     ticket: String,
 ) -> Result<Value, String> {
-    match auth::login::submit_mfa(&app, code.trim(), &ticket).await {
+    match auth::login::submit_mfa(state.captcha.as_ref(), code.trim(), &ticket).await {
         Ok(auth::login::LoginOutcome::Token(token)) => {
             Ok(json!({ "status": "ok", "token": token }))
         }
@@ -104,46 +75,14 @@ pub async fn auth_submit_mfa(
 /// QR-логин: стартуем remote-auth сессию. Дальше UI слушает события
 /// `discord://qr` (fingerprint → scanned → done) и рисует QR-код.
 #[tauri::command]
-pub async fn auth_start_qr(
-    app: tauri::AppHandle,
-    state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
-    qr_stop(&state).await;
-    let cancel = CancellationToken::new();
-    *state.qr_cancel.write().unwrap() = Some(cancel.clone());
-    let app_for_task = app.clone();
-    // Капча (если риск-скоринг потребует) решается отдельным окном
-    // discord.com — см. auth/captcha_webview.rs.
-    let task = tauri::async_runtime::spawn(async move {
-        if let Err(e) = auth::remote::run_remote_auth(app_for_task.clone(), cancel).await {
-            tracing::warn!("remote-auth: {e:#}");
-            // Ошибка обязана попасть в UI — иначе QR просто «не появится».
-            let _ = app_for_task.emit(
-                "discord://qr",
-                json!({ "stage": "error", "message": format!("{e:#}") }),
-            );
-        }
-    });
-    *state.qr_task.lock().await = Some(task);
-    Ok(())
+pub async fn auth_start_qr(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    rustycord_core::session::start_remote_auth(&state).await
 }
 
 /// Отменить QR-сессию (пользователь ушёл с таба/закрыл экран логина).
 #[tauri::command]
 pub async fn auth_cancel_qr(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    qr_stop(&state).await;
-    Ok(())
-}
-
-async fn qr_stop(state: &State<'_, Arc<AppState>>) {
-    if let Some(cancel) = state.qr_cancel.write().unwrap().take() {
-        cancel.cancel();
-    }
-    // Даём задаче ~мгновение на вежливый close-кадр перед abort.
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-    if let Some(task) = state.qr_task.lock().await.take() {
-        task.abort();
-    }
+    rustycord_core::session::cancel_remote_auth(&state).await
 }
 
 /* ========================== CONNECT =========================== */
@@ -151,102 +90,15 @@ async fn qr_stop(state: &State<'_, Arc<AppState>>) {
 /// Validate the user token, spawn the gateway + voice tasks.
 #[tauri::command]
 pub async fn connect(
-    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     token: String,
 ) -> Result<CurrentUser, String> {
-    let token = token.trim().to_string();
-    if token.is_empty() {
-        return Err("Пустой токен".into());
-    }
-
-    stop_tasks(&state).await;
-
-    // Fail fast on invalid token / network before spawning anything.
-    let build = state.build_number.load(Ordering::SeqCst);
-    // v10 на /users/@me работает и юзеру, и боту (проверено живыми логами) —
-    // поэтому первичный зонд логина остаётся на v10; все последующие вызовы
-    // идут через rest_of (юзер → v9, бот → v10).
-    let rest = RestClient::new(&token, build, 10).map_err(es)?;
-    let me: CurrentUser = rest.get_json("/users/@me").await.map_err(|e| {
-        let msg = e.to_string();
-        if msg.contains("401") {
-            "Токен отклонён (401) — сессия могла быть сброшена. Войди заново через QR или email."
-                .to_string()
-        } else {
-            msg
-        }
-    })?;
-
-    // Свежий client_build_number в фоне — следующие REST-вызовы возьмут его
-    // из state (см. rest_of). /users/@me работает и со старым, так что
-    // логин не ждёт.
-    {
-        let state_inner: Arc<AppState> = Arc::clone(state.inner());
-        tauri::async_runtime::spawn(async move {
-            if let Some(b) = superprops::fetch_build_number().await {
-                state_inner.build_number.store(b, Ordering::SeqCst);
-            }
-        });
-    }
-
-    // Fresh state.
-    state.cache.write().unwrap().reset();
-    state.cache.write().unwrap().user = Some(me.clone());
-    *state.token.write().unwrap() = Some(token);
-    // Подписки op 37/14 — заново для новой сессии.
-    state.subscribed_guilds.lock().unwrap().clear();
-    // Бот или юзер? От этого зависит формат IDENTIFY: юзеры шлют
-    // capabilities без intents (как официальный клиент) — иначе гильдии
-    // и события могут не приехать. Интенты — только ботам.
-    state
-        .is_bot
-        .store(me.bot, std::sync::atomic::Ordering::SeqCst);
-    state.intents.store(INTENTS_BOT, Ordering::SeqCst);
-    // Пользовательская сессия ходит на общий gateway (без /gateway/bot,
-    // это бот-эндпоинт — юзеру он вернёт 401).
-    *state.gateway_url.write().unwrap() = "wss://gateway.discord.gg".to_string();
-    if me.bot {
-        tracing::info!(
-            "connect: бот @{} (id {}) — gateway с intents",
-            me.username,
-            me.id
-        );
-    } else {
-        tracing::info!(
-            "connect: пользователь @{} (id {}) — gateway с capabilities",
-            me.username,
-            me.id
-        );
-    }
-
-    // Gateway task.
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
-    *state.gateway_tx.write().unwrap() = Some(tx);
-    let shutdown = tokio_util::sync::CancellationToken::new();
-    *state.shutdown.write().unwrap() = shutdown.clone();
-
-    let shared: Arc<AppState> = Arc::clone(state.inner());
-    let task = tauri::async_runtime::spawn(run_gateway(
-        app.clone(),
-        shared.clone(),
-        rx,
-        shutdown.clone(),
-    ));
-    *state.gateway_task.lock().await = Some(task);
-
-    // Voice coordinator (idempotent, dies with the same shutdown token).
-    tauri::async_runtime::spawn(coordinator::coordinator(app.clone(), shared, shutdown));
-
-    Ok(me)
+    rustycord_core::session::connect(&state, &token).await
 }
 
 #[tauri::command]
 pub async fn disconnect(state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    stop_tasks(&state).await;
-    state.cache.write().unwrap().reset();
-    *state.token.write().unwrap() = None;
-    state.emit_status("shutdown", None);
+    rustycord_core::session::disconnect(&state).await;
     Ok(())
 }
 
@@ -793,7 +645,7 @@ pub async fn join_voice(
         let mut target = state.voice_target.lock().unwrap();
         match (&guild_id, &channel_id) {
             (g, Some(c)) => {
-                *target = Some(crate::state::VoiceTarget {
+                *target = Some(rustycord_core::state::VoiceTarget {
                     guild_id: g.clone(),
                     channel_id: c.clone(),
                     self_mute,
@@ -1078,13 +930,13 @@ pub async fn subscribe_channel(
             let known = list.channel_lists.get(&cid).cloned();
             let guild_list = list.guild_list.clone();
             let privacy = channel_list_private(&state, &guild_id, &cid);
-            let target = crate::state::target_list_for_switch(
+            let target = rustycord_core::state::target_list_for_switch(
                 known.as_deref(),
                 privacy,
                 guild_list.as_deref(),
             );
             list.tracker =
-                crate::state::tracker_for_switch(known.as_deref(), privacy, guild_list.as_deref());
+                rustycord_core::state::tracker_for_switch(known.as_deref(), privacy, guild_list.as_deref());
             // УРОК v0.9.6: сервер шлёт SYNC только для НОВЫХ пар
             // (список, диапазон) — обычные каналы делят один 'everyone',
             // и при переключении новый SYNC НЕ приедет. Строки НЕ стираем:

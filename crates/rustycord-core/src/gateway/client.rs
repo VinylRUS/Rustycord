@@ -12,7 +12,6 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tauri::Emitter;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -21,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use crate::gateway::events::{handle_dispatch, SessionData};
 use crate::state::{GatewayCommand, SharedState, INTENTS_FALLBACK};
 use crate::wsutil;
+use crate::SharedSink;
 
 /// capabilities для юзер-сессии — битовая маска клиентских возможностей,
 /// которую шлёт официальный веб-клиент (без интентов). Значение из
@@ -223,7 +223,7 @@ enum End {
 /// Entry point: reconnect loop with exponential backoff (1s → 30s).
 /// `session` survives across iterations so a RESUME picks up where we left.
 pub async fn run_gateway(
-    app: tauri::AppHandle,
+    sink: SharedSink,
     state: SharedState,
     mut rx: mpsc::Receiver<GatewayCommand>,
     shutdown: CancellationToken,
@@ -245,7 +245,7 @@ pub async fn run_gateway(
         }
         let mut ready_seen = false;
         let end = run_session(
-            &app,
+            &sink,
             &state,
             &mut rx,
             &mut session,
@@ -275,7 +275,7 @@ pub async fn run_gateway(
                                Сессия остановлена, чтобы не спамить IDENTIFY — \
                                детали последних кадров в лог-файле.";
                     tracing::error!("gateway: {msg}\n{dump}");
-                    let _ = app.emit(
+                    let _ = sink.emit(
                         "discord://warning",
                         json!({ "message": format!("{msg} Путь к логу: Настройки → Логи.") }),
                     );
@@ -307,7 +307,7 @@ pub async fn run_gateway(
 }
 
 async fn run_session(
-    app: &tauri::AppHandle,
+    sink: &SharedSink,
     state: &SharedState,
     rx: &mut mpsc::Receiver<GatewayCommand>,
     session: &mut SessionData,
@@ -456,7 +456,7 @@ async fn run_session(
                     pending_cmds.push(cmd);
                     continue;
                 }
-                dispatch_cmd(app, &mut writer, cmd, &mut frames, &mut bucket,
+                dispatch_cmd(sink, &mut writer, cmd, &mut frames, &mut bucket,
                              &mut deferred, &mut wake).await?;
             }
 
@@ -469,7 +469,7 @@ async fn run_session(
                         break;
                     }
                     let cmd = deferred.pop_front().expect("deferred непуст");
-                    send_command(app, &mut writer, &cmd, &mut frames).await?;
+                    send_command(sink, &mut writer, &cmd, &mut frames).await?;
                 }
                 if !deferred.is_empty() {
                     wake = tokio::time::Instant::from_std(bucket.next_free_at());
@@ -530,7 +530,7 @@ async fn run_session(
                                         );
                                     }
                                 }
-                                handle_dispatch(app, state, &t, d, session).await;
+                                handle_dispatch(sink, state, &t, d, session).await;
                                 // Первый dispatch — это READY (IDENTIFY-сессия):
                                 // шлюз готов принимать команды. Выливаем всё,
                                 // что накопилось за время рукопожатия.
@@ -544,7 +544,7 @@ async fn run_session(
                                             queued.len()
                                         );
                                         for cmd in queued {
-                                            dispatch_cmd(app, &mut writer, cmd, &mut frames,
+                                            dispatch_cmd(sink, &mut writer, cmd, &mut frames,
                                                          &mut bucket, &mut deferred, &mut wake).await?;
                                         }
                                     }
@@ -590,7 +590,7 @@ async fn run_session(
                                 state.intents.store(INTENTS_FALLBACK, Ordering::SeqCst);
                                 session.id = None;
                                 tracing::warn!("gateway: интенты запрещены (4014) — деградируем на fallback-набор");
-                                let _ = app.emit(
+                                let _ = sink.emit(
                                     "discord://warning",
                                     json!({ "message": "Privileged Intents выключены в Developer Portal — перезапускаюсь без Presence/Members/MessageContent. Включи их для полной функциональности." }),
                                 );
@@ -734,7 +734,7 @@ fn defer_with_coalesce(deferred: &mut VecDeque<GatewayCommand>, cmd: GatewayComm
 /// чтение кадров и heartbeat → зомби-соединение). Будильник очереди
 /// переставляется на момент освобождения старейшего слота.
 async fn dispatch_cmd(
-    app: &tauri::AppHandle,
+    sink: &SharedSink,
     writer: &mut crate::wsutil::WsWriter,
     cmd: GatewayCommand,
     frames: &mut FrameLog,
@@ -747,11 +747,11 @@ async fn dispatch_cmd(
     // Ждать слотов бессмысленно — их не наберётся никогда. Отправляем как
     // есть и ругаемся: лучше рискнуть 4008, чем заморозить очередь навсегда.
     if need < CMD_LIMIT && bucket.try_acquire(need) {
-        send_command(app, writer, &cmd, frames).await
+        send_command(sink, writer, &cmd, frames).await
     } else {
         if need >= CMD_LIMIT {
             tracing::warn!("gateway: команда требует {need} кадров (лимит {CMD_LIMIT}) — отправляю без очереди");
-            return send_command(app, writer, &cmd, frames).await;
+            return send_command(sink, writer, &cmd, frames).await;
         }
         tracing::warn!(
             "gateway: лимит {CMD_LIMIT}/60с исчерпан — команда в очередь ({} шт.)",
@@ -769,7 +769,7 @@ async fn dispatch_cmd(
 /// в кольцевой буфер (дамп при 4002); слоты лимита занимается вызывающий
 /// (dispatch_cmd / будильник отложенной очереди) — по числу кадров команды.
 async fn send_command(
-    app: &tauri::AppHandle,
+    sink: &SharedSink,
     writer: &mut crate::wsutil::WsWriter,
     cmd: &GatewayCommand,
     frames: &mut FrameLog,
@@ -795,7 +795,7 @@ async fn send_command(
                 }
                 Err(e) => {
                     tracing::warn!("gateway: SendText отклонён — не JSON: {e}");
-                    let _ = app.emit(
+                    let _ = sink.emit(
                         "discord://warning",
                         json!({ "message": format!("Протокол-консоль: кадр не отправлен — это не JSON ({e}).") }),
                     );

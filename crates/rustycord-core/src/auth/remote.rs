@@ -26,17 +26,16 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tauri::Emitter;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
-use super::captcha;
-use super::captcha_webview;
+use super::captcha::{self, BrowserPostOutcome, CaptchaSolver};
 use super::{nonce_echo, RemoteAuthKeys};
 use crate::superprops::BROWSER_UA;
 use crate::wsutil;
+use crate::SharedSink;
 
 const REMOTE_AUTH_URL: &str = "wss://remote-auth-gateway.discord.gg/?v=2";
 /// Обмен QR-тикетa на токен (docs.discord.food, Endpoints).
@@ -95,7 +94,7 @@ async fn exchange_ticket(
     keys: &RemoteAuthKeys,
     ticket: &str,
     build: u64,
-    app: &tauri::AppHandle,
+    solver: &dyn CaptchaSolver,
 ) -> Result<String> {
     if ticket.len() < 20 {
         bail!(
@@ -138,22 +137,22 @@ async fn exchange_ticket(
                 // discord.com: браузерный контекст, правильный origin для
                 // sitekey и консистентный rqdata. Ответ расшифровываем
                 // своим ключом: только у нас приватная половина RSA.
-                let outcome = captcha_webview::browser_post(
-                    app,
-                    "qr",
-                    &[
-                        "/api/v9/users/@me/remote-auth/login",
-                        "/api/v10/users/@me/remote-auth/login",
-                    ],
-                    &json!({ "ticket": ticket }),
-                    None,
-                    build,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("капча-обмен: {e:#}"))?;
+                let outcome = solver
+                    .browser_post(
+                        "qr",
+                        &[
+                            "/api/v9/users/@me/remote-auth/login",
+                            "/api/v10/users/@me/remote-auth/login",
+                        ],
+                        &json!({ "ticket": ticket }),
+                        None,
+                        build,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("капча-обмен: {e:#}"))?;
                 let raw = match outcome {
-                    captcha_webview::BrowserPost::Ok(text) => text,
-                    captcha_webview::BrowserPost::Rejected(raw) => {
+                    BrowserPostOutcome::Ok(text) => text,
+                    BrowserPostOutcome::Rejected(raw) => {
                         let snippet: String = raw.chars().take(300).collect();
                         bail!("обмен после капчи отклонён: {snippet}");
                     }
@@ -272,9 +271,13 @@ async fn exchange_once(
 }
 
 /// Одна QR-сессия. Отменяется через `cancel` (пользователь закрыл экран логина).
-/// Капча (если риск-скоринг потребует) решается в отдельном окне discord.com
-/// (см. auth/captcha_webview.rs).
-pub async fn run_remote_auth(app: tauri::AppHandle, cancel: CancellationToken) -> Result<()> {
+/// Капча (если риск-скоринг потребует) решается браузерным окном discord.com
+/// (реализация [`CaptchaSolver`] конкретного фронтенда).
+pub async fn run_remote_auth(
+    sink: SharedSink,
+    solver: std::sync::Arc<dyn CaptchaSolver>,
+    cancel: CancellationToken,
+) -> Result<()> {
     let emit = |stage: &str, extra: Value| {
         // json! не поддерживает spread — мерджим объекты вручную.
         let mut payload = extra;
@@ -284,7 +287,7 @@ pub async fn run_remote_auth(app: tauri::AppHandle, cancel: CancellationToken) -
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("stage".to_string(), json!(stage));
         }
-        let _ = app.emit("discord://qr", payload);
+        sink.emit("discord://qr", payload);
     };
 
     emit(
@@ -450,7 +453,7 @@ pub async fn run_remote_auth(app: tauri::AppHandle, cancel: CancellationToken) -
                             .ok()
                             .flatten()
                             .unwrap_or(crate::superprops::FALLBACK_BUILD_NUMBER);
-                        let token = exchange_ticket(&keys, ticket, build, &app).await?;
+                        let token = exchange_ticket(&keys, ticket, build, solver.as_ref()).await?;
                         let _ = writer.send(Message::Close(None)).await;
                         emit("done", json!({ "token": token }));
                         return Ok(());
