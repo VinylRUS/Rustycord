@@ -340,7 +340,6 @@ mod solver {
             let nav_tx = self.nav_tx.clone();
             let builder = wry::WebViewBuilder::new()
                 .with_url("https://discord.com/login")
-                .unwrap_or_else(|_| wry::WebViewBuilder::new())
                 .with_initialization_script(INIT_SCRIPT)
                 .with_navigation_handler(move |uri: String| {
                     // Единственный канал связи: блокируем «запрещённую»
