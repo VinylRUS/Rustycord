@@ -1045,7 +1045,7 @@ pub fn loopback_set(model: &AppModel, on: bool) {
     if sessions.is_empty() {
         return;
     }
-    for (_, h) in sessions.iter() {
+    for h in sessions.values() {
         h.loopback.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 }
