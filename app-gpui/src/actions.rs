@@ -528,11 +528,7 @@ pub fn trigger_typing(model: &AppModel) {
 
 /// Начать редактирование своего сообщения: текст — в композер,
 /// поверх — баннер с кнопкой отмены; Enter = сохранить.
-pub fn edit_start(
-    model: &mut AppModel,
-    message_id: &str,
-    cx: &mut gpui::Context<AppModel>,
-) {
+pub fn edit_start(model: &mut AppModel, message_id: &str, cx: &mut gpui::Context<AppModel>) {
     let Screen::Main(m) = &mut model.screen else {
         return;
     };
@@ -598,7 +594,10 @@ pub fn edit_save(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) {
     crate::bridge::spawn_tokio(async move {
         let Ok(rest) = core.rest() else { return };
         let path = format!("/channels/{cid}/messages/{mid}");
-        if let Err(e) = rest.patch_json::<Value>(&path, json!({ "content": text })).await {
+        if let Err(e) = rest
+            .patch_json::<Value>(&path, json!({ "content": text }))
+            .await
+        {
             ui_emit(&tx, "ui://send-error", json!({ "error": e.to_string() }));
         }
     });
@@ -606,11 +605,7 @@ pub fn edit_save(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) {
 }
 
 /// Удалить сообщение (права проверит сервер): локально уберёт MESSAGE_DELETE.
-pub fn delete_message(
-    model: &mut AppModel,
-    message_id: &str,
-    _cx: &mut gpui::Context<AppModel>,
-) {
+pub fn delete_message(model: &mut AppModel, message_id: &str, _cx: &mut gpui::Context<AppModel>) {
     let Screen::Main(m) = &mut model.screen else {
         return;
     };
@@ -624,7 +619,11 @@ pub fn delete_message(
         let Ok(rest) = core.rest() else { return };
         let path = format!("/channels/{cid}/messages/{mid}");
         if let Err(e) = rest.delete::<Value>(&path).await {
-            ui_emit(&tx, "ui://banner", json!({ "text": format!("Удаление: {e}") }));
+            ui_emit(
+                &tx,
+                "ui://banner",
+                json!({ "text": format!("Удаление: {e}") }),
+            );
         }
     });
 }
@@ -751,11 +750,7 @@ async fn upload_flow(
 /* --------------------------- ЛС и модерация --------------------------- */
 
 /// Открыть (или создать) ЛС с пользователем: POST /users/@me/channels.
-pub fn create_dm(
-    model: &mut AppModel,
-    recipient_id: &str,
-    cx: &mut gpui::Context<AppModel>,
-) {
+pub fn create_dm(model: &mut AppModel, recipient_id: &str, cx: &mut gpui::Context<AppModel>) {
     let core = model.core.clone();
     let tx = model.ui_tx.clone();
     let uid = recipient_id.to_string();
@@ -927,11 +922,7 @@ pub fn stream_pause_toggle(model: &mut AppModel, cx: &mut gpui::Context<AppModel
     let Some(key) = m.my_stream_key.clone() else {
         return;
     };
-    let paused = m
-        .streams
-        .get(&key)
-        .map(|s| !s.paused)
-        .unwrap_or(false); // нет инфо — ставим на паузу
+    let paused = m.streams.get(&key).map(|s| !s.paused).unwrap_or(false); // нет инфо — ставим на паузу
     if let Some(s) = m.streams.get_mut(&key) {
         s.paused = paused;
     }
@@ -978,8 +969,7 @@ pub fn camera_set(model: &mut AppModel, on: bool, cx: &mut gpui::Context<AppMode
         let (nm, nd) = current_voice_flags(&core);
         let (gid, cid) = (t.guild_id.clone(), t.channel_id.clone());
         crate::bridge::spawn_tokio(async move {
-            let _ =
-                rustycord_core::session::join_voice(&core, gid, Some(cid), nm, nd, on);
+            let _ = rustycord_core::session::join_voice(&core, gid, Some(cid), nm, nd, on);
         });
         if on {
             #[cfg(feature = "captcha-webview")]
@@ -1053,8 +1043,7 @@ pub fn loopback_set(model: &AppModel, on: bool) {
 /// Настройки DSP (шумодав + AGC) — применяются к следующему кадру
 /// живой сессии без перезахода в канал.
 pub fn dsp_set(model: &AppModel, ns_enabled: bool, ns_strength: &str, agc_enabled: bool) {
-    let Some(strength) =
-        rustycord_core::voice::dsp::DspConfig::strength_from_str(ns_strength)
+    let Some(strength) = rustycord_core::voice::dsp::DspConfig::strength_from_str(ns_strength)
     else {
         return;
     };

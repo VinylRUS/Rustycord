@@ -20,9 +20,7 @@ use crate::theme::{
 
 /// Отображаемое имя для карточки «Аккаунт».
 pub fn display_name_me(u: &User) -> String {
-    u.global_name
-        .clone()
-        .unwrap_or_else(|| u.username.clone())
+    u.global_name.clone().unwrap_or_else(|| u.username.clone())
 }
 
 /// Кликабельная кнопка.
@@ -45,7 +43,10 @@ fn action_btn(
         .cursor_pointer()
         .hover(|s| s.bg(rgb(0x4752c4)))
         .child(label)
-        .on_mouse_down(MouseButton::Left, cx.listener(move |m, _, _, cx| on_click(m, cx)))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |m, _, _, cx| on_click(m, cx)),
+        )
 }
 
 /// Строка-переключатель (toggle).
@@ -92,14 +93,31 @@ fn toggle_row(
                 .w(px(44.))
                 .h(px(24.))
                 .rounded_full()
-                .map(|el| if on { el.bg(rgb(GREEN)) } else { el.bg(rgb(BG_INPUT)) })
+                .map(|el| {
+                    if on {
+                        el.bg(rgb(GREEN))
+                    } else {
+                        el.bg(rgb(BG_INPUT))
+                    }
+                })
                 .child(if on {
-                    gpui::div().ml_2().size(px(18.)).rounded_full().bg(gpui::white())
+                    gpui::div()
+                        .ml_2()
+                        .size(px(18.))
+                        .rounded_full()
+                        .bg(gpui::white())
                 } else {
-                    gpui::div().ml_1().size(px(18.)).rounded_full().bg(gpui::white())
+                    gpui::div()
+                        .ml_1()
+                        .size(px(18.))
+                        .rounded_full()
+                        .bg(gpui::white())
                 }),
         )
-        .on_mouse_down(MouseButton::Left, cx.listener(move |m, _, _, cx| on_flip(m, cx)))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |m, _, _, cx| on_flip(m, cx)),
+        )
 }
 
 fn section_title(text: &str) -> impl IntoElement {
@@ -187,12 +205,15 @@ fn nav_item(
         })
         .hover(|s| s.text_color(rgb(TEXT_PRIMARY)))
         .child(title.to_string())
-        .on_mouse_down(MouseButton::Left, cx.listener(move |m, _, _, cx| {
-            if let Screen::Main(st) = &mut m.screen {
-                st.settings_section = want;
-            }
-            cx.notify();
-        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |m, _, _, cx| {
+                if let Screen::Main(st) = &mut m.screen {
+                    st.settings_section = want;
+                }
+                cx.notify();
+            }),
+        )
 }
 
 /* -------------------------------- Рендер -------------------------------- */
@@ -254,8 +275,18 @@ pub fn render(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> gpui::A
                         ),
                 ),
         )
-        .child(nav_item(cx, section, SettingsSection::Voice, "Голос и аудио"))
-        .child(nav_item(cx, section, SettingsSection::Behavior, "Поведение"))
+        .child(nav_item(
+            cx,
+            section,
+            SettingsSection::Voice,
+            "Голос и аудио",
+        ))
+        .child(nav_item(
+            cx,
+            section,
+            SettingsSection::Behavior,
+            "Поведение",
+        ))
         .child(nav_item(cx, section, SettingsSection::Account, "Аккаунт"))
         .child(nav_item(cx, section, SettingsSection::About, "О программе"));
 
@@ -268,7 +299,12 @@ pub fn render(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> gpui::A
                 .items_center()
                 .gap_2()
                 .pt_3()
-                .child(avatar_or_initial(&u.id, avatar.as_deref(), &display_name_me(u), px(28.)))
+                .child(avatar_or_initial(
+                    &u.id,
+                    avatar.as_deref(),
+                    &display_name_me(u),
+                    px(28.),
+                ))
                 .child(
                     gpui::div()
                         .flex()
@@ -358,7 +394,11 @@ fn voice_section(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> gpui
 
     // Сила шумодава: три сегмента.
     let mut seg = gpui::div().flex().gap_1().pb_1();
-    for (key, title) in [("low", "Низкое"), ("medium", "Среднее"), ("high", "Сильное")] {
+    for (key, title) in [
+        ("low", "Низкое"),
+        ("medium", "Среднее"),
+        ("high", "Сильное"),
+    ] {
         let active = strength_str(cfg.ns_strength) == key;
         seg = seg.child(
             gpui::div()
@@ -407,7 +447,11 @@ fn voice_section(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> gpui
     col = col.child(section_title("ПРОВЕРКА МИКРОФОНА"));
 
     // Живой уровень: −100…0 dBFS + речевой детектор.
-    let speech = if metrics.speech { "🗣 речь" } else { "тишина" };
+    let speech = if metrics.speech {
+        "🗣 речь"
+    } else {
+        "тишина"
+    };
     col = col
         .child(label(&format!(
             "Уровень входа: {:.0} dBFS ({speech})",
@@ -426,19 +470,19 @@ fn voice_section(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> gpui
             ("loopback-on", "Проверить микрофон (лупбек)", BLURPLE)
         };
         let turn_on = !loopback_on;
-        col = col.child(
-            gpui::div()
-                .flex()
-                .gap_2()
-                .pt_1()
-                .child(action_btn(btn_id, btn_label, accent, cx, move |m, cx| {
-                    if let Screen::Main(st) = &mut m.screen {
-                        st.loopback_on = turn_on;
-                    }
-                    crate::actions::loopback_set(m, turn_on);
-                    cx.notify();
-                })),
-        );
+        col = col.child(gpui::div().flex().gap_2().pt_1().child(action_btn(
+            btn_id,
+            btn_label,
+            accent,
+            cx,
+            move |m, cx| {
+                if let Screen::Main(st) = &mut m.screen {
+                    st.loopback_on = turn_on;
+                }
+                crate::actions::loopback_set(m, turn_on);
+                cx.notify();
+            },
+        )));
     } else {
         col = col.child(muted(
             "Войди в голосовой канал — здесь появится проверка микрофона и живой уровень",
@@ -546,15 +590,15 @@ fn account_section(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> gp
                         ),
                 ),
         )
-        .child(
-            gpui::div()
-                .flex()
-                .gap_2()
-                .pt_2()
-                .child(action_btn("settings-logout", "Выйти из аккаунта", RED, cx, |m, cx| {
-                    crate::actions::logout(m, cx);
-                })),
-        )
+        .child(gpui::div().flex().gap_2().pt_2().child(action_btn(
+            "settings-logout",
+            "Выйти из аккаунта",
+            RED,
+            cx,
+            |m, cx| {
+                crate::actions::logout(m, cx);
+            },
+        )))
         .into_any_element()
 }
 
@@ -578,7 +622,9 @@ fn about_section(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> gpui
             env!("CARGO_PKG_VERSION"),
             rustycord_core::VERSION
         )))
-        .child(label("Нативный клиент Discord на GPUI (Zed). Неофициальный проект."));
+        .child(label(
+            "Нативный клиент Discord на GPUI (Zed). Неофициальный проект.",
+        ));
 
     let mut actions = gpui::div().flex().items_center().gap_3().pt_2();
     if checking {
@@ -621,9 +667,9 @@ fn about_section(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> gpui
         );
     }
 
-    col = col
-        .child(gpui::div().h(px(6.)))
-        .child(muted("Репозиторий и баг-трекер: github.com/VinylRUS/Rustycord"));
+    col = col.child(gpui::div().h(px(6.))).child(muted(
+        "Репозиторий и баг-трекер: github.com/VinylRUS/Rustycord",
+    ));
 
     col.into_any_element()
 }

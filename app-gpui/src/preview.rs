@@ -191,11 +191,7 @@ media.then(s => {{
             }
         }
 
-        fn user_event(
-            &mut self,
-            event_loop: &winit::event_loop::ActiveEventLoop,
-            event: WinMsg,
-        ) {
+        fn user_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, event: WinMsg) {
             match event {
                 WinMsg::Close => {
                     self.stop();
@@ -210,15 +206,15 @@ media.then(s => {{
     /// задачи спавнятся на общем tokio-рантайме (см. actions.rs).
     pub fn open(kind: PreviewKind, on_stop: Box<dyn FnOnce() + Send>) {
         std::thread::spawn(move || {
-            let event_loop =
-                match winit::event_loop::EventLoop::<WinMsg>::with_user_event().build() {
-                    Ok(el) => el,
-                    Err(e) => {
-                        tracing::warn!("preview: event loop: {e}");
-                        on_stop();
-                        return;
-                    }
-                };
+            let event_loop = match winit::event_loop::EventLoop::<WinMsg>::with_user_event().build()
+            {
+                Ok(el) => el,
+                Err(e) => {
+                    tracing::warn!("preview: event loop: {e}");
+                    on_stop();
+                    return;
+                }
+            };
             let proxy = event_loop.create_proxy();
             let mut app = PreviewApp {
                 kind,

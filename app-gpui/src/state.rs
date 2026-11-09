@@ -346,10 +346,7 @@ impl AppModel {
             // Окно превью закрыто/остановлено (кнопка, нативный стоп,
             // отмена выбора источника) — гасим соответствующий сигналинг.
             "ui://preview-stopped" => {
-                let kind = payload
-                    .get("kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                 match kind {
                     "screen" => crate::actions::stop_my_stream(self, cx),
                     "camera" => crate::actions::camera_set(self, false, cx),
@@ -601,11 +598,9 @@ impl AppModel {
                                         .unwrap_or_else(|| "?".into())
                                 })
                                 .unwrap_or_else(|| "?".into());
-                            let preview: String =
-                                msg.content.chars().take(80).collect();
+                            let preview: String = msg.content.chars().take(80).collect();
                             if !preview.is_empty() {
-                                m.banner =
-                                    Some(format!("🗑 {author} удалил: {preview}"));
+                                m.banner = Some(format!("🗑 {author} удалил: {preview}"));
                             }
                         }
                     }
