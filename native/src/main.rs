@@ -14,7 +14,7 @@
 //!   EventSink (после рефакторинга emit-транспорта на main).
 
 use gpui::{
-    prelude::*, div, px, relative, rgb, rgba, size, App, Application, Bounds, Context, FontWeight,
+    div, prelude::*, px, relative, rgb, rgba, size, App, Application, Bounds, Context, FontWeight,
     TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 
@@ -159,7 +159,7 @@ impl RustyApp {
                     .justify_center()
                     .rounded_full()
                     .bg(rgb(ACCENT))
-                    .text_md()
+                    .text_lg()
                     .font_weight(FontWeight::BLACK)
                     .text_color(rgb(0xffffff))
                     .child("R"),
