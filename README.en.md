@@ -1,6 +1,7 @@
 # 🦀 RustyCord
 
-**A lightweight unofficial Discord client built with Rust + Tauri + Svelte 5.**
+**An unofficial Discord client written in pure Rust: one protocol core, two frontends.**
+A native one on GPUI (the engine behind the Zed editor) and a classic one on Tauri + Svelte 5.
 For people tired of a chat app that eats more RAM than their IDE.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/VinylRUS/Rustycord/ci.yml?branch=main&label=CI&logo=github)](https://github.com/VinylRUS/Rustycord/actions/workflows/ci.yml)
@@ -8,6 +9,8 @@ For people tired of a chat app that eats more RAM than their IDE.
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 [🇷🇺 Русский](README.md) · 🇬🇧 English
+
+[Why this exists](#-why-this-exists) · [Numbers](#-numbers) · [Two clients](#-two-frontends-one-core) · [What works](#-what-works-and-what-doesnt) · [Getting started](#-getting-started) · [Roadmap](#-where-the-project-is-heading) · [Help wanted](#-help-wanted) · [Community](#-community)
 
 > ⚠️ **Read this before running.** RustyCord uses a **user token** (like Vencord/Vesktop), which formally goes against Discord's rules. We can't predict how Discord will treat a given account, so use the client at your own risk. We **do not help** with selfbots, spam, automation on behalf of an account, or bypassing Discord's protections, and this project has no use for any of that. See the [FAQ](#-faq).
 
@@ -17,17 +20,32 @@ For people tired of a chat app that eats more RAM than their IDE.
 
 It started when the official Discord client ate almost 3 GB of RAM. I saw people rebuilding Adobe and Microsoft Office-style apps in Rust with the help of neural networks and thought: "why not me?"
 
-RustyCord is a client without Electron that starts and lives much lighter. But the project has a second goal that is more interesting than the first: **to add what Discord could have built itself but never did.** Not tools for breaking rules, just everyday quality of life, so that using this client doesn't feel awful.
+First came RustyCord on Tauri: a client without Electron that starts and lives much lighter. Then in v0.11 the whole protocol moved into a separate core, `rustycord-core`, and a second, **fully native** frontend grew on top of it — built with GPUI, the very engine the Zed editor is written in. A single multi-megabyte binary, instant startup, no web engine at all.
+
+But the project has a goal more interesting than being lightweight: **to add what Discord could have built itself but never did.** Not tools for breaking rules, just everyday quality of life, so that using this client doesn't feel awful.
 
 ---
 
 ## 📊 Numbers
 
-| | RustyCord | Official Discord |
-|---|---|---|
-| RAM | **~83 MB** at peak (all WebView2 processes + core; `rustycord.exe` alone is 20–30 MB) | **~500 MB** right after launch |
+| | GPUI | Tauri | Official Discord |
+|---|---|---|---|
+| Size | a **5–9 MB** binary | installer 4–12 MB (AppImage is 93 MB — it bundles everything) | hundreds of megabytes |
+| RAM | native app, no web engine — **send us your measurements** | **~83 MB** at peak¹ | **~500 MB** right after launch |
 
-*Author's measurements: Windows 11, Task Manager, peak while browsing large servers. One machine, not a lab benchmark. If you get different numbers, please send them in an issue.*
+¹ Author's measurement: Windows 11, Task Manager, all WebView2 processes + core, peak while browsing large servers. Sizes are from the v0.11.0 release archives. One machine, not a lab benchmark. If you get different numbers, please send them in an issue.
+
+---
+
+## 🏗 Two frontends, one core
+
+A Cargo workspace with three parts:
+
+- **`crates/rustycord-core`** — the entire Discord protocol with zero UI dependencies: Gateway (WebSocket), REST, voice (songbird + cpal), remote-auth for QR login, and a client fingerprint 1:1 with the official one (X-Super-Properties, IDENTIFY). The UI contract is two traits: `EventSink` (events) and `CaptchaSolver` (captcha).
+- **`app-gpui`** — the native frontend on GPUI 0.2: one binary, IME input (Russian works), native file dialogs. The lightest option. Young — it needs testers the most.
+- **`src-tauri`** — the battle-tested version on Tauri 2 + Svelte 5: the system WebView instead of Chromium, the full feature set (threads, forums, JS plugins, auto-updates).
+
+Which one to pick — short answer in the [FAQ](#-faq).
 
 ---
 
@@ -35,18 +53,24 @@ RustyCord is a client without Electron that starts and lives much lighter. But t
 
 We are honest about the state of the project. It's early: alive, but rough.
 
-| Area | Status |
-|---|---|
-| Login (QR, email+password, token) | ✅ works |
-| Chat: messages, reactions, attachments | ✅ works |
-| Group chats and DMs | ✅ works |
-| Threads and forums | ✅ works |
-| Voice calls | 🟡 work, stability and microphone transmission need verification |
-| Member list and presence | 🟡 work, testers needed across many servers |
-| Streaming and screen share | ❌ not working |
-| Look and feel | 🐞 lots of bugs, needs a full pass by a tester |
+| Area | GPUI | Tauri |
+|---|---|---|
+| Login: token (user/bot), email+password → 2FA, QR | ✅ | ✅ |
+| Captcha (a separate discord.com window) | ✅ (except macOS — nuance below) | ✅ |
+| Chat: messages, reactions, attachments, edit/delete | ✅ | ✅ |
+| DMs, groups, friends with statuses | ✅ | ✅ |
+| Threads and forums | ❌ for now | ✅ |
+| Voice: channels, mute/deafen, speaking indicators | ✅ | ✅ |
+| Noise suppression + AGC, mic test | ✅ | ✅ |
+| Go Live and camera: signaling, stream chips, local preview | ✅ | ✅ |
+| Sending video to viewers (RTP pipeline) | ❌ planned for 0.12 | ❌ planned for 0.12 |
+| Moderation: kick/ban from the member list | ✅ | ✅ |
+| Vencord-style JS plugins | ❌ (Silent Typing and Message Logger are native toggles) | ✅ |
+| Auto-update | manual check with a release link | ✅ installs itself |
+| Token storage | in-memory only — nothing stays on disk | WebView `localStorage` |
+| Look and feel | 🐞 early | 🐞 lots of bugs, needs a full pass by a tester |
 
-**Platforms.** Verified by hand only on **Windows 11**. Windows 10, Linux and macOS build in CI, but nobody has actually run them yet. If you're on one of those, you're gold to us 👇
+**Platforms.** GPUI: Windows x64, Linux x64, macOS Apple Silicon (no Intel build in CI yet). Tauri: Windows, Linux (deb/rpm/AppImage), macOS universal. Only the Tauri version has been verified by hand, on **Windows 11** — everything else builds in CI but has never actually been run. If you're on another system, you're gold to us 👇
 
 ---
 
@@ -54,40 +78,55 @@ We are honest about the state of the project. It's early: alive, but rough.
 
 ### Prebuilt binaries
 
-Download an installer from [Releases](https://github.com/VinylRUS/Rustycord/releases). *(If the page is empty, builds are not published for every release yet, so build from source.)*
+The [Releases](https://github.com/VinylRUS/Rustycord/releases) page has two kinds of files:
+
+- **native client:** `rustycord-gpui-windows-x64.zip`, `rustycord-gpui-linux-x64.tar.gz`, `rustycord-gpui-macos-arm64.tar.gz` — just a binary, no installer;
+- **Tauri version:** `.exe`/`.msi` installers, `.deb`/`.rpm`/`.AppImage`, `.dmg`.
 
 ### From source
 
-You need [Node.js](https://nodejs.org) ≥ 20, [Rust](https://rustup.rs) ≥ 1.77 and the Tauri system libraries ([list per OS](CONTRIBUTING.en.md#building-and-running)).
+You need [Rust](https://rustup.rs) ≥ 1.82.
+
+**GPUI version** (native):
 
 ```bash
 git clone https://github.com/VinylRUS/Rustycord.git && cd Rustycord
+cargo run -p rustycord-gpui --release
+```
+
+Linux dependencies (webkit is only needed for the captcha and preview windows): `sudo apt install libwebkit2gtk-4.1-dev libasound2-dev libopus-dev cmake libfontconfig1-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev`.
+Even without system libraries the code stays checkable: `cargo check -p rustycord-gpui --no-default-features` (headless mode, same as CI).
+
+**Tauri version** (also needs [Node.js](https://nodejs.org) ≥ 20 and the Tauri system libraries, [list per OS](CONTRIBUTING.en.md#building-and-running)):
+
+```bash
 npm install
 npm run tauri dev      # opens the app window
 ```
 
-Demo without logging in: `npm run dev`, then open `http://localhost:1420`.
+Demo of the Tauri version without logging in: `npm run dev`, then open `http://localhost:1420`.
+
+Verbose logs for either version: `RUST_LOG=debug` (e.g. `RUST_LOG=debug cargo run -p rustycord-gpui`).
 
 ---
 
 ## 🛠 What's inside
 
-- **Core:** Rust, tokio, tokio-tungstenite (Gateway), reqwest (REST), songbird (voice), cpal (audio devices).
-- **Shell:** Tauri 2, the system WebView instead of Chromium.
-- **UI:** Svelte 5 + TypeScript.
-- **Plugins:** Vencord-style JS files (see [`plugins/`](plugins)).
-
-The protocol write-up (Gateway, op 37, voice, remote-auth) lives in the repository: if reverse engineering is your thing, start there.
+- **Core `rustycord-core`:** tokio, tokio-tungstenite (Gateway), reqwest (REST), songbird (voice), cpal (audio devices); remote-auth, client fingerprint. The protocol write-up (Gateway, op 37, voice, remote-auth) lives in the detailed code comments of the core — if reverse engineering is your thing, start there.
+- **Native UI (`app-gpui`):** GPUI 0.2, an IME composer (EntityInputHandler), rfd file dialogs, captcha and preview windows on wry + winit.
+- **Classic UI (`src-tauri`):** Tauri 2, Svelte 5 + TypeScript, the system WebView instead of Chromium.
+- **Plugins:** Vencord-style JS files for the Tauri version (see [`plugins/`](plugins)); in GPUI their features are native settings toggles.
 
 ---
 
 ## 🔭 Where the project is heading
 
-We want to grow **wider**, not just catch up with the official client:
+The official Discord client is moving to Rust too — so the idea wasn't so crazy after all. Our niche doesn't change: lightweight, honest about its state, comfortable. Nearest plans:
 
-- **QoL features Discord lacks.** Starter ideas: pinned chats on top of the list, a single unread list across all servers, custom channel order and grouping, local history search. The yardstick is simple: a feature improves a person's life instead of doing something on their behalf.
-- **Bot panels inside the client (concept).** Imagine a movie-night bot: add it to a server and the client shows a panel with its features, not only slash commands. The idea is for a bot to publish a **declarative manifest** (a description of panels and buttons, no executable code) and for the client to render the UI itself. For now it's a sketch, so discuss it in [Discussions](https://github.com/VinylRUS/Rustycord/discussions).
-- **Stable voice and video, streaming, a decent look and feel.**
+- **A video pipeline for Go Live and the camera** (capture → codec → RTP over the voice UDP socket): right now both versions handle signaling and local preview, but the picture can't reach viewers yet — that's the main goal of the next major release.
+- **GPUI version: persisting the token and settings across runs** (today the token lives only in session memory), threads and forums, an Intel-macOS build.
+- **QoL features Discord lacks:** pinned chats on top of the list, a single unread list across all servers, custom channel order and grouping, local history search. The yardstick is simple: a feature improves a person's life instead of doing something on their behalf.
+- **Bot panels inside the client (concept).** A bot publishes a **declarative manifest** (a description of panels and buttons, no executable code) and the client renders the UI itself. Still a sketch — discuss it in [Discussions](https://github.com/VinylRUS/Rustycord/discussions).
 
 ---
 
@@ -99,10 +138,10 @@ Pick your door:
 
 | If you… | You can help with |
 |---|---|
-| 🦀 **write Rust by hand**, not just prompt an AI | Voice and songbird, the Gateway, decoders, bugs the author couldn't solve. The most needed help. |
-| 🧪 **are a tester / QA** (no code required) | Walk through the app and write bugs down as a list with steps and logs. We badly need a dedicated person for this. |
-| 🎨 **know Svelte or love design** | The look and feel is currently one big bug. |
-| 🐧 **use Linux or macOS** | Just run a build and tell us what breaks. There's WebKitGTK and different audio there, so a surprise is almost guaranteed. |
+| 🦀 **write Rust by hand**, not just prompt an AI | The RTP video pipeline, voice and songbird, the GPUI frontend, the Gateway. The most needed help. |
+| 🧪 **are a tester / QA** (no code required) | Walk through both versions and write bugs down as a list with steps and logs. We badly need a dedicated person for this. |
+| 🎨 **know Svelte or love design** | The Tauri version's look and feel is currently one big bug. |
+| 🐧 **use Linux or macOS** | Run the GPUI binary and tell us what breaks. Native rendering, audio and captcha live there — surprises are almost guaranteed. |
 | 🔬 **love protocol reverse engineering** | Cross-checking against the official client, documentation, new findings. |
 
 See [CONTRIBUTING.en.md](CONTRIBUTING.en.md) to get started. AI-written code is allowed as long as CI is green and the author understands what they submit.
@@ -132,13 +171,17 @@ House rules: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). In short: be respectful, 
 
 ## ❓ FAQ
 
+**GPUI or Tauri — which one do I download?** GPUI if you want the lightest, most native option (a megabyte-scale binary, instant startup, no token left on disk). Tauri if you need threads, forums, JS plugins and auto-updates right now. The protocol and the chat/voice feature set are shared.
+
 **Is this legal?** User-token clients (Vencord, Vesktop and others) have existed for a long time, but formally this is against Discord's rules. Bans for ordinary use are rare but possible. The decision is yours.
 
-**Is it safe to enter my token?** The token is stored locally (currently in the WebView's `localStorage`) and is sent only to Discord's servers. Moving it into the OS credential store (Keychain/Credential Manager/libsecret) is a great task for a contributor. Don't paste your token into other programs and don't share logs that contain it.
+**Is it safe to enter my token?** The token is only ever sent to Discord's servers. Beyond that it depends on the version: **GPUI** keeps it in memory only and nothing stays on disk after you close the app (which is why you re-enter it every launch); **Tauri** stores it in the WebView's `localStorage`. Moving it into the OS credential store (Keychain/Credential Manager/libsecret) is a great task for a contributor. Don't paste your token into other programs and don't share logs that contain it.
 
 **Why a user token instead of a bot?** Because we want the full client experience: servers, DMs, voice, not just what a bot can do. Bot mode remains for debugging.
 
-**Discord asked for a captcha.** That's anti-fraud. RustyCord opens a confirmation window on discord.com; solve it there and login continues.
+**Discord asked for a captcha.** That's anti-fraud. RustyCord opens a separate confirmation window on discord.com; solve it there and login continues. One nuance: in the GPUI version on macOS the captcha window is not available yet — use token or QR login there.
+
+**I started Go Live and nobody can see me.** A known limitation: signaling, stream chips and local preview work, but the video pipeline to viewers (capture → codec → RTP) is still in development — it's the main goal of the next major release. We say so honestly in the table above.
 
 ---
 
