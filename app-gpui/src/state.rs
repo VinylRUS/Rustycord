@@ -22,6 +22,27 @@ pub enum Screen {
     Main(Box<MainState>),
 }
 
+/* --------------------- Рейл серверов: папки + порядок --------------------- */
+
+/// Папка серверов из раскладки пользователя (user_settings_proto /
+/// guild_folders) — как в официальном клиенте.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuildFolder {
+    pub name: Option<String>,
+    /// Цвет папки (int, младшие 24 бита — RGB).
+    pub color: Option<i64>,
+    pub guild_ids: Vec<String>,
+}
+
+/// Элемент рейла: отдельный сервер или папка (индекс в `folders`).
+/// Порядок точный (interleaving из события ядра) — та же схема, что
+/// в Tauri-фронтенде (ServerRail.svelte) и в официальном клиенте.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RailItem {
+    Guild(String),
+    Folder(usize),
+}
+
 /// Секции экрана настроек (оверлей над главным экраном).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
@@ -112,8 +133,16 @@ pub struct MainState {
     pub typing: HashMap<String, HashMap<String, (String, Instant)>>,
     /// channel_id → непрочитанные.
     pub unread: HashMap<String, u32>,
-    /// Порядок гильдий рейла (из guild-layout rail_order + прихода GUILD_CREATE).
-    pub guild_order: Vec<String>,
+    /// Порядок рейла: отдельные серверы и папки (v0.12.1: раньше был
+    /// плоский список — папки терялись, серверы сваливались в «колбасу»).
+    pub rail: Vec<RailItem>,
+    /// Папки рейла (индексуется RailItem::Folder).
+    pub folders: Vec<GuildFolder>,
+    /// Раскрытая папка (клик по папке разворачивает её столбиком серверов).
+    pub open_folder: Option<usize>,
+    /// Последний открытый канал каждой гильдии (автовыбор при клике
+    /// по серверу — как в Tauri-фронтенде и официальном клиенте).
+    pub last_channel_by_guild: HashMap<String, String>,
     /// Реплай-цель композера.
     pub reply_to: Option<Message>,
     /// Ошибка последней отправки (баннер над композером).
@@ -165,7 +194,10 @@ impl MainState {
             loading_history: false,
             typing: HashMap::new(),
             unread: HashMap::new(),
-            guild_order: Vec::new(),
+            rail: Vec::new(),
+            folders: Vec::new(),
+            open_folder: None,
+            last_channel_by_guild: HashMap::new(),
             reply_to: None,
             send_error: None,
             voice_connected: HashMap::new(),
@@ -221,6 +253,8 @@ pub struct AppModel {
     pub screen: Screen,
     /// Канал для инъекции результатов UI-команд (ui://…).
     pub ui_tx: EventTx,
+    /// Локальная конфигурация (токен сессии, dev-режим) — персистентная.
+    pub config: crate::config::Config,
     /// Мигание курсора (тикер подключим в следующей итерации).
     #[allow(dead_code)]
     pub blink_on: bool,
@@ -229,7 +263,12 @@ pub struct AppModel {
 }
 
 impl AppModel {
-    pub fn new(core: Arc<AppState>, ui_tx: EventTx, cx: &mut gpui::Context<Self>) -> Self {
+    pub fn new(
+        core: Arc<AppState>,
+        ui_tx: EventTx,
+        config: crate::config::Config,
+        cx: &mut gpui::Context<Self>,
+    ) -> Self {
         Self {
             core,
             screen: Screen::Login(Box::new(LoginState {
@@ -251,6 +290,7 @@ impl AppModel {
                 qr: QrStage::Idle,
             })),
             ui_tx,
+            config,
             blink_on: true,
             chat_scroll: gpui::ScrollHandle::new(),
         }
@@ -407,21 +447,69 @@ impl AppModel {
         }
     }
 
-    /// rail_order: [{type:"guild", id} | {type:"folder", index}] + folders.
+    /// rail_order + folders: раскладка рейла серверов пользователя.
+    /// Полный порт раскладчика из Tauri-фронтенда: порядок interleaving
+    /// сохраняется, папки живут в `folders` и рендерятся столбиком
+    /// (раньше папки выбрасывались — серверы из них пропадали из рейла).
     fn apply_guild_layout(&mut self, payload: &Value) {
-        let mut order: Vec<String> = Vec::new();
+        let mut folders: Vec<GuildFolder> = Vec::new();
+        if let Some(arr) = payload.get("folders").and_then(|v| v.as_array()) {
+            for f in arr {
+                let Some(ids) = f.get("guild_ids").and_then(|v| v.as_array()) else {
+                    continue;
+                };
+                let guild_ids: Vec<String> = ids
+                    .iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect();
+                if guild_ids.is_empty() {
+                    continue;
+                }
+                folders.push(GuildFolder {
+                    name: f
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    color: f.get("color").and_then(|v| v.as_i64()),
+                    guild_ids,
+                });
+            }
+        }
+        // rail_order: [{type:"guild", id} | {type:"folder", index}] —
+        // точный порядок рейла. Хвостовые события от кэша ядра: GUILD_CREATE
+        // дописывает только серверы, которых нет ни в одном элементе.
+        let mut rail: Vec<RailItem> = Vec::new();
         if let Some(arr) = payload.get("rail_order").and_then(|v| v.as_array()) {
             for item in arr {
-                if item.get("type").and_then(|v| v.as_str()) == Some("guild") {
-                    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                        order.push(id.to_string());
+                match item.get("type").and_then(|v| v.as_str()) {
+                    Some("guild") => {
+                        if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                            rail.push(RailItem::Guild(id.to_string()));
+                        }
                     }
+                    Some("folder") => {
+                        let idx = item
+                            .get("index")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as usize;
+                        if idx < folders.len() {
+                            rail.push(RailItem::Folder(idx));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
         if let Screen::Main(m) = &mut self.screen {
-            if !order.is_empty() {
-                m.guild_order = order;
+            if !folders.is_empty() || !rail.is_empty() {
+                m.folders = folders;
+                m.rail = rail;
+                // Раскрытая папка могла исчезнуть из раскладки.
+                if let Some(open) = m.open_folder {
+                    if open >= m.folders.len() {
+                        m.open_folder = None;
+                    }
+                }
             }
         }
     }
@@ -650,11 +738,19 @@ impl AppModel {
                 }
             }
             "GUILD_CREATE" => {
-                // Порядок рейла: приход гильдии (если ещё не в порядке).
+                // Новая гильдия вне раскладки — в конец рейла (если её там ещё нет:
+                // серверы из папок не дублируем отдельной плиткой).
                 if let Some(gid) = d.get("id").and_then(|v| v.as_str()) {
                     if let Screen::Main(m) = &mut self.screen {
-                        if !m.guild_order.iter().any(|g| g == gid) {
-                            m.guild_order.push(gid.to_string());
+                        let known = m.rail.iter().any(|it| match it {
+                            RailItem::Guild(id) => id == gid,
+                            RailItem::Folder(i) => m
+                                .folders
+                                .get(*i)
+                                .is_some_and(|f| f.guild_ids.iter().any(|x| x == gid)),
+                        });
+                        if !known {
+                            m.rail.push(RailItem::Guild(gid.to_string()));
                         }
                     }
                 }
@@ -799,10 +895,26 @@ impl AppModel {
             if matches!(login.qr, QrStage::Finishing) {
                 login.qr = QrStage::Failed(err.to_string());
             }
+            // Мёртвая сессия (401): сохранённый токен больше не пробуем —
+            // иначе автологин будет долбить REST по кругу.
+            if err.contains("401") {
+                self.config.clear_token();
+            }
             cx.notify();
             return;
         }
-        // Успех: session::connect вернул профиль — переключаемся на главный.
+        // Успех: session::connect вернул профиль — сохраняем токен
+        // (автологин при следующем запуске) и переключаемся на главный.
+        if let Some(token) = self
+            .core
+            .token
+            .read()
+            .unwrap()
+            .clone()
+            .filter(|t| !t.is_empty())
+        {
+            self.config.set_token(&token);
+        }
         crate::actions::enter_main(self, cx);
     }
 

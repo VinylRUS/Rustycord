@@ -1,5 +1,9 @@
 # 🦀 RustyCord
 
+<p align="center">
+  <img src="packaging/icons/256x256.png" width="180" alt="The RustyCord crab hugging Wumpus" title="The RustyCord crab hugging Wumpus">
+</p>
+
 **An unofficial Discord client written in pure Rust: a native GPUI interface (the engine behind the Zed editor) on top of a single protocol core.**
 The former Tauri + Svelte 5 version is now legacy and updates itself to the new one automatically.
 For people tired of a chat app that eats more RAM than their IDE.
@@ -57,6 +61,8 @@ We are honest about the state of the project. It's early: alive, but rough.
 | Captcha (a separate discord.com window) | ✅ (except macOS — nuance below) | ✅ |
 | Chat: messages, reactions, attachments, edit/delete | ✅ | ✅ |
 | DMs, groups, friends with statuses | ✅ | ✅ |
+| Server folders in the rail (user layout) | ✅ (v0.12.1) | ✅ |
+| Avatars and status dots in lists (members/friends/voice) | ✅ (v0.12.1) | ✅ |
 | Threads and forums | ❌ for now | ✅ |
 | Voice: channels, mute/deafen, speaking indicators | ✅ | ✅ |
 | Noise suppression + AGC, mic test | ✅ | ✅ |
@@ -65,8 +71,10 @@ We are honest about the state of the project. It's early: alive, but rough.
 | Moderation: kick/ban from the member list | ✅ | ✅ |
 | Vencord-style JS plugins | ❌ (Silent Typing and Message Logger are native toggles) | ✅ |
 | Auto-update | manual check; a built-in updater is planned | ✅ migrates to GPUI automatically |
-| Token storage | in-memory only — nothing stays on disk | WebView `localStorage` |
-| Look and feel | 🐞 early | 🐞 lots of bugs, needs a full pass by a tester |
+| Close to tray: ✕ hides the window, quit via the tray menu | ✅ (v0.12.1) | ✅ |
+| Dev mode: protocol log console (restart from settings) | ✅ (v0.12.1) | — |
+| Token storage | ✅ local config + auto-login on start, cleared on 401 | WebView `localStorage` |
+| Look and feel | ✅ v0.12.1: rail/login/members styled after the official client | 🐞 lots of bugs, needs a full pass by a tester |
 
 **Platforms.** GPUI: Windows x64, Linux x64, macOS universal (Apple Silicon + Intel). Tauri (legacy): Windows, Linux, macOS universal. Only the Tauri version has been verified by hand, on **Windows 11** — everything else builds in CI but has never actually been run. If you're on another system, you're gold to us 👇
 

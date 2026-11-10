@@ -121,7 +121,7 @@ jobs:
             $env:PATH = "C:\Program Files (x86)\NSIS;$env:PATH"
           }
           $src  = (Resolve-Path "target\release\rustycord-gpui.exe").Path
-          $icon = (Resolve-Path "src-tauri\icons\icon.ico").Path
+          $icon = (Resolve-Path "packaging\icons\icon.ico").Path
           $out  = Join-Path $PWD "RustyCord_${v}_x64-setup.exe"
           makensis "-DVERSION=$v" "-DSRC_EXE=$src" "-DICON=$icon" `
             "-DOUTFILE=$out" "packaging\windows\installer.nsi"
@@ -170,12 +170,12 @@ jobs:
           V="${GITHUB_REF_NAME#v}"
           bash packaging/linux/make-appimage.sh \
             target/release/rustycord-gpui \
-            src-tauri/icons/128x128.png \
+            packaging/icons/128x128.png \
             packaging/linux/rustycord.desktop packaging/linux/AppRun \
             "RustyCord_${V}_amd64.AppImage"
           bash packaging/linux/make-deb.sh \
             target/release/rustycord-gpui "$V" \
-            src-tauri/icons/128x128.png packaging/linux/rustycord.desktop \
+            packaging/icons/128x128.png packaging/linux/rustycord.desktop \
             "rustycord_${V}_amd64.deb"
           tar czf "rustycord-gpui-linux-x64.tar.gz" -C target/release rustycord-gpui
 
@@ -217,7 +217,7 @@ jobs:
           bash packaging/macos/make-dist.sh \
             target/aarch64-apple-darwin/release/rustycord-gpui \
             target/x86_64-apple-darwin/release/rustycord-gpui \
-            "$V" src-tauri/icons/icon.icns dist
+            "$V" packaging/icons/icon.icns dist
 
       - name: Upload to draft release
         env:
