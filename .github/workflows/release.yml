@@ -1,11 +1,22 @@
 name: Release
 
-# Автосборка релиза: пушните тег v* (например v0.1.0) — и workflow
-#   1. проверит, что версии в package.json / tauri.conf.json / Cargo.toml совпадают с тегом
-#   2. соберёт установщики на трёх платформах (macOS universal, Linux deb/rpm/AppImage, Windows NSIS/MSI)
-#   3. создаст черновик GitHub Release со всеми артефактами — опубликуйте его вручную
+# Релизы 0.12.0+: RustyCord — нативный клиент на GPUI. Пушните тег v*
+# (например v0.12.0) — и workflow:
+#   1. проверит, что версии во всех манифестах совпадают с тегом релиза
+#   2. создаст черновик GitHub Release
+#   3. соберёт и упакует GPUI-клиент на трёх платформах:
+#        Windows — NSIS-инсталлер RustyCord_<v>_x64-setup.exe (как у Tauri) + portable .zip
+#        Linux   — AppImage + .deb + portable .tar.gz
+#        macOS   — универсальный .app → .dmg + RustyCord_universal.app.tar.gz (артефакт
+#                  апдейтера) + portable .tar.gz
+#   4. подпишет апдейтер-артефакты (minisign, тот же ключ, что подписывал релизы
+#      Tauri-версии) и соберёт latest.json — легаси-клиент на Tauri при
+#      авто-обновлении скачает GPUI-инсталлер и мигрирует «на место».
 #
-# Локально: git tag v0.1.0 && git push origin v0.1.0
+# Tauri-сборка переведена в legacy и в релизы больше не входит: исходники и CI
+# остаются, собирается вручную (`npm run tauri build`).
+#
+# Локально: git tag v0.12.0 && git push origin v0.12.0
 
 on:
   push:
@@ -35,135 +46,59 @@ jobs:
       - name: Compare tag with manifest versions
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          CARGO="$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/version *= *"([^"]+)"/\1/')"
-          TAURI="$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
-          PKG="$(python3 -c "import json; print(json.load(open('package.json'))['version'])")"
-          echo "tag=${TAG}  cargo=${CARGO}  tauri.conf=${TAURI}  package.json=${PKG}"
-          if [ "$TAG" != "$CARGO" ] || [ "$TAG" != "$TAURI" ] || [ "$TAG" != "$PKG" ]; then
-            echo "::error::Версии не совпадают с тегом ${GITHUB_REF_NAME}. Обновите version во всех трёх манифестах."
-            exit 1
-          fi
+          fail=0
+          check() {
+            if [ "$2" != "$TAG" ]; then
+              echo "::error::$1 = $2, а тег ${GITHUB_REF_NAME}. Обновите version во всех манифестах."
+              fail=1
+            fi
+          }
+          cargo_ver() { grep -m1 '^version' "$1" | sed -E 's/version *= *"([^"]+)"/\1/'; }
+          check "src-tauri/Cargo.toml"        "$(cargo_ver src-tauri/Cargo.toml)"
+          check "app-gpui/Cargo.toml"         "$(cargo_ver app-gpui/Cargo.toml)"
+          check "crates/rustycord-core/Cargo.toml" "$(cargo_ver crates/rustycord-core/Cargo.toml)"
+          check "Cargo.toml (workspace)"      "$(cargo_ver Cargo.toml)"
+          check "tauri.conf.json"  "$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")"
+          check "package.json"     "$(python3 -c "import json; print(json.load(open('package.json'))['version'])")"
+          echo "tag=${TAG}: все проверки пройдены" 
+          exit $fail
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # 2. Мультиплатформенная сборка + черновик релиза
+  # 2. Черновик релиза (в него же загружаются все артефакты)
   # ─────────────────────────────────────────────────────────────────────────────
-  build:
-    name: Build ${{ matrix.platform }}
+  create-release:
+    name: Create draft release
     needs: check-version
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macos-latest # один универсальный .dmg (Apple Silicon + Intel)
-            args: --target universal-apple-darwin
-          - platform: ubuntu-latest
-            args: ''
-          - platform: windows-latest
-            args: ''
-    runs-on: ${{ matrix.platform }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux system dependencies
-        if: matrix.platform == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev patchelf libasound2-dev libopus-dev cmake
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-
-      # Корневой Cargo workspace: target/ общий для всех крейтов
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: .
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      # Режим подписи апдейтер-артефактов: если секрет
-      # TAURI_SIGNING_PRIVATE_KEY ещё не добавлен, собираем БЕЗ них
-      # (оверрайд createUpdaterArtifacts=false) — релиз не падает, просто
-      # latest.json не появится. Добавь секрет — и все следующие релизы
-      # будут подписанными (клиенты v0.9.5+ обновляются сами).
-      - name: Updater signing mode
-        id: updsign
-        shell: bash   # windows-latest по умолчанию PowerShell — синтаксис ниже bash
+      - name: Create draft (пропускаем, если уже существует)
         env:
-          HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "$HAS_SIGNING_KEY" = "true" ]; then
-            echo 'extra_args=' >> "$GITHUB_OUTPUT"
-            echo 'mode=signed (latest.json будет приложен)' >> "$GITHUB_OUTPUT"
-          else
-            echo 'extra_args=--config {"bundle":{"createUpdaterArtifacts":false}}' >> "$GITHUB_OUTPUT"
-            echo 'mode=unsigned — добавь секрет TAURI_SIGNING_PRIVATE_KEY' >> "$GITHUB_OUTPUT"
-          fi
+          gh release create "${GITHUB_REF_NAME}" --draft \
+            --title "RustyCord ${GITHUB_REF_NAME}" \
+            --notes "RustyCord ${GITHUB_REF_NAME} — **нативный клиент на GPUI**: один бинарник без вебдвижка, интерфейс на тех же протоколах (rustycord-core).
 
-      # tauri-action: соберёт бандлы, создаст draft-релиз и приложит все файлы.
-      # Раздел CHANGELOG.md с версией попадёт в тело релиза (см. шаг ниже).
-      - name: Build and upload to GitHub Release
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Подпись апдейтер-артефактов (minisign): createUpdaterArtifacts
-          # в tauri.conf.json генерирует .sig/.tar.gz-пары, этот ключ их
-          # подписывает, а includeUpdaterJson кладёт latest.json в релиз —
-          # его читает tauri-plugin-updater в приложении.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'RustyCord ${{ github.ref_name }}'
-          releaseBody: 'Полный список изменений — в [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md). Ниже — готовые установщики для вашей платформы.'
-          releaseDraft: true
-          prerelease: false
-          includeUpdaterJson: true
-          args: ${{ matrix.args }} ${{ steps.updsign.outputs.extra_args }}
+          Установщики: Windows — \`setup.exe\`, macOS — универсальный \`.dmg\` (Apple Silicon + Intel), Linux — \`.AppImage\` и \`.deb\`; рядом — портативные архивы.
+
+          Легаси-клиент на Tauri обновится на GPUI автоматически («Обновить автоматически» в карточке обновления) — установщик встанет на прежнее место, ярлыки сохранятся. deb/rpm-пользователям Linux нужно поставить \`.deb\`/\`.AppImage\` вручную.
+
+          Полный список изменений — в [CHANGELOG.md](https://github.com/VinylRUS/Rustycord/blob/main/CHANGELOG.md)." \
+            || echo "Черновик релиза уже существует — продолжаем."
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # 3. Нативные бинарники rustycord-gpui (без Tauri) в тот же черновик релиза
+  # 3. GPUI-клиент: сборка и упаковка на трёх платформах
   # ─────────────────────────────────────────────────────────────────────────────
-  gpui:
-    name: GPUI binary ${{ matrix.platform }}
-    needs: [check-version, build]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact: rustycord-gpui-linux-x64
-            ext: tar.gz
-          - platform: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: rustycord-gpui-windows-x64
-            ext: zip
-          - platform: macos-latest
-            target: aarch64-apple-darwin
-            artifact: rustycord-gpui-macos-arm64
-            ext: tar.gz
-    runs-on: ${{ matrix.platform }}
+  gpui-windows:
+    name: GPUI Windows (NSIS + portable)
+    needs: [check-version, create-release]
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Linux system dependencies
-        if: matrix.platform == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libasound2-dev libopus-dev cmake libfontconfig1-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -172,23 +107,193 @@ jobs:
           prefix-key: gpui-release
 
       - name: Build (release)
-        run: cargo build --release --target ${{ matrix.target }} -p rustycord-gpui
+        run: cargo build --release -p rustycord-gpui
 
-      - name: Package (Linux/macOS)
-        if: matrix.ext == 'tar.gz'
-        run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.artifact }}.tar.gz rustycord-gpui
-
-      - name: Package (Windows)
-        if: matrix.ext == 'zip'
+      # Инсталлер повторяет раскладку Tauri-версии — обновление встаёт «на место»
+      - name: NSIS installer
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/rustycord-gpui.exe" -DestinationPath "${{ matrix.artifact }}.zip"
+          $v = "${{ github.ref_name }}" -replace '^v',''
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            choco install -y nsis
+            $env:PATH = "C:\Program Files (x86)\NSIS;$env:PATH"
+          }
+          $src  = (Resolve-Path "target\release\rustycord-gpui.exe").Path
+          $icon = (Resolve-Path "src-tauri\icons\icon.ico").Path
+          makensis "-DVERSION=$v" "-DSRC_EXE=$src" "-DICON=$icon" `
+            "-DOUTFILE=RustyCord_${v}_x64-setup.exe" "packaging\windows\installer.nsi"
 
-      # Черновик релиза уже создан задачей build (needs: build) — докладываем
-      # архивы в него; --clobber безопасен при повторных прогонах тега.
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target\release\rustycord-gpui.exe" `
+            -DestinationPath "rustycord-gpui-windows-x64.zip"
+
       - name: Upload to draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.ref_name }}" "${{ matrix.artifact }}.${{ matrix.ext }}" --clobber
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          gh release upload "$GITHUB_REF_NAME" \
+            "RustyCord_${V}_x64-setup.exe" "rustycord-gpui-windows-x64.zip" --clobber
+
+  gpui-linux:
+    name: GPUI Linux (AppImage + deb + portable)
+    needs: [check-version, create-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libasound2-dev libopus-dev cmake \
+            libfontconfig1-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          prefix-key: gpui-release
+
+      - name: Build (release)
+        run: cargo build --release -p rustycord-gpui
+
+      - name: Package (AppImage + deb + portable)
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          ./packaging/linux/make-appimage.sh \
+            target/release/rustycord-gpui \
+            src-tauri/icons/128x128.png \
+            packaging/linux/rustycord.desktop packaging/linux/AppRun \
+            "RustyCord_${V}_amd64.AppImage"
+          ./packaging/linux/make-deb.sh \
+            target/release/rustycord-gpui "$V" \
+            src-tauri/icons/128x128.png packaging/linux/rustycord.desktop \
+            "rustycord_${V}_amd64.deb"
+          tar czf "rustycord-gpui-linux-x64.tar.gz" -C target/release rustycord-gpui
+
+      - name: Upload to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          gh release upload "$GITHUB_REF_NAME" \
+            "RustyCord_${V}_amd64.AppImage" \
+            "rustycord_${V}_amd64.deb" \
+            "rustycord-gpui-linux-x64.tar.gz" --clobber
+
+  gpui-macos:
+    name: GPUI macOS (universal dmg + updater tar.gz)
+    needs: [check-version, create-release]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          prefix-key: gpui-release
+
+      - name: Build (release, universal)
+        run: |
+          cargo build --release --target aarch64-apple-darwin -p rustycord-gpui
+          cargo build --release --target x86_64-apple-darwin -p rustycord-gpui
+
+      - name: Package (.app → dmg + app.tar.gz + portable)
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          ./packaging/macos/make-dist.sh \
+            target/aarch64-apple-darwin/release/rustycord-gpui \
+            target/x86_64-apple-darwin/release/rustycord-gpui \
+            "$V" src-tauri/icons/icon.icns dist
+
+      - name: Upload to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          gh release upload "$GITHUB_REF_NAME" \
+            "dist/RustyCord_${V}_universal.dmg" \
+            "dist/RustyCord_universal.app.tar.gz" \
+            "dist/rustycord-gpui-macos-universal.tar.gz" --clobber
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 4. Подпись апдейтер-артефактов + latest.json: миграция Tauri → GPUI
+  # ─────────────────────────────────────────────────────────────────────────────
+  updater:
+    name: Sign artifacts + latest.json (Tauri → GPUI)
+    needs: [create-release, gpui-windows, gpui-linux, gpui-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install @tauri-apps/cli (signer)
+        run: npm ci
+
+      - name: Download updater artifacts from draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --clobber \
+            --pattern 'RustyCord_*_x64-setup.exe' \
+            --pattern 'RustyCord_*_amd64.AppImage' \
+            --pattern 'RustyCord_universal.app.tar.gz'
+
+      # Тот же minisign-ключ, которым подписаны релизы Tauri-версии:
+      # pubkey зашит в tauri.conf.json легаси-клиента.
+      - name: Sign + build latest.json
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF_NAME#v}"
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::Секрет TAURI_SIGNING_PRIVATE_KEY не задан. Без подписи tauri-plugin-updater отклонит обновление — миграция Tauri → GPUI невозможна."
+            exit 1
+          fi
+          SETUP="$(ls RustyCord_*_x64-setup.exe)"
+          APPIMAGE="$(ls RustyCord_*_amd64.AppImage)"
+          APPTGZ="RustyCord_universal.app.tar.gz"
+
+          # tauri signer sign печатает base64-подпись после «Public signature:» —
+          # именно она кладётся в поле signature манифеста.
+          sign() {
+            npx tauri signer sign --app-version "$V" "$1" \
+              | awk '/Public signature:/{getline; print; exit}'
+          }
+          mkdir -p sigs
+          sign "$SETUP"    > sigs/setup.sig
+          sign "$APPIMAGE" > sigs/appimage.sig
+          sign "$APPTGZ"   > sigs/apptgz.sig
+
+          # Заметки видны в карточке обновления легаси-клиента (превью ~400 символов)
+          cat > notes.txt <<'EOF'
+          RustyCord переезжает на нативный движок GPUI. Нажмите «Обновить автоматически» — клиент обновится на месте (Windows/macOS/AppImage). После первого запуска войдите по QR-коду или токену. Tauri-версия переведена в legacy.
+          EOF
+
+          python3 packaging/updater/make-latest-json.py \
+            --version "$V" --tag "$GITHUB_REF_NAME" \
+            --notes-file notes.txt \
+            --win-exe-sig sigs/setup.sig \
+            --linux-appimage-sig sigs/appimage.sig \
+            --darwin-app-sig sigs/apptgz.sig \
+            --out latest.json
+
+      - name: Upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" latest.json --clobber

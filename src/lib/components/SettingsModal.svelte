@@ -534,9 +534,15 @@
           <table>
             <tbody>
             <tr><td>Версия</td><td class="mono">{APP_VERSION}</td></tr>
+            <tr><td>Сборка</td><td class="mono">legacy (Tauri 2 + Svelte 5)</td></tr>
             <tr><td>Лицензия</td><td class="mono">MIT</td></tr>
             </tbody>
           </table>
+          <p class="hint">
+            <b>Эта версия — legacy.</b> Начиная с 0.12.0 RustyCord — нативный клиент на
+            GPUI: релизы содержат только его установщики, а эта сборка обновляется
+            на него автоматически. Исходники Tauri-версии остаются в репозитории.
+          </p>
           <p class="hint small">
             Не аффилирован с Discord Inc. Клиент работает на пользовательском токене
             (как Vencord/Vesktop) — это серая зона ToS: спокойное использование

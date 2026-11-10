@@ -1,8 +1,8 @@
 {
   "name": "rustycord",
   "private": true,
-  "version": "0.11.1",
-  "description": "Unofficial Discord client built with Rust + Tauri + Svelte 5 (reverse-engineered architecture)",
+  "version": "0.12.0",
+  "description": "RustyCord legacy frontend (Tauri 2 + Svelte 5) — the primary client is the native GPUI app (app-gpui)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/VinylRUS/Rustycord.git"

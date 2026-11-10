@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=RustyCord
+Comment=Unofficial Discord client (native GPUI frontend)
+Comment[ru]=Неофициальный клиент Discord (нативный интерфейс на GPUI)
+Exec=rustycord
+Icon=rustycord
+Terminal=false
+Categories=Network;InstantMessaging;
+StartupWMClass=RustyCord
