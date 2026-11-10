@@ -38,7 +38,7 @@
     void app.boot();
   });
 
-  // Window title like the real client.
+  // Window title like the real client (legacy-сборка помечена).
   $effect(() => {
     const ch = app.activeChannel;
     const guild = app.activeGuild;
@@ -48,8 +48,8 @@
         : `#${ch.name}`
       : null;
     document.title = chName
-      ? `${chName} | ${guild?.name ?? 'Личные сообщения'} | RustyCord`
-      : 'RustyCord';
+      ? `${chName} | ${guild?.name ?? 'Личные сообщения'} | RustyCord Legacy`
+      : 'RustyCord Legacy';
   });
 
   const isVoiceChannel = $derived(app.activeChannel?.type === 2 || app.activeChannel?.type === 13);
@@ -59,6 +59,29 @@
   const showReconnectBanner = $derived(
     app.user !== null && (app.connStage === 'reconnecting' || app.connStage === 'connecting' || app.connStage === 'disconnected'),
   );
+
+  // Legacy-баннер: сборка на Tauri переведена в режим legacy, актуальный
+  // клиент — GPUI. Скрывается до перезапуска (sessionStorage), чтобы
+  // напоминание возвращалось в каждой сессии до миграции.
+  let legacyHidden = $state(sessionStorage.getItem('rustycord.legacyBanner') === 'hidden');
+  function hideLegacyBanner() {
+    legacyHidden = true;
+    sessionStorage.setItem('rustycord.legacyBanner', 'hidden');
+  }
+  async function migrateToGpui() {
+    await app.checkForUpdate();
+    if (app.updateInfo?.can_auto) {
+      void app.installUpdate();
+    } else {
+      // deb/rpm-сборка или нет сети — отправляем на страницу релиза вручную.
+      try {
+        const { openUrl } = await import('@tauri-apps/plugin-opener');
+        await openUrl('https://github.com/VinylRUS/Rustycord/releases/latest');
+      } catch {
+        window.open('https://github.com/VinylRUS/Rustycord/releases/latest', '_blank');
+      }
+    }
+  }
 </script>
 
 {#if !app.user}
@@ -68,6 +91,15 @@
     {#if showReconnectBanner}
       <div class="banner" title={app.connDetail || ''}>
         {app.connStage === 'disconnected' ? 'Соединение потеряно — переподключаемся…' : 'Переподключаемся…'}
+      </div>
+    {/if}
+    {#if isTauri && !legacyHidden}
+      <div class="banner legacy" role="status">
+        <span class="legacy-text">
+          Устаревшая (legacy) версия на Tauri — актуальный RustyCord теперь нативный клиент на GPUI.
+        </span>
+        <button class="legacy-btn" onclick={() => { void migrateToGpui(); }}>Обновиться на GPUI</button>
+        <button class="legacy-close" onclick={() => hideLegacyBanner()} title="Скрыть до перезапуска">✕</button>
       </div>
     {/if}
     {#if app.updateInfo}
@@ -166,6 +198,40 @@
     padding: 6px;
     flex-shrink: 0;
   }
+  .banner.legacy {
+    background: var(--blurple, #5865f2);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 5px 6px;
+  }
+  .legacy-text { flex: 1; min-width: 0; }
+  .legacy-btn {
+    background: rgba(255, 255, 255, 0.16);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    color: #fff;
+    font-size: 12.5px;
+    font-weight: 600;
+    border-radius: 6px;
+    padding: 3px 10px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .legacy-btn:hover { background: rgba(255, 255, 255, 0.26); }
+  .legacy-close {
+    background: none;
+    border: none;
+    color: #fff;
+    opacity: 0.7;
+    font-size: 12px;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+  .legacy-close:hover { background: rgba(255, 255, 255, 0.12); opacity: 1; }
   .update-card {
     position: fixed;
     bottom: 16px;

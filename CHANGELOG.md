@@ -5,7 +5,32 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
-## [0.11.1] — 2026-11-10
+## [0.12.0] — 2026-11-10
+
+### Changed
+- **RustyCord полностью переходит на GPUI-клиент.** Релизы 0.12.0+ содержат
+  только сборки `rustycord-gpui` — с установщиками, как у прежней
+  Tauri-версии: NSIS `RustyCord_<v>_x64-setup.exe` (Windows, тот же каталог
+  `%LOCALAPPDATA%\RustyCord` и ярлыки), универсальный `.dmg` и
+  `RustyCord_universal.app.tar.gz` (macOS, Apple Silicon + Intel, тот же
+  bundle id `dev.rustycord.app`), `.AppImage` и `.deb` (Linux, тот же
+  пакет `rustycord` и путь `/usr/bin/rustycord`). Рядом — портативные
+  архивы, как в 0.11.x.
+- **Автоматическая миграция Tauri → GPUI.** Легаси-клиент обновляется на
+  GPUI штатным механизмом: `latest.json` (подписан тем же minisign-ключом)
+  ведёт на GPUI-инсталлеры — Windows ставит их «на место» в пассивном
+  режиме с перезапуском, macOS подменяет содержимое `.app`, Linux
+  заменяет файл AppImage. deb/rpm-пользователи ставят новый пакет вручную.
+- **Tauri-версия помечена legacy**: заголовок окна «RustyCord Legacy»,
+  баннер миграции в интерфейсе, пометка в «О программе» и README.
+  Исходники и CI-проверки остаются, в релизы она больше не собирается.
+
+### Added
+- Пайплайн упаковки `packaging/`: NSIS-инсталлер (с поддержкой флагов
+  tauri-plugin-updater `/P /UPDATE /R /ARGS /NS`), скрипты AppImage/deb,
+  сборка универсального `.app`/`.dmg` для macOS и генератор
+  `latest.json` с приоритетными ключами платформ
+  (`windows-x86_64-nsis`, `linux-x86_64-appimage`, `darwin-*-app`).
 
 ### Fixed
 - **Паника GPUI-версии сразу после входа** — `there is no reactor running,

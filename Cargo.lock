@@ -7865,7 +7865,7 @@ dependencies = [
 
 [[package]]
 name = "rustycord"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7887,7 +7887,7 @@ dependencies = [
 
 [[package]]
 name = "rustycord-core"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7912,7 +7912,7 @@ dependencies = [
 
 [[package]]
 name = "rustycord-gpui"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",

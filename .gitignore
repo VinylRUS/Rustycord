@@ -20,3 +20,10 @@ upload/
 bun.lock
 scripts/detauri.py
 scripts/retie_commands.py
+
+# Артефакты локальной упаковки (packaging/*)
+deb-build/
+appimage-build/
+macos-build/
+appimagetool.AppImage
+linuxdeploy.AppImage
