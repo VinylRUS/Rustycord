@@ -158,11 +158,10 @@ fn hwnd_of(window: &Window) -> Option<windows::Win32::Foundation::HWND> {
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return None;
     };
-    let Ok(raw) = handle.as_raw() else {
-        return None;
-    };
-    match raw {
-        RawWindowHandle::Win32(w) => Some(windows::Win32::Foundation::HWND(w.hwnd.get())),
+    match handle.as_raw() {
+        RawWindowHandle::Win32(w) => Some(windows::Win32::Foundation::HWND(
+            w.hwnd.get() as *mut core::ffi::c_void,
+        )),
         _ => None,
     }
 }

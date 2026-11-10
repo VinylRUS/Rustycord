@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     /// Токен последней успешной сессии (автологин при запуске).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -22,15 +22,6 @@ pub struct Config {
     /// Dev-режим: консоль с логами (Windows) + уровень debug.
     #[serde(default)]
     pub dev_mode: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            token: None,
-            dev_mode: false,
-        }
-    }
 }
 
 /// Каталог данных приложения (без платформенных крейтов: env-переменные

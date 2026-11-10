@@ -103,6 +103,13 @@ mod devconsole {
     /// stdout не подключён (без консоли записи тихо пропадают).
     pub struct ConsoleOut;
 
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ConsoleOut {
+        type Writer = ConsoleOut;
+        fn make_writer(&'a self) -> ConsoleOut {
+            ConsoleOut
+        }
+    }
+
     impl std::io::Write for ConsoleOut {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             unsafe {
@@ -155,7 +162,7 @@ fn main() {
         .with_env_filter(filter)
         .with_ansi(false);
     #[cfg(target_os = "windows")]
-    let builder = builder.with_writer(move |_| devconsole::ConsoleOut);
+    let builder = builder.with_writer(devconsole::ConsoleOut);
     let _ = builder.try_init();
 
     tracing::info!(
@@ -247,7 +254,7 @@ fn main() {
         // Автологин сохранённым токеном: одно подключение на запуск —
         // никаких «5 авторизаций в минуту».
         if let Some(token) = saved_token {
-            let _ = model.update(cx, |m: &mut AppModel, cx| {
+            model.update(cx, |m: &mut AppModel, cx| {
                 crate::actions::connect_token(m, token, cx);
             });
         }
