@@ -110,6 +110,8 @@ jobs:
         run: cargo build --release -p rustycord-gpui
 
       # Инсталлер повторяет раскладку Tauri-версии — обновление встаёт «на место»
+      # (OutFile — абсолютный: Windows-makensis трактует относительный путь
+      #  относительно каталога скрипта, а не CWD)
       - name: NSIS installer
         shell: pwsh
         run: |
@@ -120,8 +122,9 @@ jobs:
           }
           $src  = (Resolve-Path "target\release\rustycord-gpui.exe").Path
           $icon = (Resolve-Path "src-tauri\icons\icon.ico").Path
+          $out  = Join-Path $PWD "RustyCord_${v}_x64-setup.exe"
           makensis "-DVERSION=$v" "-DSRC_EXE=$src" "-DICON=$icon" `
-            "-DOUTFILE=RustyCord_${v}_x64-setup.exe" "packaging\windows\installer.nsi"
+            "-DOUTFILE=$out" "packaging\windows\installer.nsi"
 
       - name: Portable zip
         shell: pwsh
