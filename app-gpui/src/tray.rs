@@ -100,7 +100,7 @@ pub fn init(window: AnyWindowHandle, tx: EventTx) {
 
 /// Скрыть окно (клик по ✕): veto закрытия + платформенное скрытие.
 /// Возвращает false → gpui отменяет закрытие.
-pub fn hide_window(window: &mut Window, cx: &mut App) {
+pub fn hide_window(window: &mut Window, _cx: &mut App) {
     #[cfg(target_os = "windows")]
     {
         if hide_win32(window) {
@@ -113,11 +113,10 @@ pub fn hide_window(window: &mut Window, cx: &mut App) {
     {
         // NSApp hide: убирает окна приложения (трей остаётся).
         let _ = window;
-        cx.hide();
+        _cx.hide();
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let _ = cx;
         // X11: минимизация — WM спрячет окно в панель задач.
         // Wayland: протокола «спрятать» тоже нет — минимизация.
         window.minimize_window();
@@ -129,7 +128,7 @@ pub fn show_from_tray(cx: &mut App) {
     let Some(handle) = WINDOW.get() else {
         return;
     };
-    let _ = handle.update(cx, |_, window, cx| {
+    let _ = handle.update(cx, |_, window, _cx| {
         #[cfg(target_os = "windows")]
         {
             if show_win32(window) {
@@ -138,11 +137,11 @@ pub fn show_from_tray(cx: &mut App) {
         }
         #[cfg(target_os = "macos")]
         {
-            cx.activate(true);
+            _cx.activate(true);
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            cx.activate(true);
+            _cx.activate(true);
         }
         // Поднять/восстановить окно (X11: _NET_ACTIVE_WINDOW — WM
         // разворачивает из минимизации).
@@ -160,7 +159,7 @@ fn hwnd_of(window: &Window) -> Option<windows::Win32::Foundation::HWND> {
     };
     match handle.as_raw() {
         RawWindowHandle::Win32(w) => Some(windows::Win32::Foundation::HWND(
-            w.hwnd.get() as *mut core::ffi::c_void,
+            w.hwnd.get() as *mut core::ffi::c_void
         )),
         _ => None,
     }

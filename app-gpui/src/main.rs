@@ -119,16 +119,9 @@ mod devconsole {
                 if handle.is_invalid() {
                     return Ok(buf.len());
                 }
-                let mut utf16: Vec<u16> = String::from_utf8_lossy(buf).encode_utf16().collect();
-                utf16.push(0);
+                let utf16: Vec<u16> = String::from_utf8_lossy(buf).encode_utf16().collect();
                 let mut written = 0u32;
-                let _ = WriteConsoleW(
-                    handle,
-                    windows::core::PCWSTR(utf16.as_ptr()),
-                    utf16.len() as u32,
-                    &mut written,
-                    None,
-                );
+                let _ = WriteConsoleW(handle, &utf16, Some(&mut written), None);
             }
             Ok(buf.len())
         }
