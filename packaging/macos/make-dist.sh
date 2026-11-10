@@ -17,10 +17,22 @@ VERSION="$3"
 ICNS="$4"
 OUTDIR="$5"
 
+# Абсолютизируем пути ДО cd в staging-каталог: аргументы приходят
+# относительными от корня репозитория. Выходной каталог создаём заранее —
+# иначе abs() не сможет в него «зайти».
+mkdir -p "$OUTDIR"
+abs() {
+  ( cd "$(dirname "$1")" && printf '%s/%s' "$PWD" "$(basename "$1")" )
+}
+BIN_ARM64="$(abs "$BIN_ARM64")"
+BIN_X64="$(abs "$BIN_X64")"
+ICNS="$(abs "$ICNS")"
+OUTDIR="$(abs "$OUTDIR")"
+
 APP="RustyCord.app"
 STAGE="macos-build"
 rm -rf "$STAGE"
-mkdir -p "$STAGE" "$OUTDIR"
+mkdir -p "$STAGE"
 cd "$STAGE"
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
