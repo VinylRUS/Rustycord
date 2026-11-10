@@ -33,8 +33,8 @@ pub fn init(window: AnyWindowHandle, tx: EventTx) {
     let _ = WINDOW.set(window);
 
     let menu_tx = tx.clone();
-    tray_icon::menu::MenuEvent::set_event_handler(Some(move |event: tray_icon::menu::MenuEvent| {
-        match event.id.0.as_str() {
+    tray_icon::menu::MenuEvent::set_event_handler(Some(
+        move |event: tray_icon::menu::MenuEvent| match event.id.0.as_str() {
             "open" => {
                 let _ = menu_tx.send(("ui://tray-open".into(), serde_json::json!({})));
             }
@@ -42,8 +42,8 @@ pub fn init(window: AnyWindowHandle, tx: EventTx) {
                 let _ = menu_tx.send(("ui://tray-quit".into(), serde_json::json!({})));
             }
             _ => {}
-        }
-    }));
+        },
+    ));
 
     let click_tx = tx;
     tray_icon::TrayIconEvent::set_event_handler(Some(move |event: tray_icon::TrayIconEvent| {
@@ -92,7 +92,9 @@ pub fn init(window: AnyWindowHandle, tx: EventTx) {
             std::mem::forget(tray);
             tracing::info!("tray: значок создан (закрытие окна прячет его в трей)");
         }
-        Err(e) => tracing::warn!("tray: не создать значок — окно будет закрываться как обычно: {e}"),
+        Err(e) => {
+            tracing::warn!("tray: не создать значок — окно будет закрываться как обычно: {e}")
+        }
     }
 }
 

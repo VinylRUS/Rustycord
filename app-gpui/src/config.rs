@@ -73,7 +73,10 @@ pub fn load() -> Config {
     match serde_json::from_str(&raw) {
         Ok(cfg) => cfg,
         Err(e) => {
-            tracing::warn!("config: {} не читается ({e}) — используем дефолт", config_path().display());
+            tracing::warn!(
+                "config: {} не читается ({e}) — используем дефолт",
+                config_path().display()
+            );
             Config::default()
         }
     }

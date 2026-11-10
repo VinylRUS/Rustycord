@@ -14,7 +14,10 @@ const LOGO_PNG: &[u8] = include_bytes!("../assets/icon.png");
 pub fn logo_image() -> std::sync::Arc<gpui::Image> {
     static LOGO: OnceLock<std::sync::Arc<gpui::Image>> = OnceLock::new();
     LOGO.get_or_init(|| {
-        std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, LOGO_PNG.to_vec()))
+        std::sync::Arc::new(gpui::Image::from_bytes(
+            gpui::ImageFormat::Png,
+            LOGO_PNG.to_vec(),
+        ))
     })
     .clone()
 }

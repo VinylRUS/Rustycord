@@ -216,7 +216,11 @@ fn rail_guild_tile(
             } else {
                 el.bg(rgb(0x313338))
                     .text_color(rgb(TEXT_PRIMARY))
-                    .hover(|s| s.bg(rgb(BLURPLE)).text_color(gpui::white()).rounded(px(16.)))
+                    .hover(|s| {
+                        s.bg(rgb(BLURPLE))
+                            .text_color(gpui::white())
+                            .rounded(px(16.))
+                    })
             }
         })
         .child(match icon {
@@ -227,7 +231,10 @@ fn rail_guild_tile(
                 .child(initials)
                 .into_any_element(),
         })
-        .on_mouse_down(MouseButton::Left, cx.listener(move |m, _, _, cx| on_click(m, cx)));
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |m, _, _, cx| on_click(m, cx)),
+        );
 
     // Строка: пилюля активности + плитка + бейдж непрочитанных.
     gpui::div()
@@ -369,14 +376,17 @@ fn rail_folder_tile(
                     .bg(gpui::white()),
             )
         })
-        .child(body.on_mouse_down(MouseButton::Left, cx.listener(move |m, _, _, cx| {
-            // Клик по свёрнутой папке — раскрыть столбиком (повторный клик
-            // по шапке сворачивает).
-            if let Screen::Main(st) = &mut m.screen {
-                st.open_folder = Some(index);
-            }
-            cx.notify();
-        })))
+        .child(body.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |m, _, _, cx| {
+                // Клик по свёрнутой папке — раскрыть столбиком (повторный клик
+                // по шапке сворачивает).
+                if let Screen::Main(st) = &mut m.screen {
+                    st.open_folder = Some(index);
+                }
+                cx.notify();
+            }),
+        ))
         .when(unread > 0 && !active, |r| {
             r.child(
                 gpui::div()
@@ -441,12 +451,15 @@ fn rail_folder_open(
         .text_color(gpui::white())
         .hover(|s| s.opacity(0.8))
         .child(title.clone())
-        .on_mouse_down(MouseButton::Left, cx.listener(|m, _, _, cx| {
-            if let Screen::Main(st) = &mut m.screen {
-                st.open_folder = None;
-            }
-            cx.notify();
-        }));
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|m, _, _, cx| {
+                if let Screen::Main(st) = &mut m.screen {
+                    st.open_folder = None;
+                }
+                cx.notify();
+            }),
+        );
 
     let mut col = gpui::div()
         .id(SharedString::from(format!("folder-open-{}", title)))
@@ -519,7 +532,11 @@ fn guild_rail(
     // Раскладка ещё не приезжала — все известные серверы подряд (гильдии
     // из папок попадут сюда только если события раскладки не было вовсе).
     let rail: Vec<crate::state::RailItem> = if rail.is_empty() {
-        tiles.keys().cloned().map(crate::state::RailItem::Guild).collect()
+        tiles
+            .keys()
+            .cloned()
+            .map(crate::state::RailItem::Guild)
+            .collect()
     } else {
         rail
     };
@@ -572,8 +589,13 @@ fn guild_rail(
             ),
     );
     // Разделитель (как в официальном клиенте).
-    column =
-        column.child(gpui::div().w(px(32.)).h(px(2.)).rounded_full().bg(rgb(0x35363c)));
+    column = column.child(
+        gpui::div()
+            .w(px(32.))
+            .h(px(2.))
+            .rounded_full()
+            .bg(rgb(0x35363c)),
+    );
 
     for item in rail {
         match item {
@@ -1029,7 +1051,10 @@ fn voice_channel_row(
         vc.members
             .iter()
             .map(|vs| {
-                let mem = cache.guilds.get(guild_id).and_then(|g| g.members.get(&vs.user_id));
+                let mem = cache
+                    .guilds
+                    .get(guild_id)
+                    .and_then(|g| g.members.get(&vs.user_id));
                 let name = mem
                     .and_then(|m| {
                         m.nick.clone().or_else(|| {
@@ -1874,8 +1899,7 @@ fn chat_pane(
                                 if uploading {
                                     el
                                 } else {
-                                    el.cursor_pointer()
-                                        .hover(|s| s.bg(rgb(BG_HOVER)))
+                                    el.cursor_pointer().hover(|s| s.bg(rgb(BG_HOVER)))
                                 }
                             })
                             .child("＋")
@@ -2304,7 +2328,12 @@ fn member_pane(
                             gpui::div()
                                 .relative()
                                 .size(px(32.))
-                                .child(avatar_or_initial(&user_id, av_url.as_deref(), &name, px(32.)))
+                                .child(avatar_or_initial(
+                                    &user_id,
+                                    av_url.as_deref(),
+                                    &name,
+                                    px(32.),
+                                ))
                                 .child(
                                     gpui::div()
                                         .absolute()
@@ -2348,9 +2377,7 @@ fn member_pane(
                         // ЛС, кик, бан — кик/бан с подтверждением вторым кликом.
                         .when(
                             !is_bot && Some(user_id.as_str()) != self_id.as_deref(),
-                            |el| {
-                                el.child(member_actions(cx, &user_id, confirm_mod.as_ref()))
-                            },
+                            |el| el.child(member_actions(cx, &user_id, confirm_mod.as_ref())),
                         )
                 }
             });

@@ -4,7 +4,6 @@
 //! На других платформах иконка живёт в пакете (icns/PNG/desktop).
 //! assets/icon.ico сгенерирован scripts/make_icon_assets.py
 //! («краб, кусающий Вампуса» — см. packaging/icons).
-
 fn main() {
     println!("cargo:rerun-if-changed=assets/icon.ico");
     println!("cargo:rerun-if-changed=assets/icon.png");

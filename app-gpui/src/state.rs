@@ -466,10 +466,7 @@ impl AppModel {
                     continue;
                 }
                 folders.push(GuildFolder {
-                    name: f
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
+                    name: f.get("name").and_then(|v| v.as_str()).map(String::from),
                     color: f.get("color").and_then(|v| v.as_i64()),
                     guild_ids,
                 });
@@ -488,10 +485,7 @@ impl AppModel {
                         }
                     }
                     Some("folder") => {
-                        let idx = item
-                            .get("index")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as usize;
+                        let idx = item.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                         if idx < folders.len() {
                             rail.push(RailItem::Folder(idx));
                         }

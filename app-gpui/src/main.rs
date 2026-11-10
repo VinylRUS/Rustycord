@@ -8,7 +8,10 @@
 
 // Windows: без консоли при двойном клике. Консоль появляется только
 // в dev-режиме (AllocConsole на старте) или при запуске из терминала.
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "gui")]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "gui"
+)]
 
 mod actions;
 mod assets;
@@ -82,7 +85,7 @@ impl Render for AppModel {
 mod devconsole {
     use windows::Win32::System::Console::{
         AllocConsole, AttachConsole, GetStdHandle, SetConsoleOutputCP, WriteConsoleW,
-        STD_OUTPUT_HANDLE, ATTACH_PARENT_PROCESS,
+        ATTACH_PARENT_PROCESS, STD_OUTPUT_HANDLE,
     };
 
     /// Подключить консоль: если запущены из терминала — цепляемся к
@@ -109,8 +112,7 @@ mod devconsole {
                 if handle.is_invalid() {
                     return Ok(buf.len());
                 }
-                let mut utf16: Vec<u16> =
-                    String::from_utf8_lossy(buf).encode_utf16().collect();
+                let mut utf16: Vec<u16> = String::from_utf8_lossy(buf).encode_utf16().collect();
                 utf16.push(0);
                 let mut written = 0u32;
                 let _ = WriteConsoleW(

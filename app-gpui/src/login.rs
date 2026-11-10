@@ -33,7 +33,12 @@ pub fn render(
 
     // Табы способов входа (сегмент-пилюли).
     let tabs = {
-        let mut row = gpui::div().flex().gap_1().p_1().rounded_lg().bg(rgb(BG_BASE));
+        let mut row = gpui::div()
+            .flex()
+            .gap_1()
+            .p_1()
+            .rounded_lg()
+            .bg(rgb(BG_BASE));
         for (label, this) in [
             ("Токен", LoginTab::Token),
             ("Email", LoginTab::Email),
@@ -57,9 +62,7 @@ pub fn render(
                         } else {
                             el.bg(rgb(BG_INPUT))
                                 .text_color(rgb(TEXT_MUTED))
-                                .hover(|s| {
-                                    s.text_color(rgb(TEXT_PRIMARY))
-                                })
+                                .hover(|s| s.text_color(rgb(TEXT_PRIMARY)))
                         }
                     })
                     .child(label)
@@ -145,9 +148,10 @@ pub fn render(
                         // Краб-логотип.
                         .child(
                             gpui::div().flex().justify_center().child(
-                                gpui::div().p_2().rounded_full().child(
-                                    gpui::img(crate::assets::logo_image()).size(px(88.)),
-                                ),
+                                gpui::div()
+                                    .p_2()
+                                    .rounded_full()
+                                    .child(gpui::img(crate::assets::logo_image()).size(px(88.))),
                             ),
                         )
                         // Заголовок — как в официальном клиенте.
