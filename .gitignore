@@ -28,3 +28,11 @@ macos-build/
 appimagetool.AppImage
 linuxdeploy.AppImage
 .ci_fmt.log
+
+# Тестовые бинарники и релизные артефакты
+test-run/
+*.zip
+*.dmg
+*.AppImage
+*.deb
+*.exe
