@@ -172,7 +172,7 @@ fn hide_win32(window: &mut Window) -> bool {
         return false;
     };
     unsafe {
-        ShowWindow(hwnd, SW_HIDE);
+        let _ = ShowWindow(hwnd, SW_HIDE);
     }
     true
 }
@@ -189,7 +189,7 @@ fn show_win32(window: &mut Window) -> bool {
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindowAsync(hwnd, SW_RESTORE);
         } else {
-            ShowWindow(hwnd, SW_SHOW);
+            let _ = ShowWindow(hwnd, SW_SHOW);
         }
         // Фокус: SetForegroundWindow требует «ввода» — gpui::activate
         // справляется лучше, дублируем простым вызовом.
