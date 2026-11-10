@@ -1,6 +1,6 @@
 [package]
 name = "rustycord-gpui"
-version = "0.12.1"
+version = "0.12.2"
 description = "RustyCord GPUI — нативный Discord-клиент на GPUI (Zed) поверх протокольного ядра rustycord-core (основной клиент; Tauri-версия — legacy)"
 edition = "2021"
 rust-version = "1.82"

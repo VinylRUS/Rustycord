@@ -13,7 +13,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
@@ -277,7 +276,7 @@ pub async fn run_gateway(
                     tracing::error!("gateway: {msg}\n{dump}");
                     sink.emit(
                         "discord://warning",
-                        json!({ "message": format!("{msg} Путь к логу: Настройки → Логи.") }),
+                        json!({ "message": format!("{msg} Путь к логу: Настройки → Диагностика.") }),
                     );
                     state.emit_status("disconnected", Some(msg.to_string()));
                     break;
@@ -336,7 +335,9 @@ async fn run_session(
     };
     tracing::info!("gateway: подключение к {url}");
 
-    let (ws, _) = connect_async(url)
+    // Быстрое подключение (DNS-таймаут + гонка адресов): на плохих сетях
+    // «голый» connect_async перебирал IP по ~20 с на мёртвый адрес.
+    let ws = wsutil::connect_ws(url)
         .await
         .context("не удалось открыть WebSocket до gateway.discord.gg")?;
     let (mut writer, mut reader) = wsutil::split(ws);

@@ -21,7 +21,10 @@ mod bridge;
 mod captcha;
 mod chat;
 mod config;
+#[cfg(target_os = "windows")]
+mod devconsole;
 mod http;
+mod logging;
 mod login;
 mod preview;
 mod qr;
@@ -81,59 +84,6 @@ impl Render for AppModel {
     }
 }
 
-/* --------------------- Консоль dev-режима (Windows) --------------------- */
-
-#[cfg(target_os = "windows")]
-mod devconsole {
-    use windows::Win32::System::Console::{
-        AllocConsole, AttachConsole, GetStdHandle, SetConsoleOutputCP, WriteConsoleW,
-        ATTACH_PARENT_PROCESS, STD_OUTPUT_HANDLE,
-    };
-
-    /// Подключить консоль: если запущены из терминала — цепляемся к
-    /// родительской, иначе создаём свою. Плюс UTF-8 для русского текста.
-    pub fn setup() {
-        unsafe {
-            if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
-                let _ = AllocConsole();
-            }
-            let _ = SetConsoleOutputCP(65001);
-        }
-    }
-
-    /// tracing-writer поверх WriteConsoleW: работает и в GUI-сборке, где
-    /// stdout не подключён (без консоли записи тихо пропадают).
-    pub struct ConsoleOut;
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ConsoleOut {
-        type Writer = ConsoleOut;
-        fn make_writer(&'a self) -> ConsoleOut {
-            ConsoleOut
-        }
-    }
-
-    impl std::io::Write for ConsoleOut {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            unsafe {
-                let Ok(handle) = GetStdHandle(STD_OUTPUT_HANDLE) else {
-                    return Ok(buf.len()); // консоли нет — тихо
-                };
-                if handle.is_invalid() {
-                    return Ok(buf.len());
-                }
-                let utf16: Vec<u16> = String::from_utf8_lossy(buf).encode_utf16().collect();
-                let mut written = 0u32;
-                let _ = WriteConsoleW(handle, &utf16, Some(&mut written), None);
-            }
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-}
-
 fn main() {
     // 1. Конфиг (токен + dev-режим) — до всего остального.
     let cfg = config::load();
@@ -144,27 +94,17 @@ fn main() {
         devconsole::setup();
     }
 
-    // 3. Логи: dev-режим поднимает уровень до debug. На Windows пишем
-    //    через WriteConsoleW (см. devconsole), на Unix — обычный stdout.
-    let default_filter = if cfg.dev_mode {
-        "rustycord=debug,rustycord_core=debug"
-    } else {
-        "rustycord=info"
-    };
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| default_filter.into());
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_ansi(false);
-    #[cfg(target_os = "windows")]
-    let builder = builder.with_writer(devconsole::ConsoleOut);
-    let _ = builder.try_init();
+    // 3. Логи: файл <config>/logs/rustycord.log + консоль + panic-хук.
+    //    В GUI-сборке Windows консоли нет — файл остаётся единственным
+    //    следом при вылете (v0.12.1 «вылетает без ошибок» — больше не так).
+    logging::init(cfg.dev_mode);
 
     tracing::info!(
-        "RustyCord GPUI {} (протокол {}), dev-режим: {}",
+        "RustyCord GPUI {} (протокол {}), dev-режим: {}, логи: {}",
         env!("CARGO_PKG_VERSION"),
         rustycord_core::VERSION,
-        cfg.dev_mode
+        cfg.dev_mode,
+        logging::logs_dir().display()
     );
 
     // 4. Тёплый старт tokio-рантайма (gateway/voice/REST задачи ядра).
