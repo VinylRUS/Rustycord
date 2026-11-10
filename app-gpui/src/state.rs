@@ -49,6 +49,7 @@ pub enum SettingsSection {
     Voice,
     Behavior,
     Account,
+    Diagnostics,
     About,
 }
 

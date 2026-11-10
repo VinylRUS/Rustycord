@@ -1,6 +1,6 @@
 [package]
 name = "rustycord-core"
-version = "0.12.1"
+version = "0.12.2"
 description = "RustyCord protocol core — Discord gateway/REST/voice/auth, UI-agnostic (Tauri and GPUI frontends share it)"
 edition = "2021"
 rust-version = "1.77.2"

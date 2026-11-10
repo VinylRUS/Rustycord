@@ -288,6 +288,12 @@ pub fn render(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> gpui::A
             "Поведение",
         ))
         .child(nav_item(cx, section, SettingsSection::Account, "Аккаунт"))
+        .child(nav_item(
+            cx,
+            section,
+            SettingsSection::Diagnostics,
+            "Диагностика",
+        ))
         .child(nav_item(cx, section, SettingsSection::About, "О программе"));
 
     if let Some(u) = &me {
@@ -329,6 +335,7 @@ pub fn render(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> gpui::A
         SettingsSection::Voice => voice_section(model, cx),
         SettingsSection::Behavior => behavior_section(model, cx),
         SettingsSection::Account => account_section(model, cx),
+        SettingsSection::Diagnostics => diagnostics_section(model, cx),
         SettingsSection::About => about_section(model, cx),
     };
 
@@ -689,4 +696,65 @@ fn about_section(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> gpui
     ));
 
     col.into_any_element()
+}
+
+fn diagnostics_section(
+    _model: &mut AppModel,
+    cx: &mut gpui::Context<AppModel>,
+) -> gpui::AnyElement {
+    let logs = crate::logging::logs_dir();
+    let log_file = logs.join("rustycord.log");
+
+    gpui::div()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .max_w(px(640.))
+        .child(section_title("ДИАГНОСТИКА"))
+        .child(label(
+            "Клиент пишет журнал работы: события протокола, ошибки сети \
+             и паники кода. Если приложение вылетело или что-то не работает — \
+             этот файл покажет причину, приложи его к баг-репорту.",
+        ))
+        .child(
+            gpui::div()
+                .p_2()
+                .rounded_md()
+                .bg(rgb(BG_INPUT))
+                .text_size(px(12.))
+                .text_color(rgb(TEXT_MUTED))
+                .child(log_file.display().to_string()),
+        )
+        .child(
+            gpui::div()
+                .flex()
+                .gap_2()
+                .child(action_btn(
+                    "open-logs",
+                    "Открыть папку логов",
+                    BLURPLE,
+                    cx,
+                    |_m, _cx| {
+                        crate::logging::open_logs_dir();
+                    },
+                ))
+                .child(muted(
+                    "Ротация: при 5 МБ текущий файл переезжает в rustycord.old.log",
+                )),
+        )
+        .child(gpui::div().h(px(6.)))
+        .child(section_title("ЧТО ДЕЛАТЬ ПРИ ПРОБЛЕМАХ"))
+        .child(muted(
+            "· Не подключается / долго ждём QR: проверь интернет и провайдера — \
+             Discord недоступен в отдельных странах без прокси.",
+        ))
+        .child(muted(
+            "· Вылетело: открой rustycord.log — последние строки перед \
+             «ПАНИКА» показывают, что случилось.",
+        ))
+        .child(muted(
+            "· Dev-режим (раздел «Поведение») добавляет отладочные записи \
+             и консоль с логами.",
+        ))
+        .into_any_element()
 }

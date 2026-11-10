@@ -26,7 +26,6 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -313,7 +312,10 @@ pub async fn run_remote_auth(
         reqwest::header::HeaderValue::from_static("https://discord.com"),
     );
 
-    let (ws, _) = connect_async(request)
+    // Быстрое подключение: DNS с таймаутом + гонка адресов (connect_ws) —
+    // на деградированных сетях «голый» connect_async ждал бы по ~20 с на
+    // каждый мёртвый IP (v0.12.1: «QR ждём 40 секунд»).
+    let ws = wsutil::connect_ws(request)
         .await
         .context("не удалось открыть WebSocket до remote-auth-gateway")?;
     let (mut writer, mut reader) = wsutil::split(ws);

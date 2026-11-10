@@ -8,7 +8,7 @@ members = [
 
 # Общие настройки релиза для всех членов workspace.
 [workspace.package]
-version = "0.12.1"
+version = "0.12.2"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/VinylRUS/Rustycord"
@@ -17,5 +17,9 @@ repository = "https://github.com/VinylRUS/Rustycord"
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
 strip = true
+# ВАЖНО: без panic = "abort"! С abort любая паника (в т.ч. в tokio-таске)
+# мгновенно убивала процесс без единого сообщения — «вылетает без ошибок»
+# (v0.12.1). Со unwind паники ловит panic-хук: трейс уходит в
+# <config>/logs/rustycord.log, а паника в фоновой задаче больше не роняет
+# весь клиент.
