@@ -22,10 +22,6 @@ pub fn render(
         Screen::Login(l) => l.tab,
         _ => LoginTab::Token,
     };
-    let busy = match &model.screen {
-        Screen::Login(l) => l.busy,
-        _ => false,
-    };
     let error = match &model.screen {
         Screen::Login(l) => l.error.clone(),
         _ => None,
@@ -259,7 +255,7 @@ fn email_card(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl In
         .child(field(&login.pass_input))
         .child(
             gpui::div()
-                .text_size(px(12))
+                .text_size(px(12.))
                 .text_color(rgb(TEXT_FADED))
                 .child("При капче/2FA откроется окно подтверждения discord.com."),
         )

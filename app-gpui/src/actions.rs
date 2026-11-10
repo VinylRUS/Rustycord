@@ -263,7 +263,7 @@ pub fn select_channel(model: &mut AppModel, channel_id: &str, cx: &mut gpui::Con
             if let Some(g) = gid.clone() {
                 let _ = send_gateway(
                     &core,
-                    GatewayCommand::BulkGuildSubscribe { guild_ids: vec![g] },
+                    GatewayCommand::BulkGuildSubscribe { guild_ids: vec![g.clone()] },
                 )
                 .await;
                 let _ = send_gateway(
@@ -335,7 +335,7 @@ pub fn select_guild(
         match guild_id.as_deref() {
             Some(gid) => {
                 let cache = model.core.cache.read().unwrap();
-                cache.guilds.get(gid).map(|g| {
+                cache.guilds.get(gid).and_then(|g| {
                     // Кандидаты: текстовые (0-текст, 5-объявление, 15-форум).
                     let text: Vec<&rustycord_core::rest::models::Channel> = g
                         .channels

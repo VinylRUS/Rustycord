@@ -50,6 +50,7 @@ pub fn config_dir() -> PathBuf {
             .join("rustycord")
     } else {
         let base = std::env::var("XDG_CONFIG_HOME")
+            .ok()
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|_| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -64,7 +65,7 @@ fn config_path() -> PathBuf {
 }
 
 /// Прочитать конфиг (отсутствующий/битый файл = дефолт, не ошибка:
-//! клиент обязан стартовать даже с повреждённым конфигом).
+/// клиент обязан стартовать даже с повреждённым конфигом).
 pub fn load() -> Config {
     let Ok(raw) = fs::read_to_string(config_path()) else {
         return Config::default();

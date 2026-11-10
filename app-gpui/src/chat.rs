@@ -310,7 +310,7 @@ fn rail_folder_tile(
         };
         let tile_info = tiles.get(gid);
         let mini: gpui::AnyElement = match tile_info {
-            Some((name, Some(url), _)) => gpui::div()
+            Some((_, Some(url), _)) => gpui::div()
                 .absolute()
                 .when(top, |el| el.top_1p5())
                 .when(!top, |el| el.bottom_1p5())
@@ -519,7 +519,7 @@ fn guild_rail(
     // Раскладка ещё не приезжала — все известные серверы подряд (гильдии
     // из папок попадут сюда только если события раскладки не было вовсе).
     let rail: Vec<crate::state::RailItem> = if rail.is_empty() {
-        tiles.keys().map(crate::state::RailItem::Guild).collect()
+        tiles.keys().cloned().map(crate::state::RailItem::Guild).collect()
     } else {
         rail
     };

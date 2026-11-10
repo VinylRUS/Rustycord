@@ -220,6 +220,7 @@ fn main() {
         let handle = gpui::AnyWindowHandle::from(window);
         tray::init(handle, tx.clone());
 
+        let pump_model = model.clone();
         cx.spawn(async move |cx: &mut gpui::AsyncApp| {
             while let Some((event, payload)) = rx.recv().await {
                 if event == "ui://tray-open" {
@@ -233,7 +234,7 @@ fn main() {
                 let event = event.clone();
                 let payload = payload.clone();
                 let _ = cx.update(|cx: &mut App| {
-                    model.update(cx, |m: &mut AppModel, cx: &mut Context<AppModel>| {
+                    pump_model.update(cx, |m: &mut AppModel, cx: &mut Context<AppModel>| {
                         m.handle_event(&event, payload, cx)
                     });
                 });

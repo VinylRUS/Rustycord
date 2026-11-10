@@ -144,7 +144,7 @@ pub fn show_from_tray(cx: &mut App) {
         }
         // Поднять/восстановить окно (X11: _NET_ACTIVE_WINDOW — WM
         // разворачивает из минимизации).
-        window.activate();
+        window.activate_window();
     });
 }
 
