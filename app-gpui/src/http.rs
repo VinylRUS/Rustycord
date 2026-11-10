@@ -81,18 +81,32 @@ impl HttpClient for ReqwestHttpClient {
                 }
                 request = request.header(name, value);
             }
-            let response = request.body(bytes).send().await?;
 
-            let status = StatusCode::from_u16(response.status().as_u16())?;
-            let mut builder = Response::builder().status(status);
-            for (name, value) in response.headers().iter() {
-                builder = builder.header(name, value);
-            }
-            let body = response.bytes().await?.to_vec();
-            let resp = builder
-                .body(AsyncBody::from(body))
-                .map_err(|e| anyhow::anyhow!("build response: {e}"))?;
-            Ok(resp)
+            // reqwest требует Tokio-контекст (DNS-резолвер hyper-util уходит в
+            // spawn_blocking), а GPUI поллит этот future своим executor'ом —
+            // «there is no reactor running» (v0.11.0 падало на первой аватарке).
+            // Выполняем запрос на протокольном рантайме и возвращаем результат
+            // через oneshot: await Receiver вне Tokio безопасен.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            crate::bridge::runtime().spawn(async move {
+                let result = async {
+                    let response = request.body(bytes).send().await?;
+                    let status = StatusCode::from_u16(response.status().as_u16())?;
+                    let mut builder = Response::builder().status(status);
+                    for (name, value) in response.headers().iter() {
+                        builder = builder.header(name, value);
+                    }
+                    let body = response.bytes().await?.to_vec();
+                    builder
+                        .body(AsyncBody::from(body))
+                        .map_err(|e| anyhow::anyhow!("build response: {e}"))
+                }
+                .await;
+                // Получатель мог уйти (GPUI отменил загрузку) — тихо игнорируем.
+                let _ = tx.send(result);
+            });
+            rx.await
+                .map_err(|e| anyhow::anyhow!("http task died: {e}"))?
         })
     }
 }

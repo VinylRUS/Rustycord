@@ -5,6 +5,20 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [0.11.1] — 2026-11-10
+
+### Fixed
+- **Паника GPUI-версии сразу после входа** — `there is no reactor running,
+  must be called from the context of a Tokio 1.x runtime` (hyper-util
+  dns.rs): HTTP-клиент для аватарок/иконок выполнял reqwest-запросы
+  прямо на executor'е GPUI, а DNS-резолвер hyper-util требует
+  Tokio-контекст (`spawn_blocking`). Теперь запрос уезжает на
+  протокольный рантайм (`bridge::runtime()`), а результат возвращается
+  через oneshot — await Receiver вне Tokio безопасен. Tauri-версия не
+  affected: весь её reqwest живёт в tokio-командах.
+  Диагноз по логу первого реального запуска v0.11.0 на Windows
+  (QR-вход → READY → первый `img()` → паника в безымянном потоке).
+
 ## [0.11.0] — 2026-11-09
 
 ### Added
