@@ -164,12 +164,12 @@ jobs:
       - name: Package (AppImage + deb + portable)
         run: |
           V="${GITHUB_REF_NAME#v}"
-          ./packaging/linux/make-appimage.sh \
+          bash packaging/linux/make-appimage.sh \
             target/release/rustycord-gpui \
             src-tauri/icons/128x128.png \
             packaging/linux/rustycord.desktop packaging/linux/AppRun \
             "RustyCord_${V}_amd64.AppImage"
-          ./packaging/linux/make-deb.sh \
+          bash packaging/linux/make-deb.sh \
             target/release/rustycord-gpui "$V" \
             src-tauri/icons/128x128.png packaging/linux/rustycord.desktop \
             "rustycord_${V}_amd64.deb"
@@ -210,7 +210,7 @@ jobs:
       - name: Package (.app → dmg + app.tar.gz + portable)
         run: |
           V="${GITHUB_REF_NAME#v}"
-          ./packaging/macos/make-dist.sh \
+          bash packaging/macos/make-dist.sh \
             target/aarch64-apple-darwin/release/rustycord-gpui \
             target/x86_64-apple-darwin/release/rustycord-gpui \
             "$V" src-tauri/icons/icon.icns dist
