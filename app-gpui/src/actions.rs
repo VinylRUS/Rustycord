@@ -58,8 +58,10 @@ pub fn enter_main(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) {
     cx.notify();
 }
 
-/// Выйти из аккаунта → экран логина.
+/// Выйти из аккаунта → экран логина. Сохранённый токен тоже сносим,
+/// иначе автологин на следующем запуске вернёт ту же сессию.
 pub fn logout(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) {
+    model.config.clear_token();
     let core = model.core.clone();
     crate::bridge::spawn_tokio(async move {
         rustycord_core::session::disconnect(&core).await;
@@ -229,21 +231,26 @@ pub fn apply_history(
 }
 
 /// Выбор канала: подписки op 37 + история + сброс unreads.
+/// Для каналов гильдий запоминает канал в last_channel_by_guild
+/// (автовыбор при следующем клике по серверу).
 pub fn select_channel(model: &mut AppModel, channel_id: &str, cx: &mut gpui::Context<AppModel>) {
     {
         let Screen::Main(m) = &mut model.screen else {
             return;
         };
-        let _guild_id = m.selected_guild.clone();
         m.selected_channel = Some(channel_id.to_string());
         m.unread.remove(channel_id);
         m.reply_to = None;
         m.send_error = None;
+        if let Some(gid) = m.selected_guild.clone() {
+            m.last_channel_by_guild.insert(gid, channel_id.to_string());
+        }
     }
     let is_bot = model.core.is_bot.load(std::sync::atomic::Ordering::SeqCst);
 
     // Подписки (как в Tauri-фронте): гильдия op 37 (пресенсы/typing),
-    // затем ленивый список участников канала [[0,99]].
+    // затем ленивый список участников канала [[0,99]]. Для ЛС (гильдии нет)
+    // список участников не подписываем — как в Tauri и официале.
     let core = model.core.clone();
     let (gid, cid) = {
         let Screen::Main(m) = &model.screen else {
@@ -256,19 +263,21 @@ pub fn select_channel(model: &mut AppModel, channel_id: &str, cx: &mut gpui::Con
             if let Some(g) = gid.clone() {
                 let _ = send_gateway(
                     &core,
-                    GatewayCommand::BulkGuildSubscribe { guild_ids: vec![g] },
+                    GatewayCommand::BulkGuildSubscribe {
+                        guild_ids: vec![g.clone()],
+                    },
+                )
+                .await;
+                let _ = send_gateway(
+                    &core,
+                    GatewayCommand::SubscribeMemberList {
+                        guild_id: g,
+                        channel_id: Some(cid.clone()),
+                        ranges: vec![(0, 99)],
+                    },
                 )
                 .await;
             }
-            let _ = send_gateway(
-                &core,
-                GatewayCommand::SubscribeMemberList {
-                    guild_id: gid.unwrap_or_else(|| cid.clone()),
-                    channel_id: Some(cid.clone()),
-                    ranges: vec![(0, 99)],
-                },
-            )
-            .await;
         } else if let Some(g) = gid {
             let _ = send_gateway(&core, GatewayCommand::RequestMembers { guild_id: g }).await;
         }
@@ -307,23 +316,59 @@ pub fn select_channel(model: &mut AppModel, channel_id: &str, cx: &mut gpui::Con
     cx.notify();
 }
 
-/// Выбор гильдии (или «Домой»): подписка гильдии, сброс канала.
+/// Выбор гильдии (или «Домой»): подписка гильдии + автовыбор канала —
+/// запомненный прошлый, иначе первый текстовый (как в Tauri-фронте и
+/// официальном клиенте: раньше канал приходилось кликать руками, из-за
+/// чего список участников оставался пустым).
 pub fn select_guild(
     model: &mut AppModel,
     guild_id: Option<String>,
     cx: &mut gpui::Context<AppModel>,
 ) {
-    {
+    // Автовыбор канала (снимок кэша — коротко, под замком).
+    let auto_channel: Option<String> = {
         let Screen::Main(m) = &mut model.screen else {
             return;
         };
         m.selected_guild = guild_id.clone();
         m.selected_channel = None;
         m.reply_to = None;
-    }
-    // op 37 для пресенсов гильдии — сразу (список каналов приедет в
-    // GUILD_CREATE, который это подписка и провоцирует).
-    if let Some(gid) = guild_id {
+        m.send_error = None;
+        match guild_id.as_deref() {
+            Some(gid) => {
+                let cache = model.core.cache.read().unwrap();
+                cache.guilds.get(gid).and_then(|g| {
+                    // Кандидаты: текстовые (0-текст, 5-объявление, 15-форум).
+                    let text: Vec<&rustycord_core::rest::models::Channel> = g
+                        .channels
+                        .iter()
+                        .filter(|c| matches!(c.kind, 0 | 5 | 15))
+                        .collect();
+                    // Запомненный прошлый канал (если ещё существует).
+                    let remembered = m
+                        .last_channel_by_guild
+                        .get(gid)
+                        .and_then(|cid| text.iter().find(|c| c.id == *cid).map(|c| c.id.clone()));
+                    remembered
+                        .or_else(|| text.first().map(|c| c.id.clone()))
+                        .or_else(|| {
+                            // Текстовых нет — первый голосовой, лишь бы не
+                            // упираться в «Выбери канал» на пустых серверах.
+                            g.channels
+                                .iter()
+                                .find(|c| matches!(c.kind, 2 | 13))
+                                .map(|c| c.id.clone())
+                        })
+                })
+            }
+            None => None,
+        }
+    };
+    // Канал в этой же гильдии: подписки/история едут внутри select_channel.
+    if let Some(cid) = auto_channel {
+        select_channel(model, &cid, cx);
+    } else if let Some(gid) = guild_id {
+        // Открывать нечего (гильдия ещё грузится) — хотя бы подпишем гильдию.
         let core = model.core.clone();
         let already = model.core.subscribed_guilds.lock().unwrap().contains(&gid);
         if !already {

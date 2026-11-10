@@ -499,6 +499,7 @@ fn behavior_section(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> g
         };
         (m.suppress_typing, m.log_deleted)
     };
+    let dev_mode = model.config.dev_mode;
 
     gpui::div()
         .flex()
@@ -530,6 +531,22 @@ fn behavior_section(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> g
                     st.log_deleted = !st.log_deleted;
                 }
                 cx.notify();
+            },
+        ))
+        .child(gpui::div().h(px(6.)))
+        .child(section_title("РЕЖИМ РАЗРАБОТЧИКА"))
+        .child(toggle_row(
+            "dev-mode",
+            "Dev-режим",
+            "Клиент перезапустится и откроет консоль с логами протокола (уровень debug)",
+            dev_mode,
+            cx,
+            |m, cx| {
+                m.config.dev_mode = !m.config.dev_mode;
+                crate::config::save(&m.config);
+                cx.notify();
+                // Перезапуск: консоль подключается на старте нового процесса.
+                cx.restart();
             },
         ))
         .into_any_element()

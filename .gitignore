@@ -27,3 +27,4 @@ appimage-build/
 macos-build/
 appimagetool.AppImage
 linuxdeploy.AppImage
+.ci_fmt.log

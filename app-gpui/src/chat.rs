@@ -9,6 +9,7 @@ use gpui::{
 };
 use rustycord_core::rest::models::{Channel, Message, VoiceState};
 use rustycord_core::state::{AppState, MemberListRow};
+use std::collections::HashMap;
 
 use crate::state::{AppModel, Screen};
 use crate::text_input::Submit;
@@ -180,133 +181,465 @@ pub fn render(
 
 /* --------------------------- Рейл гильдий --------------------------- */
 
+/// Кнопка-плитка сервера 48×48 (кружок → скруглённый квадрат на ховере,
+/// как в официальном клиенте). active — белый прямоугольник слева.
+fn rail_guild_tile(
+    cx: &mut gpui::Context<AppModel>,
+    id: &str,
+    name: &str,
+    icon: Option<String>,
+    active: bool,
+    unread: u32,
+    on_click: impl Fn(&mut AppModel, &mut gpui::Context<AppModel>) + 'static,
+) -> impl IntoElement {
+    let initials: SharedString = name
+        .chars()
+        .filter(|c| c.is_alphabetic())
+        .take(2)
+        .collect::<String>()
+        .to_uppercase()
+        .into();
+    let tile = gpui::div()
+        .id(gpui::SharedString::from(format!("rail-g-{id}")))
+        .size(px(48.))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .overflow_hidden()
+        .cursor_pointer()
+        .map(|el| {
+            if active {
+                el.bg(rgb(BLURPLE))
+                    .text_color(gpui::white())
+                    .rounded(px(16.))
+            } else {
+                el.bg(rgb(0x313338))
+                    .text_color(rgb(TEXT_PRIMARY))
+                    .hover(|s| {
+                        s.bg(rgb(BLURPLE))
+                            .text_color(gpui::white())
+                            .rounded(px(16.))
+                    })
+            }
+        })
+        .child(match icon {
+            Some(url) => gpui::img(url).size(px(48.)).into_any_element(),
+            None => gpui::div()
+                .text_size(px(16.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(initials)
+                .into_any_element(),
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |m, _, _, cx| on_click(m, cx)),
+        );
+
+    // Строка: пилюля активности + плитка + бейдж непрочитанных.
+    gpui::div()
+        .relative()
+        .w(px(72.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(active, |row| {
+            row.child(
+                gpui::div()
+                    .absolute()
+                    .left_0()
+                    .w(px(4.))
+                    .h(px(40.))
+                    .rounded_full()
+                    .bg(gpui::white()),
+            )
+        })
+        .child(tile)
+        .when(unread > 0 && !active, |row| {
+            row.child(
+                gpui::div()
+                    .absolute()
+                    .right_1()
+                    .bottom_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .min_w(px(16.))
+                    .h(px(16.))
+                    .px_1()
+                    .rounded_full()
+                    .bg(rgb(RED))
+                    .text_color(gpui::white())
+                    .text_size(px(11.))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(if unread > 99 {
+                        "99+".to_string()
+                    } else {
+                        unread.to_string()
+                    }),
+            )
+        })
+}
+
+/// Свёрнутая папка: 48×48 с сеткой 2×2 мини-иконок (до 4 серверов + «+N»).
+/// Плитка становится цветом папки на ховере и когда внутри выбран сервер.
+fn rail_folder_tile(
+    cx: &mut gpui::Context<AppModel>,
+    folder: &crate::state::GuildFolder,
+    index: usize,
+    tiles: &HashMap<String, (String, Option<String>, u32)>,
+    active: bool,
+    unread: u32,
+) -> impl IntoElement {
+    let color = folder
+        .color
+        .map(|c| rgb((c & 0xffffff) as u32))
+        .unwrap_or(rgb(BLURPLE));
+    let mut body = gpui::div()
+        .id("rail-folder")
+        .size(px(48.))
+        .rounded_full()
+        .overflow_hidden()
+        .cursor_pointer()
+        .bg(rgb(0x313338))
+        .hover(|s| s.bg(color).rounded(px(16.)))
+        .relative();
+    if active {
+        body = body.bg(color).rounded(px(16.));
+    }
+    // Сетка 2×2 из мини-иконок (углы, отступ 6px).
+    for (i, gid) in folder.guild_ids.iter().take(4).enumerate() {
+        let (top, left) = match i {
+            0 => (true, true),
+            1 => (true, false),
+            2 => (false, true),
+            _ => (false, false),
+        };
+        let tile_info = tiles.get(gid);
+        let mini: gpui::AnyElement = match tile_info {
+            Some((_, Some(url), _)) => gpui::div()
+                .absolute()
+                .when(top, |el| el.top_1p5())
+                .when(!top, |el| el.bottom_1p5())
+                .when(left, |el| el.left_1p5())
+                .when(!left, |el| el.right_1p5())
+                .size(px(16.))
+                .rounded_full()
+                .overflow_hidden()
+                .child(gpui::img(url.clone()).size(px(16.)))
+                .into_any_element(),
+            Some((name, None, _)) => gpui::div()
+                .absolute()
+                .when(top, |el| el.top_1p5())
+                .when(!top, |el| el.bottom_1p5())
+                .when(left, |el| el.left_1p5())
+                .when(!left, |el| el.right_1p5())
+                .size(px(16.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(avatar_color(gid))
+                .text_size(px(9.))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(gpui::white())
+                .child(first_letter(name))
+                .into_any_element(),
+            // Гильдия ещё грузится (раскладка приехала раньше GUILD_CREATE).
+            None => gpui::div()
+                .absolute()
+                .when(top, |el| el.top_1p5())
+                .when(!top, |el| el.bottom_1p5())
+                .when(left, |el| el.left_1p5())
+                .when(!left, |el| el.right_1p5())
+                .size(px(16.))
+                .rounded_full()
+                .bg(rgb(0x35363c))
+                .into_any_element(),
+        };
+        body = body.child(mini);
+    }
+    let row = gpui::div()
+        .relative()
+        .w(px(72.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(active, |r| {
+            r.child(
+                gpui::div()
+                    .absolute()
+                    .left_0()
+                    .w(px(4.))
+                    .h(px(40.))
+                    .rounded_full()
+                    .bg(gpui::white()),
+            )
+        })
+        .child(body.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |m, _, _, cx| {
+                // Клик по свёрнутой папке — раскрыть столбиком (повторный клик
+                // по шапке сворачивает).
+                if let Screen::Main(st) = &mut m.screen {
+                    st.open_folder = Some(index);
+                }
+                cx.notify();
+            }),
+        ))
+        .when(unread > 0 && !active, |r| {
+            r.child(
+                gpui::div()
+                    .absolute()
+                    .right_1()
+                    .bottom_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .min_w(px(16.))
+                    .h(px(16.))
+                    .px_1()
+                    .rounded_full()
+                    .bg(rgb(RED))
+                    .text_color(gpui::white())
+                    .text_size(px(11.))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(if unread > 99 {
+                        "99+".to_string()
+                    } else {
+                        unread.to_string()
+                    }),
+            )
+        });
+    row
+}
+
+/// Раскрытая папка: цветной столбик с шапкой-именем и серверами внутри.
+fn rail_folder_open(
+    cx: &mut gpui::Context<AppModel>,
+    folder: &crate::state::GuildFolder,
+    tiles: &HashMap<String, (String, Option<String>, u32)>,
+    selected: Option<&str>,
+) -> impl IntoElement {
+    let color = folder
+        .color
+        .map(|c| rgb((c & 0xffffff) as u32))
+        .unwrap_or(rgb(BLURPLE));
+    let title = folder
+        .name
+        .clone()
+        .filter(|n| !n.is_empty())
+        .or_else(|| {
+            folder
+                .guild_ids
+                .iter()
+                .find_map(|gid| tiles.get(gid).map(|(n, _, _)| n.clone()))
+        })
+        .unwrap_or_else(|| "Папка".into());
+
+    // Шапка: имя папки, клик — свернуть.
+    let head = gpui::div()
+        .id("folder-head")
+        .h(px(20.))
+        .min_w(px(48.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .text_size(px(10.))
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(gpui::white())
+        .hover(|s| s.opacity(0.8))
+        .child(title.clone())
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|m, _, _, cx| {
+                if let Screen::Main(st) = &mut m.screen {
+                    st.open_folder = None;
+                }
+                cx.notify();
+            }),
+        );
+
+    let mut col = gpui::div()
+        .id(SharedString::from(format!("folder-open-{}", title)))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_2()
+        .py_2()
+        .px_1()
+        .w(px(56.))
+        .rounded_xl()
+        .bg(color);
+    col = col.child(head);
+    for gid in folder.guild_ids.iter() {
+        let Some((name, icon, unread)) = tiles.get(gid) else {
+            continue;
+        };
+        let active = selected == Some(gid.as_str());
+        let g = gid.clone();
+        col = col.child(rail_guild_tile(
+            cx,
+            gid,
+            name,
+            icon.clone(),
+            active,
+            *unread,
+            move |m, cx| {
+                // Клик по серверу папку не сворачивает (как в оригинале).
+                crate::actions::select_guild(m, Some(g.clone()), cx);
+            },
+        ));
+    }
+    col
+}
 fn guild_rail(
     model: &mut AppModel,
     cx: &mut gpui::Context<AppModel>,
     selected: Option<&str>,
 ) -> impl IntoElement {
-    // Снапшот: порядок + (id, name, icon, unread).
-    let mut rail: Vec<(String, String, Option<String>, bool)> = Vec::new();
-    {
-        let core = &model.core;
-        let cache = core.cache.read().unwrap();
-        let order: Vec<String> = match &model.screen {
-            Screen::Main(m) => m.guild_order.clone(),
-            _ => Vec::new(),
-        };
-        let ids: Vec<String> = if order.is_empty() {
-            cache.guilds.keys().cloned().collect()
-        } else {
-            order
-        };
-        for id in ids {
-            if let Some(g) = cache.guilds.get(&id) {
-                let unread = match &model.screen {
+    // Снимок плиток: id → (имя, иконка, непрочитанные) — кэш ядра.
+    let tiles: HashMap<String, (String, Option<String>, u32)> = {
+        let cache = model.core.cache.read().unwrap();
+        cache
+            .guilds
+            .values()
+            .map(|g| {
+                let unread: u32 = match &model.screen {
                     Screen::Main(m) => g
                         .channels
                         .iter()
-                        .any(|c| m.unread.get(&c.id).copied().unwrap_or(0) > 0),
-                    _ => false,
+                        .map(|c| m.unread.get(&c.id).copied().unwrap_or(0))
+                        .sum(),
+                    _ => 0,
                 };
-                rail.push((
+                (
                     g.id.clone(),
-                    g.name.clone(),
-                    g.icon.as_ref().map(|h| guild_icon_url(&g.id, h)),
-                    unread,
+                    (
+                        g.name.clone(),
+                        g.icon.as_ref().map(|h| guild_icon_url(&g.id, h)),
+                        unread,
+                    ),
+                )
+            })
+            .collect()
+    };
+    let (rail, folders, open_folder) = match &model.screen {
+        Screen::Main(m) => (m.rail.clone(), m.folders.clone(), m.open_folder),
+        _ => (Vec::new(), Vec::new(), None),
+    };
+    // Раскладка ещё не приезжала — все известные серверы подряд (гильдии
+    // из папок попадут сюда только если события раскладки не было вовсе).
+    let rail: Vec<crate::state::RailItem> = if rail.is_empty() {
+        tiles
+            .keys()
+            .cloned()
+            .map(crate::state::RailItem::Guild)
+            .collect()
+    } else {
+        rail
+    };
+
+    let mut column = gpui::div().flex().flex_col().gap_2().items_center().py_3();
+
+    // Домашняя кнопка: краб-логотип (клик — ЛС/друзья).
+    let home_active = selected.is_none();
+    column = column.child(
+        gpui::div()
+            .relative()
+            .w(px(72.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(home_active, |r| {
+                r.child(
+                    gpui::div()
+                        .absolute()
+                        .left_0()
+                        .w(px(4.))
+                        .h(px(40.))
+                        .rounded_full()
+                        .bg(gpui::white()),
+                )
+            })
+            .child(
+                gpui::div()
+                    .id("rail-home")
+                    .size(px(48.))
+                    .rounded(px(16.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .map(|el| {
+                        if home_active {
+                            el.bg(rgb(BLURPLE))
+                        } else {
+                            el.hover(|s| s.bg(rgb(BLURPLE)))
+                        }
+                    })
+                    .child(gpui::img(crate::assets::logo_image()).size(px(26.)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|m: &mut AppModel, _, _, cx| {
+                            crate::actions::select_guild(m, None, cx);
+                        }),
+                    ),
+            ),
+    );
+    // Разделитель (как в официальном клиенте).
+    column = column.child(
+        gpui::div()
+            .w(px(32.))
+            .h(px(2.))
+            .rounded_full()
+            .bg(rgb(0x35363c)),
+    );
+
+    for item in rail {
+        match item {
+            crate::state::RailItem::Guild(id) => {
+                let Some((name, icon, unread)) = tiles.get(&id) else {
+                    continue;
+                };
+                let active = selected == Some(id.as_str());
+                let gid = id.clone();
+                column = column.child(rail_guild_tile(
+                    cx,
+                    &id,
+                    name,
+                    icon.clone(),
+                    active,
+                    *unread,
+                    move |m, cx| crate::actions::select_guild(m, Some(gid.clone()), cx),
                 ));
+            }
+            crate::state::RailItem::Folder(i) => {
+                let Some(folder) = folders.get(i) else {
+                    continue;
+                };
+                let expanded = open_folder == Some(i);
+                let active = folder
+                    .guild_ids
+                    .iter()
+                    .any(|g| selected == Some(g.as_str()));
+                let unread: u32 = folder
+                    .guild_ids
+                    .iter()
+                    .map(|g| tiles.get(g).map(|t| t.2).unwrap_or(0))
+                    .sum();
+                if expanded {
+                    column = column.child(rail_folder_open(cx, folder, &tiles, selected));
+                } else {
+                    column = column.child(rail_folder_tile(cx, folder, i, &tiles, active, unread));
+                }
             }
         }
     }
 
-    let mut column = gpui::div().flex().flex_col().gap_2().items_center().py_3();
-
-    // Домой (ЛС).
-    let home_active = selected.is_none();
-    column = column.child(
-        gpui::div()
-            .id("rail-home")
-            .size(px(44.))
-            .rounded_xl()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(px(18.))
-            .cursor_pointer()
-            .map(|el| {
-                if home_active {
-                    el.bg(rgb(BLURPLE)).text_color(gpui::white())
-                } else {
-                    el.bg(rgb(BG_ACTIVE))
-                        .text_color(rgb(TEXT_PRIMARY))
-                        .hover(|s| s.bg(rgb(BLURPLE)).text_color(gpui::white()))
-                }
-            })
-            .child("⌂")
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|m: &mut AppModel, _, _, cx| {
-                    crate::actions::select_guild(m, None, cx);
-                }),
-            ),
-    );
-
-    for (id, name, icon, unread) in rail {
-        let active = selected == Some(id.as_str());
-        let initials: SharedString = name
-            .chars()
-            .take(2)
-            .filter(|c| c.is_alphabetic())
-            .collect::<String>()
-            .to_uppercase()
-            .into();
-        let mut item = gpui::div()
-            .id(gpui::SharedString::from(format!("rail-{id}")))
-            .size(px(44.))
-            .rounded_xl()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(px(14.))
-            .cursor_pointer()
-            .overflow_hidden()
-            .map(|el| {
-                if active {
-                    el.bg(rgb(BLURPLE)).text_color(gpui::white())
-                } else {
-                    el.bg(rgb(BG_ACTIVE))
-                        .text_color(rgb(TEXT_PRIMARY))
-                        .hover(|s| s.bg(rgb(0x5865f2aa)).text_color(gpui::white()))
-                }
-            });
-        item = match icon {
-            Some(url) => item.child(gpui::img(url).size(px(44.)).rounded_xl()),
-            None => item.child(initials),
-        };
-        let gid = id.clone();
-        column = column.child(
-            gpui::div()
-                .flex()
-                .items_center()
-                .child(item.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |m: &mut AppModel, _, _, cx| {
-                        crate::actions::select_guild(m, Some(gid.clone()), cx);
-                    }),
-                ))
-                .when(unread && !active, |el| {
-                    el.child(
-                        gpui::div()
-                            .ml_neg_3()
-                            .size(px(8.))
-                            .rounded_full()
-                            .bg(rgb(RED)),
-                    )
-                }),
-        );
-    }
-
     gpui::div()
-        .w(px(64.))
+        .w(px(72.))
         .h_full()
         .flex()
         .flex_col()
@@ -470,7 +803,7 @@ fn channel_sidebar(
                         (ch.id.clone(), name, icon, unread)
                     })
                     .collect();
-                let friends: Vec<(String, String, String)> = cache
+                let friends: Vec<(String, String, String, Option<String>)> = cache
                     .relationships
                     .values()
                     .filter(|r| r.kind == 1)
@@ -487,6 +820,7 @@ fn channel_sidebar(
                                 .clone()
                                 .unwrap_or_else(|| r.user.username.clone()),
                             status,
+                            r.user.avatar.clone(),
                         )
                     })
                     .collect();
@@ -565,8 +899,9 @@ fn channel_sidebar(
                     .text_color(rgb(TEXT_FADED))
                     .child("ДРУЗЬЯ"),
             );
-            for (uid, name, status) in friends {
+            for (uid, name, status, avatar) in friends {
                 let dm_uid = uid.clone();
+                let av_url = avatar.as_deref().map(|h| avatar_url(&uid, h));
                 col = col.child(
                     gpui::div()
                         .flex()
@@ -574,20 +909,58 @@ fn channel_sidebar(
                         .gap_2()
                         .px_2()
                         .py_1()
+                        .rounded_md()
                         .text_color(rgb(TEXT_MUTED))
-                        .child(status_dot(&status, px(8.)))
-                        .child(name)
+                        .hover(|s| s.bg(rgb(BG_HOVER)).text_color(rgb(TEXT_PRIMARY)))
+                        // Аватар с точкой статуса.
                         .child(
                             gpui::div()
-                                .ml_auto()
-                                .text_size(px(11.))
-                                .text_color(rgb(TEXT_FADED))
-                                .child(status_label(&status)),
+                                .relative()
+                                .size(px(32.))
+                                .child(avatar_or_initial(&uid, av_url.as_deref(), &name, px(32.)))
+                                .child(
+                                    gpui::div()
+                                        .absolute()
+                                        .bottom_0()
+                                        .right_0()
+                                        .size(px(14.))
+                                        .rounded_full()
+                                        .bg(rgb(BG_PANEL))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            gpui::div()
+                                                .size(px(10.))
+                                                .rounded_full()
+                                                .bg(status_color(&status)),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            gpui::div()
+                                .flex()
+                                .flex_col()
+                                .min_w_0()
+                                .child(
+                                    gpui::div()
+                                        .text_size(px(14.))
+                                        .text_color(rgb(TEXT_PRIMARY))
+                                        .overflow_hidden()
+                                        .child(name),
+                                )
+                                .child(
+                                    gpui::div()
+                                        .text_size(px(11.))
+                                        .text_color(rgb(TEXT_FADED))
+                                        .child(status_label(&status)),
+                                ),
                         )
                         // «Написать»: создать/открыть ЛС с другом.
                         .child(
                             gpui::div()
                                 .id(gpui::SharedString::from(format!("fr-dm-{uid}")))
+                                .ml_auto()
                                 .px_1()
                                 .rounded_md()
                                 .text_size(px(11.))
@@ -624,7 +997,7 @@ fn channel_sidebar(
     };
 
     gpui::div()
-        .w(px(232.))
+        .w(px(240.))
         .h_full()
         .flex()
         .flex_col()
@@ -672,25 +1045,65 @@ fn voice_channel_row(
         Screen::Main(m) => vc.members.iter().any(|vs| m.speaking.contains(&vs.user_id)),
         _ => false,
     };
-    // Имена участников (снапшот кэша).
-    let member_names: Vec<(String, String)> = {
+    // Участники голосового канала (аватарки — из кэша ядра).
+    let member_rows: Vec<(String, String, Option<String>)> = {
         let cache = model.core.cache.read().unwrap();
         vc.members
             .iter()
             .map(|vs| {
-                let name = cache
+                let mem = cache
                     .guilds
                     .get(guild_id)
-                    .and_then(|g| g.members.get(&vs.user_id))
-                    .and_then(|mem| {
-                        mem.nick.clone().or_else(|| {
-                            mem.user
+                    .and_then(|g| g.members.get(&vs.user_id));
+                let name = mem
+                    .and_then(|m| {
+                        m.nick.clone().or_else(|| {
+                            m.user
                                 .as_ref()
                                 .and_then(|u| u.global_name.clone().or(Some(u.username.clone())))
                         })
                     })
+                    .or_else(|| {
+                        // Гидратации кэша могло не быть — аватар из ленивого списка.
+                        let lists = model.core.member_lists.lock().unwrap();
+                        lists
+                            .get(guild_id)
+                            .and_then(|l| {
+                                l.rows.iter().find_map(|r| match r {
+                                    MemberListRow::Member {
+                                        user_id,
+                                        global_name,
+                                        nick,
+                                        username,
+                                        avatar,
+                                        ..
+                                    } if *user_id == vs.user_id => Some((
+                                        nick.clone()
+                                            .or(global_name.clone())
+                                            .unwrap_or_else(|| username.clone()),
+                                        avatar.clone(),
+                                    )),
+                                    _ => None,
+                                })
+                            })
+                            .map(|(n, _)| n)
+                    })
                     .unwrap_or_else(|| "…".into());
-                (vs.user_id.clone(), name)
+                let av = mem
+                    .and_then(|m| m.user.as_ref().and_then(|u| u.avatar.clone()))
+                    .or_else(|| {
+                        let lists = model.core.member_lists.lock().unwrap();
+                        lists.get(guild_id).and_then(|l| {
+                            l.rows.iter().find_map(|r| match r {
+                                MemberListRow::Member {
+                                    user_id, avatar, ..
+                                } if *user_id == vs.user_id => avatar.clone(),
+                                _ => None,
+                            })
+                        })
+                    })
+                    .map(|h| avatar_url(&vs.user_id, &h));
+                (vs.user_id.clone(), name, av)
             })
             .collect()
     };
@@ -739,13 +1152,14 @@ fn voice_channel_row(
                 }),
             ),
     );
-    for (uid, name) in member_names {
+    for (uid, name, av) in member_rows {
         let is_speaking = match &model.screen {
             Screen::Main(m) => m.speaking.contains(&uid),
             _ => false,
         };
         col = col.child(
             gpui::div()
+                .id(gpui::SharedString::from(format!("vcm-{uid}")))
                 .flex()
                 .items_center()
                 .gap_2()
@@ -754,7 +1168,7 @@ fn voice_channel_row(
                 .text_size(px(13.))
                 .text_color(rgb(TEXT_MUTED))
                 .when(is_speaking, |el| el.text_color(rgb(GREEN)))
-                .child("•")
+                .child(avatar_or_initial(&uid, av.as_deref(), &name, px(20.)))
                 .child(name),
         );
     }
@@ -831,7 +1245,7 @@ fn user_panel(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl In
     };
     let camera_on = matches!(&model.screen, Screen::Main(m) if m.camera_on);
 
-    let mut panel = gpui::div().flex().flex_col().bg(rgb(0x1e1f22));
+    let mut panel = gpui::div().flex().flex_col().bg(rgb(0x232428));
 
     if in_voice {
         let mut voice_row = gpui::div().flex().items_center().gap_2().px_2().pt_2();
@@ -861,7 +1275,7 @@ fn user_panel(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl In
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_md()
+                .rounded_full()
                 .text_size(px(12.))
                 .cursor_pointer()
                 .map(|el| {
@@ -887,7 +1301,7 @@ fn user_panel(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl In
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded_md()
+                    .rounded_full()
                     .text_size(px(12.))
                     .cursor_pointer()
                     .map(|el| {
@@ -913,7 +1327,7 @@ fn user_panel(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl In
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_md()
+                .rounded_full()
                 .text_size(px(12.))
                 .cursor_pointer()
                 .map(|el| {
@@ -976,7 +1390,7 @@ fn user_panel(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl In
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_md()
+                            .rounded_full()
                             .cursor_pointer()
                             .text_size(px(14.))
                             .map(|el| {
@@ -1001,7 +1415,7 @@ fn user_panel(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl In
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_md()
+                            .rounded_full()
                             .cursor_pointer()
                             .text_size(px(14.))
                             .map(|el| {
@@ -1026,7 +1440,7 @@ fn user_panel(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl In
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_md()
+                            .rounded_full()
                             .cursor_pointer()
                             .text_size(px(14.))
                             .bg(rgb(BG_INPUT))
@@ -1050,7 +1464,7 @@ fn user_panel(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl In
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_md()
+                            .rounded_full()
                             .cursor_pointer()
                             .text_size(px(14.))
                             .bg(rgb(BG_INPUT))
@@ -1459,12 +1873,12 @@ fn chat_pane(
                     .flex()
                     .items_center()
                     .gap_2()
-                    .px_3()
+                    .px_2()
                     .py_2()
                     .rounded_lg()
                     .bg(rgb(BG_INPUT))
-                    .child(gpui::div().flex_1().child(composer))
-                    // 📎 Вложения: нативный файловый диалог → multipart.
+                    // «+» слева: вложения (нативный диалог → multipart) —
+                    // как в официальном клиенте.
                     .child(
                         gpui::div()
                             .id("btn-upload")
@@ -1473,21 +1887,22 @@ fn chat_pane(
                             .justify_center()
                             .size(px(30.))
                             .rounded_full()
-                            .text_size(px(15.))
+                            .bg(rgb(0x494b53))
+                            .text_size(px(17.))
+                            .font_weight(gpui::FontWeight::BOLD)
                             .text_color(if uploading {
                                 rgb(TEXT_FADED)
                             } else {
-                                rgb(TEXT_MUTED)
+                                rgb(TEXT_PRIMARY)
                             })
                             .map(|el| {
                                 if uploading {
                                     el
                                 } else {
-                                    el.cursor_pointer()
-                                        .hover(|s| s.text_color(rgb(TEXT_PRIMARY)))
+                                    el.cursor_pointer().hover(|s| s.bg(rgb(BG_HOVER)))
                                 }
                             })
-                            .child("📎")
+                            .child("＋")
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|m: &mut AppModel, _, _, cx| {
@@ -1495,6 +1910,7 @@ fn chat_pane(
                                 }),
                             ),
                     )
+                    .child(gpui::div().flex_1().child(composer))
                     .child(
                         gpui::div()
                             .id("btn-send")
@@ -1505,7 +1921,9 @@ fn chat_pane(
                             .rounded_full()
                             .bg(rgb(BLURPLE))
                             .text_color(gpui::white())
+                            .text_size(px(15.))
                             .cursor_pointer()
+                            .hover(|s| s.opacity(0.85))
                             .child(if edit.is_some() { "✓" } else { "➤" })
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -1876,7 +2294,7 @@ fn member_pane(
                     username,
                     global_name,
                     nick,
-                    avatar: _,
+                    avatar,
                     status,
                     activities,
                     ..
@@ -1890,6 +2308,10 @@ fn member_pane(
                         Screen::Main(m) => m.speaking.contains(&user_id),
                         _ => false,
                     };
+                    let av_url = avatar
+                        .as_deref()
+                        .filter(|h| !h.is_empty())
+                        .map(|h| avatar_url(&user_id, h));
                     gpui::div()
                         .id(gpui::SharedString::from(format!("mem-{user_id}")))
                         .flex()
@@ -1901,27 +2323,53 @@ fn member_pane(
                         .text_color(rgb(TEXT_MUTED))
                         .hover(|s| s.bg(rgb(BG_HOVER)).text_color(rgb(TEXT_PRIMARY)))
                         .when(speaking, |el| el.text_color(rgb(GREEN)))
+                        // Аватар с точкой статуса (как в официале).
                         .child(
                             gpui::div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .size(px(24.))
-                                .rounded_full()
-                                .bg(avatar_color(&user_id))
-                                .text_size(px(11.))
-                                .text_color(gpui::white())
-                                .child(first_letter(&name)),
+                                .relative()
+                                .size(px(32.))
+                                .child(avatar_or_initial(
+                                    &user_id,
+                                    av_url.as_deref(),
+                                    &name,
+                                    px(32.),
+                                ))
+                                .child(
+                                    gpui::div()
+                                        .absolute()
+                                        .bottom_0()
+                                        .right_0()
+                                        .size(px(14.))
+                                        .rounded_full()
+                                        .bg(rgb(BG_PANEL))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            gpui::div()
+                                                .size(px(10.))
+                                                .rounded_full()
+                                                .bg(status_color(&status)),
+                                        ),
+                                ),
                         )
                         .child(
                             gpui::div()
                                 .flex()
                                 .flex_col()
-                                .child(gpui::div().text_size(px(13.)).child(name))
+                                .min_w_0()
+                                .child(
+                                    gpui::div()
+                                        .text_size(px(14.))
+                                        .text_color(rgb(TEXT_PRIMARY))
+                                        .overflow_hidden()
+                                        .child(name),
+                                )
                                 .children(activity.map(|a| {
                                     gpui::div()
                                         .text_size(px(11.))
                                         .text_color(rgb(TEXT_FADED))
+                                        .overflow_hidden()
                                         .child(a)
                                 })),
                         )
@@ -1929,81 +2377,7 @@ fn member_pane(
                         // ЛС, кик, бан — кик/бан с подтверждением вторым кликом.
                         .when(
                             !is_bot && Some(user_id.as_str()) != self_id.as_deref(),
-                            |el| {
-                                let mut acts = gpui::div().flex().items_center().gap_1().ml_auto();
-                                let dm_uid = user_id.clone();
-                                acts = acts.child(
-                                    gpui::div()
-                                        .id(gpui::SharedString::from(format!("mem-dm-{user_id}")))
-                                        .px_1()
-                                        .rounded_md()
-                                        .text_size(px(11.))
-                                        .text_color(rgb(TEXT_FADED))
-                                        .cursor_pointer()
-                                        .hover(|s| s.text_color(rgb(TEXT_PRIMARY)))
-                                        .child("✉")
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |m: &mut AppModel, _, _, cx| {
-                                                crate::actions::create_dm(m, &dm_uid.clone(), cx);
-                                            }),
-                                        ),
-                                );
-                                for (act, icon, idpart) in [
-                                    (crate::state::ModAction::Kick, "⏏", "kick"),
-                                    (crate::state::ModAction::Ban, "⛔", "ban"),
-                                ] {
-                                    let armed =
-                                        confirm_mod.as_ref() == Some(&(user_id.clone(), act));
-                                    let uid = user_id.clone();
-                                    acts = acts.child(
-                                        gpui::div()
-                                            .id(gpui::SharedString::from(format!(
-                                                "mem-{idpart}-{user_id}"
-                                            )))
-                                            .px_1()
-                                            .rounded_md()
-                                            .text_size(px(11.))
-                                            .cursor_pointer()
-                                            .map(|el| {
-                                                if armed {
-                                                    el.bg(rgb(RED))
-                                                        .text_color(gpui::white())
-                                                        .child("Точно?")
-                                                } else {
-                                                    el.text_color(rgb(TEXT_FADED))
-                                                        .hover(|s| s.text_color(rgb(RED)))
-                                                        .child(icon)
-                                                }
-                                            })
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(move |m: &mut AppModel, _, _, cx| {
-                                                    crate::actions::member_action(
-                                                        m,
-                                                        &uid.clone(),
-                                                        act,
-                                                        cx,
-                                                    );
-                                                }),
-                                            ),
-                                    );
-                                }
-                                el.child(acts)
-                            },
-                        )
-                        .child(
-                            // Без кнопок (бот-сессия/сам себе) точку прижимаем
-                            // вправо; с кнопками ml_auto уже на контейнере действий.
-                            gpui::div()
-                                .map(|el| {
-                                    if is_bot || Some(user_id.as_str()) == self_id.as_deref() {
-                                        el.ml_auto()
-                                    } else {
-                                        el
-                                    }
-                                })
-                                .child(status_dot(&status, px(8.))),
+                            |el| el.child(member_actions(cx, &user_id, confirm_mod.as_ref())),
                         )
                 }
             });
@@ -2031,7 +2405,7 @@ fn member_pane(
 
     let visible = selected_guild.is_some();
     gpui::div().when(visible, |el| {
-        el.w(px(216.))
+        el.w(px(240.))
             .h_full()
             .flex()
             .flex_col()
@@ -2058,6 +2432,64 @@ fn uppercase_group(id: &str) -> String {
     }
 }
 
+/// Кнопки строки участника: ЛС + кик/бан (второй клик подтверждает).
+fn member_actions(
+    cx: &mut gpui::Context<AppModel>,
+    user_id: &str,
+    confirm_mod: Option<&(String, crate::state::ModAction)>,
+) -> impl IntoElement {
+    let mut acts = gpui::div().flex().items_center().gap_1().ml_auto();
+    let dm_uid = user_id.to_string();
+    acts = acts.child(
+        gpui::div()
+            .id(gpui::SharedString::from(format!("mem-dm-{user_id}")))
+            .px_1()
+            .rounded_md()
+            .text_size(px(11.))
+            .text_color(rgb(TEXT_FADED))
+            .cursor_pointer()
+            .hover(|s| s.text_color(rgb(TEXT_PRIMARY)))
+            .child("✉")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |m: &mut AppModel, _, _, cx| {
+                    crate::actions::create_dm(m, &dm_uid.clone(), cx);
+                }),
+            ),
+    );
+    for (act, icon, idpart) in [
+        (crate::state::ModAction::Kick, "⏏", "kick"),
+        (crate::state::ModAction::Ban, "⛔", "ban"),
+    ] {
+        let armed = confirm_mod == Some(&(user_id.to_string(), act));
+        let uid = user_id.to_string();
+        acts = acts.child(
+            gpui::div()
+                .id(gpui::SharedString::from(format!("mem-{idpart}-{user_id}")))
+                .px_1()
+                .rounded_md()
+                .text_size(px(11.))
+                .cursor_pointer()
+                .map(|el| {
+                    if armed {
+                        el.bg(rgb(RED)).text_color(gpui::white()).child("Точно?")
+                    } else {
+                        el.text_color(rgb(TEXT_FADED))
+                            .hover(|s| s.text_color(rgb(RED)))
+                            .child(icon)
+                    }
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |m: &mut AppModel, _, _, cx| {
+                        crate::actions::member_action(m, &uid.clone(), act, cx);
+                    }),
+                ),
+        );
+    }
+    acts
+}
+
 fn first_letter(name: &str) -> String {
     name.chars()
         .next()
@@ -2066,13 +2498,6 @@ fn first_letter(name: &str) -> String {
 }
 
 /* --------------------------- Мелочи --------------------------- */
-
-fn status_dot(status: &str, size: gpui::Pixels) -> impl IntoElement {
-    gpui::div()
-        .size(size)
-        .rounded_full()
-        .bg(status_color(status))
-}
 
 fn status_label(status: &str) -> &'static str {
     match status {

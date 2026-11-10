@@ -1,6 +1,7 @@
-//! Экран логина: три способа — токен, email+пароль (+2FA), QR-код.
-//! Капча (если риск-скоринг Discord её потребует) открывается отдельным
-//! окном discord.com — реализация CaptchaSolver (wry) в captcha.rs.
+//! Экран логина — в стиле официального клиента: тёмный фон, карточка
+//! по центру с крабом-логотипом, «С возвращением!», поля с подписями,
+//! QR-код с логотипом по центру (как Discord кладёт свой значок в QR).
+//! Три способа входа — токен, email+пароль (+2FA), QR-код.
 
 use gpui::{
     prelude::*, px, rgb, AnyElement, IntoElement, MouseButton, ParentElement, Styled, Window,
@@ -21,10 +22,6 @@ pub fn render(
         Screen::Login(l) => l.tab,
         _ => LoginTab::Token,
     };
-    let _busy = match &model.screen {
-        Screen::Login(l) => l.busy,
-        _ => false,
-    };
     let error = match &model.screen {
         Screen::Login(l) => l.error.clone(),
         _ => None,
@@ -34,8 +31,14 @@ pub fn render(
         _ => false,
     };
 
+    // Табы способов входа (сегмент-пилюли).
     let tabs = {
-        let mut row = gpui::div().flex().gap_2();
+        let mut row = gpui::div()
+            .flex()
+            .gap_1()
+            .p_1()
+            .rounded_lg()
+            .bg(rgb(BG_BASE));
         for (label, this) in [
             ("Токен", LoginTab::Token),
             ("Email", LoginTab::Email),
@@ -46,9 +49,12 @@ pub fn render(
                 gpui::div()
                     .id(gpui::SharedString::from(label.to_string()))
                     .px_3()
-                    .py_2()
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
                     .rounded_md()
                     .text_size(px(13.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
                     .cursor_pointer()
                     .map(|el| {
                         if active {
@@ -56,7 +62,7 @@ pub fn render(
                         } else {
                             el.bg(rgb(BG_INPUT))
                                 .text_color(rgb(TEXT_MUTED))
-                                .hover(|s| s.bg(rgb(BG_HOVER)).text_color(rgb(TEXT_PRIMARY)))
+                                .hover(|s| s.text_color(rgb(TEXT_PRIMARY)))
                         }
                     })
                     .child(label)
@@ -64,9 +70,11 @@ pub fn render(
                         MouseButton::Left,
                         cx.listener(move |m: &mut AppModel, _, _, cx| {
                             if let Screen::Login(l) = &mut m.screen {
-                                l.tab = this;
-                                l.mfa_ticket = None;
-                                l.error = None;
+                                if l.tab != this {
+                                    l.tab = this;
+                                    l.mfa_ticket = None;
+                                    l.error = None;
+                                }
                             }
                             cx.notify();
                         }),
@@ -125,42 +133,76 @@ pub fn render(
         }))
         .child(
             gpui::div()
+                .id("login-scroll")
+                .overflow_y_scroll()
                 .flex()
                 .flex_col()
-                .gap_4()
-                .w(px(420.))
+                .items_center()
+                .py_8()
                 .child(
                     gpui::div()
                         .flex()
                         .flex_col()
-                        .gap_1()
+                        .gap_4()
+                        .w(px(480.))
+                        // Краб-логотип.
                         .child(
-                            gpui::div()
-                                .text_size(px(24.))
-                                .text_color(rgb(TEXT_PRIMARY))
-                                .child("RustyCord"),
+                            gpui::div().flex().justify_center().child(
+                                gpui::div()
+                                    .p_2()
+                                    .rounded_full()
+                                    .child(gpui::img(crate::assets::logo_image()).size(px(88.))),
+                            ),
                         )
+                        // Заголовок — как в официальном клиенте.
                         .child(
                             gpui::div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .items_center()
+                                .child(
+                                    gpui::div()
+                                        .text_size(px(24.))
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(rgb(TEXT_PRIMARY))
+                                        .child("С возвращением!"),
+                                )
+                                .child(
+                                    gpui::div()
+                                        .text_size(px(14.))
+                                        .text_color(rgb(TEXT_MUTED))
+                                        .child("Как же мы рады видеть тебя снова!"),
+                                ),
+                        )
+                        .child(tabs)
+                        .child(card)
+                        .children(error.map(|e| {
+                            gpui::div()
+                                .id("login-error")
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(0x40282a))
                                 .text_size(px(13.))
-                                .text_color(rgb(TEXT_MUTED))
+                                .line_height(gpui::relative(1.4))
+                                .text_color(rgb(0xf98080))
+                                .child(e)
+                        }))
+                        // Версия — внизу карточки.
+                        .child(
+                            gpui::div()
+                                .flex()
+                                .justify_center()
+                                .pt_2()
+                                .text_size(px(12.))
+                                .text_color(rgb(TEXT_FADED))
                                 .child(format!(
-                                    "нативный клиент (GPUI) · протокол-ядро v{VERSION}"
+                                    "RustyCord GPUI {} · протокол-ядро v{VERSION}",
+                                    env!("CARGO_PKG_VERSION")
                                 )),
                         ),
-                )
-                .child(tabs)
-                .child(card)
-                .children(error.map(|e| {
-                    gpui::div()
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(0x4a_1d_24))
-                        .text_color(rgb(0xf9_7c_81))
-                        .text_size(px(13.))
-                        .child(e)
-                })),
+                ),
         )
 }
 
@@ -172,31 +214,31 @@ fn token_card(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl In
     gpui::div()
         .flex()
         .flex_col()
-        .gap_3()
+        .gap_2()
         .p_4()
-        .rounded_lg()
+        .rounded_xl()
         .bg(rgb(BG_PANEL))
-        .child(
-            gpui::div()
-                .text_size(px(13.))
-                .text_color(rgb(TEXT_MUTED))
-                .child("Токен из веб-клиента (F12 → Network → Authorization) или бот-токен. Сессия живёт до сброса в Discord."),
-        )
+        .child(field_label("Токен пользователя или бота"))
         .child(field(&login.token_input))
         .child(
-            primary_button("Войти", login.busy).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|m: &mut AppModel, _, _, cx| {
-                    let token = match &m.screen {
-                        Screen::Login(l) => l.token_input.read(cx).text(),
-                        _ => String::new(),
-                    };
-                    if !token.trim().is_empty() {
-                        crate::actions::connect_token(m, token.trim().to_string(), cx);
-                    }
-                }),
-            ),
+            gpui::div()
+                .text_size(px(12.))
+                .line_height(gpui::relative(1.5))
+                .text_color(rgb(TEXT_FADED))
+                .child("Веб-клиент: F12 → Network → заголовок Authorization. Сессия живёт до сброса в Discord."),
         )
+        .child(primary_button("Войти", login.busy).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|m: &mut AppModel, _, _, cx| {
+                let token = match &m.screen {
+                    Screen::Login(l) => l.token_input.read(cx).text(),
+                    _ => String::new(),
+                };
+                if !token.trim().is_empty() {
+                    crate::actions::connect_token(m, token.trim().to_string(), cx);
+                }
+            }),
+        ))
 }
 
 fn email_card(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl IntoElement {
@@ -207,24 +249,26 @@ fn email_card(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl In
     gpui::div()
         .flex()
         .flex_col()
-        .gap_3()
+        .gap_2()
         .p_4()
-        .rounded_lg()
+        .rounded_xl()
         .bg(rgb(BG_PANEL))
+        .child(field_label("Электронная почта или номер телефона"))
         .child(field(&login.email_input))
+        .child(field_label("Пароль"))
         .child(field(&login.pass_input))
-        .child(primary_button("Войти", login.busy).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|_m: &mut AppModel, _, _, cx| {
-                crate::actions::login_email(_m, cx);
-            }),
-        ))
         .child(
             gpui::div()
                 .text_size(px(12.))
                 .text_color(rgb(TEXT_FADED))
                 .child("При капче/2FA откроется окно подтверждения discord.com."),
         )
+        .child(primary_button("Войти", login.busy).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_m: &mut AppModel, _, _, cx| {
+                crate::actions::login_email(_m, cx);
+            }),
+        ))
 }
 
 fn mfa_card(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl IntoElement {
@@ -235,16 +279,18 @@ fn mfa_card(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl Into
     gpui::div()
         .flex()
         .flex_col()
-        .gap_3()
+        .gap_2()
         .p_4()
-        .rounded_lg()
+        .rounded_xl()
         .bg(rgb(BG_PANEL))
         .child(
             gpui::div()
-                .text_size(px(14.))
+                .text_size(px(16.))
+                .font_weight(gpui::FontWeight::BOLD)
                 .text_color(rgb(TEXT_PRIMARY))
                 .child("Двухфакторная аутентификация"),
         )
+        .child(field_label("Код из приложения"))
         .child(field(&login.mfa_input))
         .child(primary_button("Подтвердить", login.busy).on_mouse_down(
             MouseButton::Left,
@@ -272,9 +318,15 @@ fn qr_card(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl IntoE
             .py_6()
             .child(
                 gpui::div()
-                    .text_size(px(13.))
+                    .text_size(px(14.))
+                    .text_color(rgb(TEXT_PRIMARY))
+                    .child("Отсканируй QR-код телефоном"),
+            )
+            .child(
+                gpui::div()
+                    .text_size(px(12.))
                     .text_color(rgb(TEXT_MUTED))
-                    .child("Отсканируй QR телефоном в приложении Discord:"),
+                    .child("Discord на телефоне: Настройки → Сканировать QR-код"),
             )
             .child(primary_button("Показать QR-код", false).on_mouse_down(
                 MouseButton::Left,
@@ -295,8 +347,8 @@ fn qr_card(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl IntoE
             )
             .into_any_element(),
         QrStage::Matrix { modules, width, .. } => {
-            // Сетка модулей: 8px на модуль, белая подложка = quiet zone.
-            let cell = px(8.);
+            // QR-матрица модулями; логотип-краб в центре (как значок Discord).
+            let cell = px(6.);
             let mut grid = gpui::div().flex().flex_col();
             for y in 0..*width {
                 let mut row = gpui::div().flex();
@@ -318,12 +370,38 @@ fn qr_card(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl IntoE
                 .gap_3()
                 .items_center()
                 .py_2()
-                .child(gpui::div().p_2().rounded_md().bg(gpui::white()).child(grid))
+                .child(
+                    // relative-контейнер: QR + логотип поверх (inset_0 + центр).
+                    gpui::div()
+                        .relative()
+                        .p_3()
+                        .rounded_lg()
+                        .bg(gpui::white())
+                        .child(grid)
+                        .child(
+                            gpui::div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    gpui::div()
+                                        .id("qr-logo")
+                                        .p_1()
+                                        .rounded_md()
+                                        .bg(gpui::white())
+                                        .child(
+                                            gpui::img(crate::assets::logo_image()).size(px(40.)),
+                                        ),
+                                ),
+                        ),
+                )
                 .child(
                     gpui::div()
                         .text_size(px(12.))
                         .text_color(rgb(TEXT_FADED))
-                        .child("Настройки → Сканировать QR-код"),
+                        .child("Подтверди вход на телефоне"),
                 )
                 .child(
                     gpui::div()
@@ -370,7 +448,7 @@ fn qr_card(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl IntoE
             .child(
                 gpui::div()
                     .text_size(px(13.))
-                    .text_color(rgb(0xf9_7c_81))
+                    .text_color(rgb(0xf98080))
                     .child(msg.clone()),
             )
             .child(primary_button("Повторить", false).on_mouse_down(
@@ -384,7 +462,7 @@ fn qr_card(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl IntoE
 
     gpui::div()
         .p_4()
-        .rounded_lg()
+        .rounded_xl()
         .bg(rgb(BG_PANEL))
         .flex()
         .flex_col()
@@ -392,10 +470,21 @@ fn qr_card(model: &mut AppModel, cx: &mut gpui::Context<AppModel>) -> impl IntoE
         .child(body)
 }
 
+fn field_label(text: &str) -> impl IntoElement {
+    gpui::div()
+        .pt_1()
+        .text_size(px(12.))
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(rgb(TEXT_PRIMARY))
+        .child(text.to_string())
+}
+
 fn field(input: &gpui::Entity<TextInput>) -> impl IntoElement {
     gpui::div()
         .px_3()
-        .py_2()
+        .h(px(40.))
+        .flex()
+        .items_center()
         .rounded_md()
         .bg(rgb(BG_INPUT))
         .child(input.clone())
@@ -405,17 +494,20 @@ fn primary_button(label: &str, busy: bool) -> gpui::Stateful<gpui::Div> {
     gpui::div()
         .id(gpui::SharedString::from(label.to_string()))
         .flex()
-        .h(px(36.))
+        .h(px(40.))
+        .mt_1()
         .items_center()
         .justify_center()
         .rounded_md()
         .bg(rgb(BLURPLE))
         .text_color(gpui::white())
         .text_size(px(14.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
         .cursor_pointer()
+        .hover(|s| s.bg(rgb(0x4752c4)))
         .map(|el| if busy { el.opacity(0.6) } else { el })
         .child(if busy {
-            "Подождите…".to_string()
+            "Входим…".to_string()
         } else {
             label.to_string()
         })

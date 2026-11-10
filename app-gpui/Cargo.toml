@@ -1,6 +1,6 @@
 [package]
 name = "rustycord-gpui"
-version = "0.12.0"
+version = "0.12.1"
 description = "RustyCord GPUI — нативный Discord-клиент на GPUI (Zed) поверх протокольного ядра rustycord-core (основной клиент; Tauri-версия — legacy)"
 edition = "2021"
 rust-version = "1.82"
@@ -52,3 +52,23 @@ winit = { version = "0.30", optional = true, features = ["rwh_06"] }
 # Файловый диалог для вложений: Windows/macOS — нативный, Linux —
 # xdg-desktop-portal (не тянет gtk в headless-сборку CI).
 rfd = { version = "0.18", optional = true, default-features = false, features = ["xdg-portal"] }
+# Логотип-краб: декод PNG для трей-иконки (краб кусает Вампуса).
+# gpui тянет image 0.25 внутри себя для img() — здесь только png-фронтенд.
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Трей в панели задач (меню «Открыть/Выход»). На Linux — D-Bus StatusNotifier
+# (ksni, без GTK), Windows — Shell_NotifyIcon, macOS — NSStatusItem.
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# gpui использует windows 0.61 — берём ту же версию для ShowWindow/консоли.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Console",
+] }
+# HWND спрятанного окна (gpui Window: HasWindowHandle).
+raw-window-handle = "0.6"
+
+[build-dependencies]
+# Вшить иконку в .exe (проводник/панель задач + класс окна gpui LoadImageW(1)).
+winresource = "0.1"
