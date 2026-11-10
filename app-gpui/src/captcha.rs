@@ -422,7 +422,19 @@ mod solver {
             anyhow::Result<winit::event_loop::EventLoopProxy<WinMsg>>,
         >,
     ) {
-        let event_loop = match winit::event_loop::EventLoop::<WinMsg>::with_user_event().build() {
+        // Windows: EventLoop создаётся в отдельном потоке (не главный) —
+        // требуется явный any_thread() для кросс-платформенной совместимости.
+        #[cfg(target_os = "windows")]
+        let event_loop = {
+            use winit::platform::windows::EventLoopBuilderExtWindows;
+            winit::event_loop::EventLoop::<WinMsg>::with_user_event()
+                .with_any_thread(true)
+                .build()
+        };
+        #[cfg(not(target_os = "windows"))]
+        let event_loop = winit::event_loop::EventLoop::<WinMsg>::with_user_event().build();
+
+        let event_loop = match event_loop {
             Ok(el) => el,
             Err(e) => {
                 let _ = ready_tx.send(Err(anyhow::anyhow!("event loop: {e}")));
