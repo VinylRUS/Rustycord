@@ -439,7 +439,6 @@ pub struct VoiceSessionHandle {
     pub controls: Arc<Mutex<VoiceControls>>,
     pub driver: Option<Arc<Mutex<songbird::Driver>>>,
     /// Роль песни «микрофон»: держим, чтобы трек не завершался сам.
-    #[allow(dead_code)]
     pub mic_track: Option<songbird::tracks::TrackHandle>,
     /// Локальный тест микрофона (voice_loopback): захват → свои динамики
     /// без Discord. Флаг читает InTap (devices.rs) в cpal-колбеке ввода.

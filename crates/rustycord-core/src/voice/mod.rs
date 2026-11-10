@@ -39,7 +39,6 @@ pub mod devices;
 pub struct VoiceControls {
     /// Пишется эхом op4; сам мьют микрофона применяется в songbird
     /// (events.rs: driver.mute), поэтому поле только хранит состояние.
-    #[allow(dead_code)]
     pub self_mute: bool,
     /// Читается выводом (devices.rs) только в полной сборке с `audio`.
     #[cfg_attr(not(feature = "audio"), allow(dead_code))]

@@ -17,7 +17,6 @@ use crate::theme::*;
 
 /* ---------------------------- Снапшоты ---------------------------- */
 
-#[allow(dead_code)]
 struct UiGuild {
     id: String,
     name: String,

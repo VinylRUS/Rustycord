@@ -91,7 +91,6 @@ pub enum LoginTab {
 }
 
 /// Стадии QR-логина (события discord://qr).
-#[allow(dead_code)]
 pub enum QrStage {
     Idle,
     Connecting,
@@ -257,7 +256,6 @@ pub struct AppModel {
     /// Локальная конфигурация (токен сессии, dev-режим) — персистентная.
     pub config: crate::config::Config,
     /// Мигание курсора (тикер подключим в следующей итерации).
-    #[allow(dead_code)]
     pub blink_on: bool,
     /// Скролл ленты чата (автоскролл вниз при новых сообщениях).
     pub chat_scroll: gpui::ScrollHandle,
