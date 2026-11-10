@@ -52,7 +52,7 @@ pub fn config_dir() -> PathBuf {
         let base = std::env::var("XDG_CONFIG_HOME")
             .ok()
             .filter(|v| !v.is_empty())
-            .unwrap_or_else(|_| {
+            .unwrap_or_else(|| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
                 home + "/.config"
             });
