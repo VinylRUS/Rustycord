@@ -8,9 +8,11 @@
 
 // Windows: без консоли при двойном клике. Консоль появляется только
 // в dev-режиме (AllocConsole на старте) или при запуске из терминала.
+// Значение именно "windows" (= подсистема GUI): rustc 1.99 валидирует
+// ввод и разрешает только "console" | "windows" — «gui» даёт E0539.
 #![cfg_attr(
     all(target_os = "windows", not(debug_assertions)),
-    windows_subsystem = "gui"
+    windows_subsystem = "windows"
 )]
 
 mod actions;
